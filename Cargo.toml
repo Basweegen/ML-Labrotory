@@ -1,0 +1,52 @@
+[package]
+name = "ai-dashboard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+# GUI
+eframe = "0.36"
+egui = "0.36"
+egui_plot = "0.37.0"
+egui_code_editor = { version = "0.4", features = ["editor", "egui"] }
+syntect = "5.1"
+
+# Ollama REST API
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI subprocess
+tokio-util = { version = "0.7", features = ["codec"] }
+which = "8.0"
+futures = "0.3"
+futures-util = "0.3"
+
+# Local storage
+sled = "0.34"
+bincode = "1.3"
+dirs = "5.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Diff
+similar = "2.3"
+
+# Neural Network
+ndarray = "0.16"
+rand = "0.8"
+
+# Utils
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+
+# Profile & optimization
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
