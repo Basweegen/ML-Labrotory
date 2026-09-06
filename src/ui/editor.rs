@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui_code_editor::{CodeEditor, Syntax};
-use crate::ollama::api::{OllamaClient, ChatRequest, Message};
+use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient};
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
 
@@ -9,6 +9,8 @@ pub struct EditorPanel {
     language: String,
     suggestion_id: usize,
     pending_suggestion: Option<String>,
+    file_path: String,
+    file_status: String,
 }
 
 impl EditorPanel {
@@ -18,6 +20,8 @@ impl EditorPanel {
             language: "rust".to_string(),
             suggestion_id: 0,
             pending_suggestion: None,
+            file_path: Self::default_path(),
+            file_status: String::new(),
         }
     }
 
@@ -26,6 +30,7 @@ impl EditorPanel {
         ui: &mut egui::Ui,
         models: &[crate::ollama::api::Model],
         selected_model: &Option<String>,
+        system_prompt: &str,
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
@@ -65,10 +70,64 @@ impl EditorPanel {
 
         ui.add_space(12.0);
 
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("File:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.file_path)
+                    .desired_width(300.0)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("path/to/main.py"),
+            );
+            ui.add_space(8.0);
+            if ui
+                .button(egui::RichText::new("Save").size(13.0))
+                .on_hover_text("Write the editor to this file (folders created as needed)")
+                .clicked()
+            {
+                self.save_to_file();
+            }
+            if ui
+                .button(egui::RichText::new("Open").size(13.0))
+                .on_hover_text("Load this file into the editor")
+                .clicked()
+            {
+                self.open_from_file();
+            }
+        });
+        if !self.file_status.is_empty() {
+            ui.label(
+                egui::RichText::new(&self.file_status)
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+            );
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("New:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            if ui.button("Rust app").clicked() {
+                self.apply_template("rust");
+            }
+            if ui.button("Python app").clicked() {
+                self.apply_template("python");
+            }
+            if ui.button("Shell script").clicked() {
+                self.apply_template("shell");
+            }
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(self.run_hint())
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+            );
+        });
+        ui.add_space(8.0);
+
         let syntax = Self::syntax_for_language(&self.language);
         let mut editor = CodeEditor::default()
             .id_source("code_editor")
-            .with_rows(30)
+            .with_rows(24)
             .with_fontsize(14.0);
 
         let _response = editor.show(ui, &mut self.code, &syntax);
@@ -90,7 +149,7 @@ impl EditorPanel {
                     .corner_radius(egui::CornerRadius::same(6))
             );
             if explain_btn.clicked() {
-                self.request_ai_help("Explain this code in detail:", models, selected_model, api_client, tx, rt);
+                self.request_ai_help("Explain this code in detail:", models, selected_model, system_prompt, api_client, tx, rt);
             }
 
             ui.add_space(8.0);
@@ -100,7 +159,7 @@ impl EditorPanel {
                     .corner_radius(egui::CornerRadius::same(6))
             );
             if improve_btn.clicked() {
-                self.request_ai_help("Improve this code (add comments, fix bugs, optimize):", models, selected_model, api_client, tx, rt);
+                self.request_ai_help("Improve this code (add comments, fix bugs, optimize):", models, selected_model, system_prompt, api_client, tx, rt);
             }
 
             ui.add_space(8.0);
@@ -110,7 +169,7 @@ impl EditorPanel {
                     .corner_radius(egui::CornerRadius::same(6))
             );
             if complete_btn.clicked() {
-                self.request_ai_help("Complete this code snippet:", models, selected_model, api_client, tx, rt);
+                self.request_ai_help("Complete this code snippet:", models, selected_model, system_prompt, api_client, tx, rt);
             }
         });
 
@@ -171,6 +230,7 @@ impl EditorPanel {
         prompt_prefix: &str,
         _models: &[crate::ollama::api::Model],
         selected_model: &Option<String>,
+        system_prompt: &str,
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
@@ -184,22 +244,127 @@ impl EditorPanel {
         let tx = tx.clone();
         let suggestion_id = self.suggestion_id;
         self.suggestion_id += 1;
+        let system_prompt = system_prompt.to_string();
 
         rt.spawn(async move {
+            let mut messages = Vec::new();
+            if !system_prompt.trim().is_empty() {
+                messages.push(Message {
+                    role: "system".to_string(),
+                    content: system_prompt,
+                });
+            }
+            messages.push(Message {
+                role: "user".to_string(),
+                content: full_prompt,
+            });
             let req = ChatRequest {
                 model: model_name,
-                messages: vec![Message {
-                    role: "user".to_string(),
-                    content: full_prompt,
-                }],
+                messages,
                 stream: false,
-                options: None,
+                options: Some(ChatOptions::lowram()),
                 keep_alive: Some("10m".to_string()),
             };
 
             let result = client.chat(req).await;
             let _ = tx.send(crate::ui::app::AppMessage::EditorSuggestion(suggestion_id, result));
         });
+    }
+
+    /// Code arriving from chat: adopt it and guess its language.
+    pub fn set_code_from_chat(&mut self, code: String, lang: String) {
+        let l = lang.to_lowercase();
+        let mapped = match l.as_str() {
+            "py" => "python",
+            "js" => "javascript",
+            "ts" => "typescript",
+            "sh" | "bash" => "shell",
+            "c++" => "cpp",
+            _ => l.as_str(),
+        };
+        if ["rust", "python", "javascript", "typescript", "go", "c", "cpp", "java", "sql", "shell", "lua", "asm"]
+            .contains(&mapped)
+        {
+            self.language = mapped.to_string();
+        }
+        self.code = code;
+        self.file_status = "Code from chat — pick a file path and Save.".to_string();
+    }
+
+    fn default_path() -> String {
+        let base = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        base.join("Documents")
+            .join("Code_air")
+            .join("ml_app")
+            .join("main.py")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn save_to_file(&mut self) {
+        let path = std::path::PathBuf::from(self.file_path.trim());
+        if path.as_os_str().is_empty() {
+            self.file_status = "Pick a file path first.".to_string();
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    self.file_status = format!("Can't create folder: {}", e);
+                    return;
+                }
+            }
+        }
+        match std::fs::write(&path, &self.code) {
+            Ok(()) => {
+                self.file_status = format!("Saved {} bytes to {}", self.code.len(), path.display());
+            }
+            Err(e) => self.file_status = format!("Save failed: {}", e),
+        }
+    }
+
+    fn open_from_file(&mut self) {
+        let path = self.file_path.trim().to_string();
+        if path.is_empty() {
+            self.file_status = "Pick a file path first.".to_string();
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.code = text;
+                self.file_status = format!("Opened {} ({} bytes)", path, self.code.len());
+            }
+            Err(e) => self.file_status = format!("Open failed: {}", e),
+        }
+    }
+
+    fn apply_template(&mut self, kind: &str) {
+        match kind {
+            "rust" => {
+                self.language = "rust".to_string();
+                self.code = "// New Rust app\n// Run: rustc main.rs -o app && ./app\n\nfn main() {\n    println!(\"Hello from ML Lab\");\n}\n".to_string();
+            }
+            "python" => {
+                self.language = "python".to_string();
+                self.code = "# New Python app\n# Run: python3 main.py\n\ndef main():\n    print(\"Hello from ML Lab\")\n\n\nif __name__ == \"__main__\":\n    main()\n".to_string();
+            }
+            "shell" => {
+                self.language = "shell".to_string();
+                self.code = "#!/bin/sh\n# New shell script\n# Run: sh script.sh\n\necho \"Hello from ML Lab\"\n".to_string();
+            }
+            _ => {}
+        }
+        self.file_status = format!("{} template loaded — Save to keep it.", kind);
+    }
+
+    fn run_hint(&self) -> &str {
+        match self.language.as_str() {
+            "rust" => "Run: rustc <file> -o app && ./app",
+            "python" => "Run: python3 <file>",
+            "shell" => "Run: sh <file>",
+            "javascript" => "Run: node <file>",
+            _ => "Run with your toolchain",
+        }
     }
 
     pub fn handle_ai_suggestion(&mut self, suggestion_id: usize, response: Result<crate::ollama::api::ChatResponse, anyhow::Error>) {

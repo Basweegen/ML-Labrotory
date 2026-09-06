@@ -69,6 +69,23 @@ pub struct ChatOptions {
     pub top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_predict: Option<i32>,
+    /// Max context window. Small = less RAM + faster on old machines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u32>,
+}
+
+impl ChatOptions {
+    /// Bounds for old / small-RAM hardware: short context, capped output.
+    /// Keeps 1-4B models responsive instead of swapping.
+    pub fn lowram() -> Self {
+        Self {
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            num_predict: Some(1024),
+            num_ctx: Some(2048),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

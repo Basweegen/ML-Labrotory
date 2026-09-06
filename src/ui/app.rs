@@ -21,6 +21,8 @@ use crate::ui::settings::SettingsPanel;
 pub enum AppMessage {
     ChatResponse(usize, Result<ChatResponse>),
     EditorSuggestion(usize, Result<ChatResponse>),
+    /// Code handed from a chat bubble to the Editor tab (code, lang tag).
+    ChatToEditor(String, String),
     ModelsLoaded(Result<Vec<Model>>),
     RefreshModels,
     ModelSelected(String),
@@ -344,6 +346,11 @@ impl AiDashboardApp {
                 }
                 AppMessage::EditorSuggestion(id, res) => {
                     self.editor.handle_ai_suggestion(id, res);
+                }
+                AppMessage::ChatToEditor(code, lang) => {
+                    self.editor.set_code_from_chat(code, lang);
+                    self.tab = Tab::Editor;
+                    self.status = "Code moved to Editor — pick a file and Save".to_string();
                 }
                 AppMessage::ModelsLoaded(res) => {
                     self.models_loading = false;
@@ -900,10 +907,28 @@ impl eframe::App for AiDashboardApp {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
                     let model = self.slots.get(f).and_then(|s| s.model.clone());
                     let models = self.models.clone();
+                    let editor_system = {
+                        let mut parts: Vec<String> = Vec::new();
+                        if !self.settings.persona.trim().is_empty() {
+                            parts.push(self.settings.persona.trim().to_string());
+                        }
+                        if !self.settings.memory.trim().is_empty() {
+                            parts.push(format!(
+                                "Remembered facts:\n{}",
+                                self.settings.memory.trim()
+                            ));
+                        }
+                        parts.push(
+                            "You are an expert software engineer. Answer with correct, idiomatic code and brief explanations."
+                                .to_string(),
+                        );
+                        parts.join("\n\n")
+                    };
                     self.editor.show(
                         ui,
                         &models,
                         &model,
+                        &editor_system,
                         &self.api_client,
                         &self.tx,
                         &self.rt,

@@ -1,6 +1,6 @@
 use eframe::egui;
 use anyhow::Result;
-use crate::ollama::api::{ChatRequest, Message, OllamaClient, ChatResponse};
+use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
 use crate::storage::ChatMessage;
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
@@ -90,9 +90,24 @@ impl ChatPanel {
                         );
                     });
                 }
-                for i in 0..self.messages.len() {
+                let total = self.messages.len();
+                if total > 100 {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Showing last 100 of {} messages (older kept for the model, hidden for speed).",
+                                total
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                }
+                let start = total.saturating_sub(100);
+                for i in start..total {
                     let msg = self.messages[i].clone();
-                    self.show_message(ui, &msg);
+                    self.show_message(ui, &msg, tx);
                 }
                 if self.is_streaming {
                     ui.horizontal(|ui| {
@@ -203,7 +218,33 @@ impl ChatPanel {
         ui.add_space(8.0);
     }
 
-    fn show_message(&self, ui: &mut egui::Ui, msg: &ChatMessage) {
+    /// Split ```fences into (lang, code) blocks.
+    fn code_blocks(content: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut rest = content;
+        while let Some(s) = rest.find("```") {
+            let after = &rest[s + 3..];
+            let (lang, code_start) = match after.find('\n') {
+                Some(i) => (after[..i].trim().to_string(), &after[i + 1..]),
+                None => (String::new(), after),
+            };
+            match code_start.find("```") {
+                Some(e) => {
+                    out.push((lang, code_start[..e].trim_matches('\n').to_string()));
+                    rest = &code_start[e + 3..];
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    fn show_message(
+        &self,
+        ui: &mut egui::Ui,
+        msg: &ChatMessage,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+    ) {
         let is_user = msg.role == "user";
         let (bg_color, align) = if is_user {
             (egui::Color32::from_rgb(0x00, 0x44, 0x88), egui::Align::RIGHT)
@@ -212,6 +253,14 @@ impl ChatPanel {
         } else {
             (egui::Color32::from_rgb(0x2d, 0x2d, 0x2d), egui::Align::LEFT)
         };
+        let who = if is_user {
+            "You"
+        } else if msg.role == "system" {
+            "System"
+        } else {
+            "Assistant"
+        };
+        let blocks = Self::code_blocks(&msg.content);
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
             egui::Frame::NONE
@@ -225,12 +274,86 @@ impl ChatPanel {
                                 .size(11.0)
                                 .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                         );
+                        ui.label(
+                            egui::RichText::new(who)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+                        );
                     });
-                    ui.label(
-                        egui::RichText::new(&msg.content)
-                            .size(13.0)
-                            .color(egui::Color32::WHITE),
-                    );
+                    if blocks.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&msg.content)
+                                .size(13.0)
+                                .color(egui::Color32::WHITE),
+                        );
+                    } else {
+                        let mut rest = msg.content.as_str();
+                        let mut bi = 0usize;
+                        while let Some(s) = rest.find("```") {
+                            let before = rest[..s].trim();
+                            if !before.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(before)
+                                        .size(13.0)
+                                        .color(egui::Color32::WHITE),
+                                );
+                            }
+                            if bi < blocks.len() {
+                                let (lang, code) = &blocks[bi];
+                                if !lang.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(lang.clone())
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+                                    );
+                                }
+                                egui::ScrollArea::horizontal().show(ui, |ui| {
+                                    ui.code(code.clone());
+                                });
+                                bi += 1;
+                            }
+                            let after = &rest[s + 3..];
+                            match after.find("```") {
+                                Some(e) => rest = &after[e + 3..],
+                                None => {
+                                    rest = "";
+                                    break;
+                                }
+                            }
+                        }
+                        let tail = rest.trim();
+                        if !tail.is_empty() {
+                            ui.label(
+                                egui::RichText::new(tail)
+                                    .size(13.0)
+                                    .color(egui::Color32::WHITE),
+                            );
+                        }
+                    }
+                    if !is_user && msg.role == "assistant" && !blocks.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy code").clicked() {
+                                if let Some((_, code)) = blocks.iter().max_by_key(|(_, c)| c.len()) {
+                                    ui.ctx().copy_text(code.clone());
+                                }
+                            }
+                            if ui
+                                .small_button("Send to Editor")
+                                .on_hover_text("Open the biggest code block in the Editor tab")
+                                .clicked()
+                            {
+                                if let Some((lang, code)) =
+                                    blocks.iter().max_by_key(|(_, c)| c.len())
+                                {
+                                    let _ = tx.send(crate::ui::app::AppMessage::ChatToEditor(
+                                        code.clone(),
+                                        lang.clone(),
+                                    ));
+                                }
+                            }
+                        });
+                    }
                 });
         });
         ui.add_space(4.0);
@@ -297,7 +420,7 @@ impl ChatPanel {
                 model: model_name,
                 messages,
                 stream: false,
-                options: None,
+                options: Some(ChatOptions::lowram()),
                 keep_alive: Some("10m".to_string()),
             };
 
