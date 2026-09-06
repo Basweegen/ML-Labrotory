@@ -43,6 +43,11 @@ pub struct AppSettings {
     pub voice_enabled: bool,
     pub tts_voice: String,
     pub stt_model: String,
+    /// Global identity every model speaks as. Prepended to each slot's role.
+    /// Same persona no matter which model is loaded.
+    pub persona: String,
+    /// Long-term facts the assistant remembers across models and restarts.
+    pub memory: String,
 }
 
 impl Default for AppSettings {
@@ -54,6 +59,8 @@ impl Default for AppSettings {
             voice_enabled: false,
             tts_voice: "en_US-lessac-medium".to_string(),
             stt_model: "ggml-base.en.bin".to_string(),
+            persona: "You are ML Lab, a calm and direct assistant. Be concise, plain-spoken, and practical. Never mention model names unless asked.".to_string(),
+            memory: String::new(),
         }
     }
 }
@@ -123,8 +130,10 @@ impl Storage {
 
     pub fn load_settings(&self) -> Result<AppSettings> {
         if let Some(value) = self.config_tree.get("settings")? {
-            let settings: AppSettings = bincode::deserialize(&value)?;
-            Ok(settings)
+            match bincode::deserialize::<AppSettings>(&value) {
+                Ok(settings) => Ok(settings),
+                Err(_) => Ok(AppSettings::default()),
+            }
         } else {
             Ok(AppSettings::default())
         }

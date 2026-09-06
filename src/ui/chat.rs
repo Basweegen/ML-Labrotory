@@ -110,34 +110,11 @@ impl ChatPanel {
         ui.separator();
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            // Reserve a fixed column for Send/Stop: an INFINITY-width text
-            // field starves its horizontal siblings, hiding the buttons.
-            let input_w = (ui.available_width() - 118.0).max(140.0);
-            static FRM2: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let frm2 = FRM2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut self.input)
-                    .desired_rows(3)
-                    .desired_width(input_w)
-                    .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
-                    .font(egui::TextStyle::Body),
-            );
-
-            // Enter sends while the field has focus (multiline keeps focus on
-            // Enter, so lost_focus() never fires for it). Shift+Enter = newline.
-            let send_triggered = ui.input(|i| {
-                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
-            }) && response.has_focus()
-                && !self.input.trim().is_empty()
-                && !self.is_streaming;
-            if send_triggered {
-                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
-            }
-
-            ui.add_space(8.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Send column FIRST (right side): never pushed off-screen when
+            // the window is narrow or the zoom is large. The text field
+            // below takes whatever width remains.
             ui.vertical(|ui| {
-                ui.set_min_width(112.0);
                 let need_model = selected_model.is_none();
                 let need_link = api_client.is_none();
                 let send_enabled = !self.input.trim().is_empty()
@@ -167,10 +144,6 @@ impl ChatPanel {
                         .corner_radius(egui::CornerRadius::same(6))
                         .min_size(egui::vec2(112.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
-                if frm2 == 150 {
-                    eprintln!("GEO frame=150 list_h={:.0} row_avail={:.0}x{:.0} send_rect={:?} label={:?} model={:?} n_models={}",
-                        list_h, ui.available_width(), ui.available_height(), send_btn.rect, label, selected_model, _models.len());
-                }
                 if send_btn.clicked() {
                     eprintln!("SEND clicked slot={} model={:?}", slot_idx, selected_model);
                     self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
@@ -188,6 +161,26 @@ impl ChatPanel {
                     }
                 }
             });
+            ui.add_space(8.0);
+            let input_w = ui.available_width().max(80.0);
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.input)
+                    .desired_rows(3)
+                    .desired_width(input_w)
+                    .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
+                    .font(egui::TextStyle::Body),
+            );
+
+            // Enter sends while the field has focus (multiline keeps focus on
+            // Enter, so lost_focus() never fires for it). Shift+Enter = newline.
+            let send_triggered = ui.input(|i| {
+                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+            }) && response.has_focus()
+                && !self.input.trim().is_empty()
+                && !self.is_streaming;
+            if send_triggered {
+                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+            }
         });
         ui.add_space(4.0);
         // Status line: always shows what this chat needs to work.
@@ -274,8 +267,12 @@ impl ChatPanel {
         let client = client.clone();
         let tx = tx.clone();
 
+        // Keep continuity: resend recent turns so the model sees persona +
+        // memory (in role_prompt) AND the conversation so far.
+        let history: Vec<(String, String)> = self.messages.iter().rev().take(20).rev()
+            .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
-        eprintln!("SEND start slot={} model={} prompt_chars={}", slot_idx, model_name, prompt.len());
+        eprintln!("SEND start slot={} model={} prompt_chars={} hist={}", slot_idx, model_name, prompt.len(), history.len());
 
         let role_prompt = role_prompt.to_string();
         rt.spawn(async move {
@@ -285,6 +282,12 @@ impl ChatPanel {
                     role: "system".to_string(),
                     content: role_prompt,
                 });
+            }
+            for (role, content) in history {
+                // Only user/assistant turns; skip old error lines.
+                if role == "user" || role == "assistant" {
+                    messages.push(Message { role, content });
+                }
             }
             messages.push(Message {
                 role: "user".to_string(),

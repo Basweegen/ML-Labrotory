@@ -109,6 +109,48 @@ impl SettingsPanel {
         ui.separator();
         ui.add_space(12.0);
 
+        // Persona section: one identity shared by every model/slot.
+        ui.label(egui::RichText::new("Persona (same for every model)").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Who the assistant is, no matter which model is loaded. Saved across restarts.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.add_space(4.0);
+        {
+            let mut persona = settings.persona.clone();
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut persona)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("e.g. You are ML Lab, calm and direct..."),
+            );
+            if resp.changed() {
+                settings.persona = persona;
+            }
+        }
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // Memory section: long-term facts injected into every chat.
+        ui.label(egui::RichText::new("Memory (facts kept across models + restarts)").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Names, preferences, project facts. Sent to every model with each message.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.add_space(4.0);
+        {
+            let mut mem = settings.memory.clone();
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut mem)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("e.g. User is Daddy. MacBook Air 2017, 8GB RAM. Project: ml_lab..."),
+            );
+            if resp.changed() {
+                settings.memory = mem;
+            }
+        }
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
         // Save settings button
         ui.horizontal(|ui| {
             if ui.button(egui::RichText::new("💾 Save Settings").size(13.0)).clicked() {

@@ -782,9 +782,20 @@ impl AiDashboardApp {
         ui.separator();
         ui.add_space(8.0);
 
-        // Focused slot chat.
+        // Focused slot chat. One shared identity for every model:
+        // persona (who I am) + memory (what I remember) + slot role (job).
         let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
-        let role_prompt = self.slots[f].role_prompt();
+        let role_prompt = {
+            let mut parts: Vec<String> = Vec::new();
+            if !self.settings.persona.trim().is_empty() {
+                parts.push(self.settings.persona.trim().to_string());
+            }
+            if !self.settings.memory.trim().is_empty() {
+                parts.push(format!("Remembered facts:\n{}", self.settings.memory.trim()));
+            }
+            parts.push(self.slots[f].role_prompt());
+            parts.join("\n\n")
+        };
         let slot_model = self.slots[f].model.clone();
         let slot_role = self.slots[f].role.label();
         ui.horizontal(|ui| {
@@ -822,6 +833,11 @@ impl eframe::App for AiDashboardApp {
         let zoom = (self.settings.font_size / 14.0).clamp(0.5, 1.75);
         if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
             ui.ctx().set_zoom_factor(zoom);
+        }
+        static ZL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if ZL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 200 {
+            eprintln!("GEO2 zoom={:.2} central={:.0}x{:.0} font={:.0}",
+                ui.ctx().zoom_factor(), ui.available_width(), ui.available_height(), self.settings.font_size);
         }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
         if self.settings.theme != self.last_theme {
