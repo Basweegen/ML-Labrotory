@@ -26,7 +26,8 @@ impl From<Array2<f32>> for SerializableArray2 {
 
 impl From<SerializableArray2> for Array2<f32> {
     fn from(s: SerializableArray2) -> Self {
-        Array2::from_shape_vec((s.rows, s.cols), s.data).unwrap()
+        Array2::from_shape_vec((s.rows, s.cols), s.data)
+            .unwrap_or_else(|_| Array2::zeros((s.rows, s.cols)))
     }
 }
 
@@ -147,7 +148,7 @@ impl ModelProfileNetwork {
         let output = self.forward(context);
         output.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0)
     }

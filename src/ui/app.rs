@@ -9,7 +9,7 @@ use crate::neural::ModelProfileNetwork;
 use crate::ollama::api::{ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
-use crate::storage::{AppSettings, Storage};
+use crate::storage::{AppSettings, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
@@ -22,6 +22,7 @@ pub enum AppMessage {
     ChatResponse(usize, Result<ChatResponse>),
     EditorSuggestion(usize, Result<ChatResponse>),
     ModelsLoaded(Result<Vec<Model>>),
+    RefreshModels,
     ModelSelected(String),
     ModelPulled(Result<String>),
     ModelDeleted(Result<String>),
@@ -161,6 +162,7 @@ pub struct AiDashboardApp {
     api_client: Option<OllamaClient>,
     cli_client: Option<OllamaCli>,
     last_ollama_url: String,
+    last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
     status: String,
@@ -202,6 +204,7 @@ impl AiDashboardApp {
             api_client,
             cli_client,
             last_ollama_url: settings.ollama_url.clone(),
+            last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
             status: "Ready".to_string(),
@@ -269,6 +272,7 @@ impl AiDashboardApp {
         let others = self.current_sizes(Some(idx));
         match ResourceGuard::can_fit(&self.mem, &others, new_size) {
             Ok(()) => {
+                eprintln!("AUTOFILL slot={} model={}", idx + 1, name);
                 if let Some(slot) = self.slots.get_mut(idx) {
                     slot.model = Some(name.clone());
                 }
@@ -347,6 +351,30 @@ impl AiDashboardApp {
                         Ok(m) => {
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
+                            // Auto-fill empty slots with the smallest models
+                            // that fit, so Chat works immediately (Send
+                            // enables as soon as a slot has a model).
+                            if self.slots.iter().any(|s| s.model.is_none()) {
+                                let mut by_size = self.models.clone();
+                                by_size.sort_by_key(|m| m.size);
+                                for i in 0..self.slots.len() {
+                                    if self.slots[i].model.is_some() {
+                                        continue;
+                                    }
+                                    for cand in &by_size {
+                                        let known = self.known_sizes();
+                                        let others = self.current_sizes(Some(i));
+                                        let size = ResourceGuard::size_for_model(
+                                            &cand.name,
+                                            &known,
+                                        );
+                                        if ResourceGuard::can_fit(&self.mem, &others, size).is_ok() {
+                                            self.try_assign_model(i, cand.name.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             self.status = format!("Model refresh failed: {}", e);
@@ -362,6 +390,10 @@ impl AiDashboardApp {
                         Ok(n) => self.status = format!("Pulled {}", n),
                         Err(e) => self.status = format!("Pull failed: {}", e),
                     }
+                    self.models_panel.note_transfer_finished();
+                    self.refresh_models();
+                }
+                AppMessage::RefreshModels => {
                     self.refresh_models();
                 }
                 AppMessage::ModelDeleted(res) => {
@@ -376,6 +408,7 @@ impl AiDashboardApp {
                         }
                         Err(e) => self.status = format!("Delete failed: {}", e),
                     }
+                    self.models_panel.note_transfer_finished();
                     self.refresh_models();
                 }
             }
@@ -790,6 +823,14 @@ impl eframe::App for AiDashboardApp {
         if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
             ui.ctx().set_zoom_factor(zoom);
         }
+        // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
+        if self.settings.theme != self.last_theme {
+            self.last_theme = self.settings.theme.clone();
+            ui.ctx().set_visuals(match self.last_theme {
+                Theme::Dark | Theme::System => egui::Visuals::dark(),
+                Theme::Light => egui::Visuals::light(),
+            });
+        }
         self.poll_messages();
 
         // Re-create the API client if the URL changed in settings.
@@ -868,7 +909,7 @@ impl eframe::App for AiDashboardApp {
                         // Take storage out briefly to satisfy the borrow checker.
                         let storage = self.storage.take();
                         if let Some(st) = storage.as_ref() {
-                            self.settings_panel.show(ui, &mut settings, st);
+                            self.settings_panel.show(ui, &mut settings, st, &self.tx);
                         }
                         self.storage = storage;
                         self.settings = settings;

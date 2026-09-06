@@ -131,13 +131,18 @@ impl VoiceEngine {
             return Err(anyhow::anyhow!("Audio recording failed"));
         }
         
-        let temp_audio = std::env::temp_dir().join("voice_input.wav");
+        // Unique temp name: a fixed name in shared /tmp is a symlink-attack target.
+        let tag = format!("{}_{}", std::process::id(), chrono::Utc::now().timestamp_millis());
+        let temp_audio = std::env::temp_dir().join(format!("voice_input_{tag}.wav"));
         tokio::fs::write(&temp_audio, &record_output.stdout).await?;
         
+        let temp_audio_str = temp_audio.to_string_lossy().into_owned();
         let whisper_output = TokioCommand::new(&self.whisper_path)
             .args([
-                "-m", &self.stt_model,
-                "-f", temp_audio.to_str().unwrap(),
+                "-m",
+                self.stt_model.as_str(),
+                "-f",
+                temp_audio_str.as_str(),
                 "-otxt",
             ])
             .output()
@@ -149,7 +154,7 @@ impl VoiceEngine {
             return Err(anyhow::anyhow!("Whisper STT failed: {}", String::from_utf8_lossy(&whisper_output.stderr)));
         }
         
-        let temp_txt = std::env::temp_dir().join("voice_input.txt");
+        let temp_txt = std::env::temp_dir().join(format!("voice_input_{tag}.txt"));
         if temp_txt.exists() {
             let text = tokio::fs::read_to_string(&temp_txt).await?;
             let _ = tokio::fs::remove_file(&temp_txt).await;

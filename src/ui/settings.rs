@@ -1,6 +1,7 @@
 use eframe::egui;
 use crate::storage::{AppSettings, Theme};
 use crate::storage::Storage;
+use std::sync::mpsc;
 
 pub struct SettingsPanel;
 
@@ -9,7 +10,13 @@ impl SettingsPanel {
         Self
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, settings: &mut AppSettings, storage: &Storage) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut AppSettings,
+        storage: &Storage,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+    ) {
         ui.add_space(16.0);
         ui.heading(egui::RichText::new("Settings").size(22.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
         ui.add_space(8.0);
@@ -91,7 +98,7 @@ impl SettingsPanel {
 
             ui.add_space(8.0);
             if ui.button("Test Connection").clicked() {
-                // Could add async test here
+                let _ = tx.send(crate::ui::app::AppMessage::RefreshModels);
             }
         });
 

@@ -72,8 +72,11 @@ impl ChatPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        // Message history; reserve room below for the input row.
-        let list_h = (ui.available_height() - 150.0).max(120.0);
+        // Message history. Reserve a fixed block for the input row below:
+        // the list may use everything ABOVE the reserve but never more, so
+        // the input + Send button always have room (no reliance on shrink).
+        let input_reserve = 140.0;
+        let list_h = (ui.available_height() - input_reserve).max(80.0);
         egui::ScrollArea::vertical()
             .max_height(list_h)
             .show(ui, |ui| {
@@ -111,6 +114,8 @@ impl ChatPanel {
             // Reserve a fixed column for Send/Stop: an INFINITY-width text
             // field starves its horizontal siblings, hiding the buttons.
             let input_w = (ui.available_width() - 118.0).max(140.0);
+            static FRM2: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let frm2 = FRM2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let response = ui.add(
                 egui::TextEdit::multiline(&mut self.input)
                     .desired_rows(3)
@@ -132,13 +137,42 @@ impl ChatPanel {
 
             ui.add_space(8.0);
             ui.vertical(|ui| {
-                let send_enabled = !self.input.trim().is_empty() && selected_model.is_some() && api_client.is_some() && !self.is_streaming;
+                ui.set_min_width(112.0);
+                let need_model = selected_model.is_none();
+                let need_link = api_client.is_none();
+                let send_enabled = !self.input.trim().is_empty()
+                    && !need_model
+                    && !need_link
+                    && !self.is_streaming;
+                // The button is ALWAYS drawn bright enough to spot. When it
+                // cannot send yet, the label names the missing piece.
+                let label = if self.is_streaming {
+                    "Working..."
+                } else if need_model {
+                    "Send (pick model ^)"
+                } else if need_link {
+                    "Send (no Ollama link)"
+                } else {
+                    "Send (Enter)"
+                };
+                let fill = if send_enabled {
+                    egui::Color32::from_rgb(0x00, 0x66, 0xcc)
+                } else {
+                    egui::Color32::from_rgb(0x1a, 0x3a, 0x66)
+                };
                 let send_btn = ui.add_enabled(send_enabled,
-                    egui::Button::new(egui::RichText::new("Send (Enter)").size(13.0))
-                        .fill(if send_enabled { egui::Color32::from_rgb(0x00, 0x55, 0xaa) } else { egui::Color32::from_rgb(0x33, 0x33, 0x33) })
+                    egui::Button::new(egui::RichText::new(label).size(13.0).color(egui::Color32::WHITE))
+                        .fill(fill)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x44, 0xaa, 0xff)))
                         .corner_radius(egui::CornerRadius::same(6))
+                        .min_size(egui::vec2(112.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
+                if frm2 == 150 {
+                    eprintln!("GEO frame=150 list_h={:.0} row_avail={:.0}x{:.0} send_rect={:?} label={:?} model={:?} n_models={}",
+                        list_h, ui.available_width(), ui.available_height(), send_btn.rect, label, selected_model, _models.len());
+                }
                 if send_btn.clicked() {
+                    eprintln!("SEND clicked slot={} model={:?}", slot_idx, selected_model);
                     self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
                 }
 
@@ -154,6 +188,24 @@ impl ChatPanel {
                     }
                 }
             });
+        });
+        ui.add_space(4.0);
+        // Status line: always shows what this chat needs to work.
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            let model_txt = selected_model.clone().unwrap_or("(no model)".to_string());
+            let link_txt = if api_client.is_some() { "Ollama: linked" } else { "Ollama: NOT linked" };
+            ui.label(
+                egui::RichText::new(format!(
+                    "Slot {} -> {} | {} | {} model(s) listed",
+                    slot_idx + 1,
+                    model_txt,
+                    link_txt,
+                    _models.len(),
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+            );
         });
         ui.add_space(8.0);
     }
@@ -223,6 +275,7 @@ impl ChatPanel {
         let tx = tx.clone();
 
         self.is_streaming = true;
+        eprintln!("SEND start slot={} model={} prompt_chars={}", slot_idx, model_name, prompt.len());
 
         let role_prompt = role_prompt.to_string();
         rt.spawn(async move {
@@ -251,6 +304,7 @@ impl ChatPanel {
     }
 
     pub fn handle_response(&mut self, response: Result<ChatResponse>) {
+        eprintln!("SEND done ok={}", response.is_ok());
         self.is_streaming = false;
         match response {
             Ok(resp) => {

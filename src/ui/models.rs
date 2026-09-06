@@ -26,7 +26,7 @@ impl ModelsPanel {
         api_client: &Option<OllamaClient>,
         cli_client: &Option<OllamaCli>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
-        _rt: &Runtime,
+        rt: &Runtime,
     ) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -39,8 +39,7 @@ impl ModelsPanel {
                         .corner_radius(egui::CornerRadius::same(6))
                 );
                 if refresh_btn.clicked() {
-                    // Trigger refresh via app.rs to avoid duplicate logic
-                    let _ = tx.send(crate::ui::app::AppMessage::ModelsLoaded(Ok(models.clone())));
+                    let _ = tx.send(crate::ui::app::AppMessage::RefreshModels);
                 }
             });
         });
@@ -71,7 +70,7 @@ impl ModelsPanel {
                         .corner_radius(egui::CornerRadius::same(6))
                 );
                 if pull_btn.clicked() {
-                    self.pull_model(&self.pull_input.clone(), api_client, cli_client, tx);
+                    self.pull_model(&self.pull_input.clone(), api_client, cli_client, tx, rt);
                 }
                 if self.pulling {
                     ui.add_space(8.0);
@@ -135,8 +134,16 @@ impl ModelsPanel {
                                         .corner_radius(egui::CornerRadius::same(6))
                                         .frame(false)
                                 );
-                                if delete_btn.on_hover_text("Delete").clicked() {
-                                    self.delete_model(&model.name, api_client, cli_client, tx);
+                                if self.deleting.as_deref() == Some(&model.name) {
+                                    if ui.small_button("Confirm").clicked() {
+                                        self.delete_model(&model.name, api_client, cli_client, tx, rt);
+                                        self.deleting = None;
+                                    }
+                                    if ui.small_button("Keep").clicked() {
+                                        self.deleting = None;
+                                    }
+                                } else if delete_btn.on_hover_text("Delete").clicked() {
+                                    self.deleting = Some(model.name.clone());
                                 }
                             });
                             ui.end_row();
@@ -152,6 +159,7 @@ impl ModelsPanel {
         api_client: &Option<OllamaClient>,
         cli_client: &Option<OllamaCli>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
     ) {
         self.pulling = true;
         let name = name.to_string();
@@ -160,17 +168,21 @@ impl ModelsPanel {
         // Prefer CLI for pull (shows progress)
         if let Some(client) = cli_client {
             let client = client.clone();
-            tokio::spawn(async move {
+            rt.spawn(async move {
                 let result = client.pull_model(&name).await;
                 let _ = tx.send(crate::ui::app::AppMessage::ModelPulled(result.map(|_| name)));
             });
         } else if let Some(client) = api_client {
             let client = client.clone();
-            tokio::spawn(async move {
+            rt.spawn(async move {
                 let result = client.pull_model(&name).await;
                 let _ = tx.send(crate::ui::app::AppMessage::ModelPulled(result.map(|_| name)));
             });
         }
+    }
+
+    pub fn note_transfer_finished(&mut self) {
+        self.pulling = false;
     }
 
     fn delete_model(
@@ -179,6 +191,7 @@ impl ModelsPanel {
         api_client: &Option<OllamaClient>,
         cli_client: &Option<OllamaCli>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
     ) {
         self.deleting = Some(name.to_string());
         let name = name.to_string();
@@ -186,13 +199,13 @@ impl ModelsPanel {
 
         if let Some(client) = cli_client {
             let client = client.clone();
-            tokio::spawn(async move {
+            rt.spawn(async move {
                 let result = client.delete_model(&name).await;
                 let _ = tx.send(crate::ui::app::AppMessage::ModelDeleted(result.map(|_| name)));
             });
         } else if let Some(client) = api_client {
             let client = client.clone();
-            tokio::spawn(async move {
+            rt.spawn(async move {
                 let result = client.delete_model(&name).await;
                 let _ = tx.send(crate::ui::app::AppMessage::ModelDeleted(result.map(|_| name)));
             });

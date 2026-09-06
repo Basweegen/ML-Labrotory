@@ -7,19 +7,31 @@ use futures::{StreamExt, TryStreamExt};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub name: String,
+    #[serde(default)]
     pub modified_at: String,
+    #[serde(default)]
     pub size: u64,
+    #[serde(default)]
     pub digest: String,
     pub details: Option<ModelDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDetails {
+    // Tolerant parsing: older/newer Ollama servers may omit fields; a single
+    // missing field must not fail the entire model list (empty list disables
+    // slot assignment and the Send button).
+    #[serde(default)]
     pub parent_model: String,
+    #[serde(default)]
     pub format: String,
+    #[serde(default)]
     pub family: String,
+    #[serde(default)]
     pub families: Vec<String>,
+    #[serde(default)]
     pub parameter_size: String,
+    #[serde(default)]
     pub quantization_level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,

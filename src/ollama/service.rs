@@ -63,7 +63,12 @@ impl OllamaService for CliOllamaService {
         Ok(cli_models.into_iter().map(|m| Model {
             name: m.name,
             modified_at: m.modified,
-            size: m.size.parse().unwrap_or(0),
+            // CLI sizes may not parse; never report 0 or the RAM guard
+            // would treat the model as free and over-assign.
+            size: match m.size.parse() {
+                Ok(0) | Err(_) => crate::resources::ESTIMATED_MODEL_BYTES,
+                Ok(n) => n,
+            },
             digest: m.digest,
             details: None,
         }).collect())

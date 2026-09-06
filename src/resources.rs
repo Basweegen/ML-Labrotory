@@ -128,7 +128,11 @@ impl ResourceGuard {
 
     /// Resolve a model's size from the Ollama list; fall back to estimate.
     pub fn size_for_model(name: &str, known: &HashMap<String, u64>) -> u64 {
-        known.get(name).copied().unwrap_or(ESTIMATED_MODEL_BYTES)
+        match known.get(name).copied().unwrap_or(ESTIMATED_MODEL_BYTES) {
+            // Never treat a model as free: unknown or zero sizes estimate high.
+            0 => ESTIMATED_MODEL_BYTES,
+            n => n,
+        }
     }
 }
 
