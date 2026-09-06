@@ -447,7 +447,7 @@ impl AiDashboardApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{:.0}%",
-                        (self.settings.font_size / 14.0).clamp(0.6, 1.6) * 100.0
+                        (self.settings.font_size / 14.0).clamp(0.5, 1.75) * 100.0
                     ))
                     .size(12.0)
                     .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
@@ -786,7 +786,7 @@ impl eframe::App for AiDashboardApp {
         // Apply the Settings-tab font size as a global zoom factor so the UI
         // fits small screens (e.g. MacBook Air) and large monitors alike.
         // 14pt == 100%. Takes effect from the next frame.
-        let zoom = (self.settings.font_size / 14.0).clamp(0.6, 1.6);
+        let zoom = (self.settings.font_size / 14.0).clamp(0.5, 1.75);
         if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
             ui.ctx().set_zoom_factor(zoom);
         }

@@ -76,7 +76,6 @@ impl ChatPanel {
         let list_h = (ui.available_height() - 150.0).max(120.0);
         egui::ScrollArea::vertical()
             .max_height(list_h)
-            .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.messages.is_empty() {
                     ui.horizontal(|ui| {

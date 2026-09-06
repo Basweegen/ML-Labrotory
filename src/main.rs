@@ -11,8 +11,8 @@ use ui::app::AiDashboardApp;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1150.0, 750.0])
-            .with_min_inner_size([760.0, 540.0]),
+            .with_inner_size([960.0, 600.0])
+            .with_min_inner_size([640.0, 480.0]),
         ..Default::default()
     };
 
