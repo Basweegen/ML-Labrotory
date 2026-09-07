@@ -100,14 +100,26 @@ impl ModelsPanel {
                     ui.label(egui::RichText::new("Pull a model to get started").size(13.0).color(egui::Color32::from_rgb(0x66, 0x66, 0x66)));
                 });
             } else {
+                let mem = crate::resources::system_memory();
+                let free = crate::resources::ResourceGuard::evaluate(&mem, &[]).free_for_models_bytes;
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(format!(
+                        "This box: {} ({} free for models)",
+                        crate::resources::hardware_tier(free),
+                        crate::resources::format_bytes(free),
+                    )).size(12.0).color(egui::Color32::from_rgb(0x88, 0xcc, 0x88)));
+                });
+                ui.add_space(4.0);
                 egui::Grid::new("models_grid")
-                    .num_columns(4)
+                    .num_columns(5)
                     .spacing([16.0, 12.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.strong(egui::RichText::new("Name").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Size").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
+                        ui.strong(egui::RichText::new("Fit").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Modified").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Actions").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.end_row();
@@ -116,6 +128,10 @@ impl ModelsPanel {
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new(&model.name).size(13.0).color(egui::Color32::WHITE));
                             ui.label(egui::RichText::new(format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                            {
+                                let (txt, (rr, gg, bb)) = crate::resources::fit_label(model.size, free);
+                                ui.label(egui::RichText::new(txt).size(13.0).color(egui::Color32::from_rgb(rr, gg, bb)));
+                            }
                             ui.label(egui::RichText::new(&model.modified_at[..19.min(model.modified_at.len())].replace('T', " ")).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
 
                             ui.horizontal(|ui| {

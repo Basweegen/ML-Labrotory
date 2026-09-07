@@ -2,7 +2,6 @@ use anyhow::Result;
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 // Serializable wrappers for ndarray types
@@ -17,7 +16,7 @@ impl From<Array2<f32>> for SerializableArray2 {
     fn from(arr: Array2<f32>) -> Self {
         let (rows, cols) = arr.dim();
         Self {
-            data: arr.into_raw_vec(),
+            data: arr.into_raw_vec_and_offset().0,
             rows,
             cols,
         }
@@ -39,7 +38,7 @@ pub struct SerializableArray1 {
 impl From<Array1<f32>> for SerializableArray1 {
     fn from(arr: Array1<f32>) -> Self {
         Self {
-            data: arr.into_raw_vec(),
+            data: arr.into_raw_vec_and_offset().0,
         }
     }
 }
@@ -128,20 +127,79 @@ impl ModelProfileNetwork {
     pub fn forward(&self, input: &Array1<f32>) -> Array1<f32> {
         let weights = self.weights_as_arrays();
         let biases = self.biases_as_arrays();
-        let mut x = input.clone();
-        
+        if weights.is_empty() || self.output_dim == 0 {
+            return Array1::zeros(self.output_dim.max(1));
+        }
+        // Sanitize input: wrong dim or non-finite -> zeros (prevents dot panic / NaN spread)
+        let mut x = if input.len() != self.input_dim {
+            Array1::zeros(self.input_dim)
+        } else {
+            input.mapv(|v| if v.is_finite() { v.clamp(-1e3, 1e3) } else { 0.0 })
+        };
+
         for i in 0..weights.len() {
+            // Shape guard: weight rows must match bias len, cols must match x len
+            if weights[i].ncols() != x.len() || weights[i].nrows() != biases[i].len() {
+                return Array1::from_elem(self.output_dim.max(1), 1.0 / self.output_dim.max(1) as f32);
+            }
             x = weights[i].dot(&x) + &biases[i];
-            
+            x.mapv_inplace(|v| if v.is_finite() { v } else { 0.0 });
             if i < weights.len() - 1 {
                 x.mapv_inplace(|v| v.max(0.0));
             }
         }
-        
-        let max_val = x.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        let exp_x = x.mapv(|v| (v - max_val).exp());
+
+        if x.is_empty() {
+            return Array1::from_elem(self.output_dim.max(1), 1.0 / self.output_dim.max(1) as f32);
+        }
+        let max_val = x.fold(f32::NEG_INFINITY, |a, &b| {
+            if b.is_finite() { a.max(b) } else { a }
+        });
+        let max_val = if max_val.is_finite() { max_val } else { 0.0 };
+        let exp_x = x.mapv(|v| (v.clamp(-50.0, 50.0) - max_val).exp());
         let sum = exp_x.sum();
+        if !sum.is_finite() || sum <= 1e-12 {
+            return Array1::from_elem(x.len(), 1.0 / x.len() as f32);
+        }
         exp_x / sum
+    }
+
+    /// Forward pass that also returns per-layer activations (for correct gradient updates).
+    fn forward_with_activations(&self, input: &Array1<f32>) -> (Array1<f32>, Vec<Array1<f32>>) {
+        let weights = self.weights_as_arrays();
+        let biases = self.biases_as_arrays();
+        let mut x = if input.len() != self.input_dim {
+            Array1::zeros(self.input_dim)
+        } else {
+            input.mapv(|v| if v.is_finite() { v.clamp(-1e3, 1e3) } else { 0.0 })
+        };
+        let mut acts = vec![x.clone()];
+        for i in 0..weights.len() {
+            if weights[i].ncols() != x.len() || weights[i].nrows() != biases[i].len() {
+                break;
+            }
+            x = weights[i].dot(&x) + &biases[i];
+            x.mapv_inplace(|v| if v.is_finite() { v } else { 0.0 });
+            if i < weights.len() - 1 {
+                x.mapv_inplace(|v| v.max(0.0));
+            }
+            acts.push(x.clone());
+        }
+        // softmax on final
+        let out = if x.is_empty() {
+            Array1::zeros(self.output_dim.max(1))
+        } else {
+            let m = x.fold(f32::NEG_INFINITY, |a, &b| if b.is_finite() { a.max(b) } else { a });
+            let m = if m.is_finite() { m } else { 0.0 };
+            let e = x.mapv(|v| (v.clamp(-50.0, 50.0) - m).exp());
+            let s = e.sum();
+            if !s.is_finite() || s <= 1e-12 {
+                Array1::from_elem(x.len(), 1.0 / x.len() as f32)
+            } else {
+                e / s
+            }
+        };
+        (out, acts)
     }
 
     pub fn select_model_profile(&self, context: &Array1<f32>) -> usize {
@@ -154,10 +212,17 @@ impl ModelProfileNetwork {
     }
 
     pub fn add_experience(&mut self, experience: Experience) {
-        self.experience_buffer.push(experience);
-        
+        // Clamp action to valid range at ingest so train_step can never index OOB
+        let mut exp = experience;
+        if self.output_dim > 0 {
+            exp.action = exp.action.min(self.output_dim - 1);
+        }
+        exp.reward = if exp.reward.is_finite() { exp.reward.clamp(-10.0, 10.0) } else { 0.0 };
+        self.experience_buffer.push(exp);
+
         if self.experience_buffer.len() > 10000 {
-            self.experience_buffer.remove(0);
+            let overflow = self.experience_buffer.len() - 10000;
+            self.experience_buffer.drain(0..overflow);
         }
     }
 
@@ -175,25 +240,41 @@ impl ModelProfileNetwork {
         let mut total_loss = 0.0;
         
         for exp in &batch {
-            let prediction = self.forward(&exp.state.clone().into());
+            let state: Array1<f32> = exp.state.clone().into();
+            let (prediction, acts) = self.forward_with_activations(&state);
+            if prediction.len() != self.output_dim || acts.len() != weights.len() + 1 {
+                continue; // corrupt entry / shape mismatch -> skip, don't poison weights
+            }
+            let action = exp.action.min(self.output_dim.saturating_sub(1));
             let mut target = prediction.clone();
-            target[exp.action] = exp.reward;
-            
-            let loss = (&prediction - &target).mapv(|v| v * v).sum();
-            total_loss += loss;
-            
-            let grad = &prediction - &target;
-            let lr = self.learning_rate;
-            
+            target[action] = exp.reward.clamp(-10.0, 10.0);
+
+            let diff = &prediction - &target;
+            let loss: f32 = diff.mapv(|v| if v.is_finite() { v * v } else { 0.0 }).sum();
+            total_loss += if loss.is_finite() { loss } else { 0.0 };
+
+            // Gradient of MSE wrt logits-softmax output (approx): 2*(pred - target)/n
+            let n = self.output_dim.max(1) as f32;
+            let grad = diff.mapv(|v| {
+                if v.is_finite() { (2.0 * v / n).clamp(-1.0, 1.0) } else { 0.0 }
+            });
+            let lr = if self.learning_rate.is_finite() { self.learning_rate.clamp(1e-6, 0.1) } else { 0.01 };
+
+            // Correct: last-layer input is the last hidden activation, not raw state
             let last_idx = weights.len() - 1;
-            let hidden_dim = self.hidden_dims.last().copied().unwrap_or(self.input_dim);
-            for i in 0..self.output_dim {
-                for j in 0..hidden_dim {
-                    if j < exp.state.data.len() {
-                        weights[last_idx][[i, j]] -= lr * grad[i] * exp.state.data[j].min(1.0).max(-1.0);
+            let hidden = &acts[acts.len() - 2];
+            let (rows, cols) = weights[last_idx].dim();
+            for i in 0..rows.min(self.output_dim).min(grad.len()) {
+                for j in 0..cols.min(hidden.len()) {
+                    let h = if hidden[j].is_finite() { hidden[j].clamp(-1.0, 1.0) } else { 0.0 };
+                    let delta = lr * grad[i] * h;
+                    if delta.is_finite() {
+                        weights[last_idx][[i, j]] -= delta;
                     }
                 }
-                biases[last_idx][i] -= lr * grad[i];
+                if i < biases[last_idx].len() && grad[i].is_finite() {
+                    biases[last_idx][i] -= lr * grad[i];
+                }
             }
         }
         
@@ -203,17 +284,19 @@ impl ModelProfileNetwork {
     }
 
     pub fn update_performance(&mut self, reward: f32) {
-        self.performance_history.push(reward);
+        self.performance_history.push(if reward.is_finite() { reward } else { 0.0 });
         if self.performance_history.len() > 1000 {
-            self.performance_history.remove(0);
+            let overflow = self.performance_history.len() - 1000;
+            self.performance_history.drain(0..overflow);
         }
     }
 
     pub fn avg_performance(&self) -> f32 {
-        if self.performance_history.is_empty() {
+        let vals: Vec<f32> = self.performance_history.iter().copied().filter(|v| v.is_finite()).collect();
+        if vals.is_empty() {
             0.0
         } else {
-            self.performance_history.iter().sum::<f32>() / self.performance_history.len() as f32
+            vals.iter().sum::<f32>() / vals.len() as f32
         }
     }
 
@@ -225,12 +308,47 @@ impl ModelProfileNetwork {
 
     pub fn load(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let network: Self = bincode::deserialize(&data)?;
+        let mut network: Self = bincode::deserialize(&data).map_err(|e| anyhow::anyhow!("corrupt network db: {e}"))?;
+        network.sanitize();
+        // Structural validation: layer count must be hidden+1, dims sane
+        let expect_layers = network.hidden_dims.len() + 1;
+        if network.weights.len() != expect_layers || network.biases.len() != expect_layers {
+            anyhow::bail!("corrupt network db: layer count mismatch");
+        }
+        if network.input_dim == 0 || network.input_dim > 100000 || network.output_dim == 0 || network.output_dim > 100000 {
+            anyhow::bail!("corrupt network db: bad dims");
+        }
+        let mut prev = network.input_dim;
+        for (k, w) in network.weights.iter().enumerate() {
+            let expect_rows = if k < network.hidden_dims.len() { network.hidden_dims[k] } else { network.output_dim };
+            if w.rows != expect_rows || w.cols != prev {
+                anyhow::bail!("corrupt network db: weight shape mismatch at layer {k}");
+            }
+            prev = expect_rows;
+        }
         Ok(network)
+    }
+
+    /// Replace non-finite weights/biases with 0 so one corrupt save can't NaN-poison the net.
+    fn sanitize(&mut self) {
+        for w in &mut self.weights {
+            for v in w.data.iter_mut() {
+                if !v.is_finite() { *v = 0.0; }
+            }
+        }
+        for b in &mut self.biases {
+            for v in b.data.iter_mut() {
+                if !v.is_finite() { *v = 0.0; }
+            }
+        }
+        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
+            self.learning_rate = 0.01;
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AdaptiveModelSelector {
     pub network: ModelProfileNetwork,
     pub profiles: Vec<ModelProfileInfo>,
@@ -238,6 +356,7 @@ pub struct AdaptiveModelSelector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ModelProfileInfo {
     pub id: Uuid,
     pub name: String,
@@ -251,6 +370,7 @@ pub struct ModelProfileInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SkillInfo {
     pub name: String,
     pub proficiency: f32,
@@ -258,12 +378,14 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ContextEncoder {
     pub vocab_size: usize,
     pub embedding_dim: usize,
     pub embeddings: SerializableArray2,
 }
 
+#[allow(dead_code)]
 impl ContextEncoder {
     pub fn new(vocab_size: usize, embedding_dim: usize) -> Self {
         let mut rng = rand::thread_rng();
@@ -304,6 +426,7 @@ impl ContextEncoder {
     }
 }
 
+#[allow(dead_code)]
 impl AdaptiveModelSelector {
     pub fn new(num_profiles: usize, context_dim: usize) -> Self {
         Self {

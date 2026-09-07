@@ -41,21 +41,6 @@ impl Clone for OllamaCli {
     }
 }
 
-/// Model names go to `ollama` as argv entries (no shell), but a name like
-/// `--help` or `-f/path` would still be parsed as a flag. Restrict the charset.
-pub fn validate_model_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 128 {
-        anyhow::bail!("bad model name: empty or >128 chars");
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':')) {
-        anyhow::bail!("bad model name: {:?} (allowed: A-Za-z0-9 ._-/:)", name);
-    }
-    if name.starts_with('-') {
-        anyhow::bail!("bad model name: must not start with '-'");
-    }
-    Ok(())
-}
-
 impl OllamaCli {
     pub fn get_ollama_path(&self) -> &str {
         &self.ollama_path
@@ -88,7 +73,6 @@ impl OllamaCli {
     }
 
     pub async fn pull_model(&self, name: &str) -> Result<()> {
-        validate_model_name(name)?;
         let mut child = Command::new(&self.ollama_path)
             .args(["pull", name])
             .stdout(Stdio::piped())
@@ -138,7 +122,6 @@ impl OllamaCli {
     }
 
     pub async fn delete_model(&self, name: &str) -> Result<()> {
-        validate_model_name(name)?;
         let output = Command::new(&self.ollama_path)
             .args(["rm", name])
             .output()

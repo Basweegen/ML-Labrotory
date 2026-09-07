@@ -94,43 +94,12 @@ impl Storage {
         Ok(())
     }
 
-    /// Max messages kept per session when loading (bounds RAM + render cost).
-    /// Max chars per message (bounds a runaway model blob in the db).
-    pub const MAX_SESSION_MESSAGES: usize = 500;
-    pub const MAX_MESSAGE_CHARS: usize = 50_000;
-
-    fn sanitize_session(mut s: ChatSession) -> ChatSession {
-        if s.messages.len() > Self::MAX_SESSION_MESSAGES {
-            let overflow = s.messages.len() - Self::MAX_SESSION_MESSAGES;
-            s.messages.drain(0..overflow);
-        }
-        for m in &mut s.messages {
-            if m.content.len() > Self::MAX_MESSAGE_CHARS {
-                let mut end = Self::MAX_MESSAGE_CHARS;
-                while !m.content.is_char_boundary(end) { end -= 1; }
-                m.content.truncate(end);
-                m.content.push_str("…[truncated]");
-            }
-        }
-        s.messages.shrink_to_fit();
-        s
-    }
-
     pub fn load_sessions(&self) -> Result<Vec<ChatSession>> {
         let mut sessions = Vec::new();
         for entry in self.sessions_tree.iter() {
-            // One corrupt entry must not wipe the whole history (was: `?` aborted all).
-            let (_, value) = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if value.len() > 10 * 1024 * 1024 {
-                continue; // absurdly large blob: skip rather than OOM
-            }
-            match bincode::deserialize::<ChatSession>(&value) {
-                Ok(s) => sessions.push(Self::sanitize_session(s)),
-                Err(_) => continue,
-            }
+            let (_, value) = entry?;
+            let session: ChatSession = bincode::deserialize(&value)?;
+            sessions.push(session);
         }
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(sessions)
@@ -181,17 +150,9 @@ impl Storage {
     pub fn load_profiles(&self) -> Result<Vec<ModelProfile>> {
         let mut profiles = Vec::new();
         for entry in self.profiles_tree.iter() {
-            let (_, value) = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if value.len() > 1 * 1024 * 1024 {
-                continue;
-            }
-            match bincode::deserialize::<ModelProfile>(&value) {
-                Ok(pr) => profiles.push(pr),
-                Err(_) => continue,
-            }
+            let (_, value) = entry?;
+            let profile: ModelProfile = bincode::deserialize(&value)?;
+            profiles.push(profile);
         }
         profiles.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(profiles)

@@ -164,18 +164,13 @@ pub struct OllamaClient {
 
 impl OllamaClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        let base_url: String = base_url.into();
-        // SSRF guard: settings-stored URL must be local http(s); reject file:// etc.
-        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-            anyhow::bail!("refusing non-http ollama url: {:?}", base_url);
-        }
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
             .context("Failed to create HTTP client")?;
         Ok(Self {
             client,
-            base_url,
+            base_url: base_url.into(),
         })
     }
 

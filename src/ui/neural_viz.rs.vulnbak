@@ -99,9 +99,6 @@ impl NeuralVizPanel {
         let rect = response.rect;
         let center_y = rect.center().y;
 
-        // Convert each weight matrix ONCE (was: cloned+converted per connection,
-        // i.e. rows*cols clones per layer per frame at 60fps).
-        let w_mats: Vec<Array2<f32>> = network.weights.iter().map(|w| w.clone().into()).collect();
         // Draw connections first (behind neurons)
         for l in 0..num_layers - 1 {
             let x1 = rect.left() + layer_spacing * (l + 1) as f32;
@@ -118,8 +115,8 @@ impl NeuralVizPanel {
                     let y2 = end_y + j as f32 * vertical_spacing;
 
                     // Get weight value for color intensity
-                    let weight_val = if l < w_mats.len() {
-                        let w_arr = &w_mats[l];
+                    let weight_val = if l < network.weights.len() {
+                        let w_arr: Array2<f32> = network.weights[l].clone().into();
                         if j < w_arr.nrows() && i < w_arr.ncols() {
                             w_arr[[j, i]].abs().min(1.0)
                         } else {

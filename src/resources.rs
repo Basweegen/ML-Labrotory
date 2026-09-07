@@ -146,3 +146,29 @@ pub fn format_bytes(bytes: u64) -> String {
     }
     format!("{:.1} {}", size, UNITS[unit])
 }
+
+/// Hardware tier for this box, from free-for-models budget. Shown in Models tab.
+pub fn hardware_tier(free_for_models_bytes: u64) -> &'static str {
+    const GB: u64 = 1024 * 1024 * 1024;
+    if free_for_models_bytes < 2 * GB {
+        "LOW: stick to ~1B models"
+    } else if free_for_models_bytes < 4 * GB {
+        "MEDIUM: 1-3B models fit"
+    } else if free_for_models_bytes < 8 * GB {
+        "GOOD: 3-4B models fit"
+    } else {
+        "HIGH: 4B+ models fit"
+    }
+}
+
+/// Per-model fit badge for the Models list. Unknown/zero sizes estimate high.
+pub fn fit_label(model_size: u64, free_for_models_bytes: u64) -> (&'static str, (u8, u8, u8)) {
+    let size = if model_size == 0 { ESTIMATED_MODEL_BYTES } else { model_size };
+    if size <= free_for_models_bytes {
+        ("Fits", (0x88, 0xcc, 0x88))
+    } else if size <= free_for_models_bytes.saturating_add(free_for_models_bytes / 2) {
+        ("Tight", (0xcc, 0xaa, 0x44))
+    } else {
+        ("Skip", (0xcc, 0x66, 0x66))
+    }
+}
