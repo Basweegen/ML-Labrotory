@@ -81,6 +81,18 @@ impl ChatPanel {
         self.voice_enabled = enabled;
     }
 
+    /// Dictated/transcribed text lands in the input box for review before send.
+    pub fn append_input(&mut self, text: &str) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        if !self.input.trim().is_empty() {
+            self.input.push(' ');
+        }
+        self.input.push_str(t);
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -100,7 +112,18 @@ impl ChatPanel {
             )
             .on_hover_text("Toggle voice input/output (local, free)");
             if voice_btn.clicked() {
-                self.voice_enabled = !self.voice_enabled;
+                let _ = tx.send(crate::ui::app::AppMessage::VoiceToggled(
+                    !self.voice_enabled,
+                ));
+            }
+            let mic_btn = ui
+                .add(
+                    egui::Button::new("Dictate")
+                        .corner_radius(egui::CornerRadius::same(6)),
+                )
+                .on_hover_text("Record 5s from mic and transcribe into the input box");
+            if mic_btn.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::VoiceListen(slot_idx));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0);

@@ -12,6 +12,7 @@ use crate::neural::ModelProfileNetwork;
 use crate::ollama::api::{ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
+use crate::voice::VoiceEngine;
 use crate::storage::{AppSettings, ChatSession, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
@@ -33,6 +34,10 @@ pub enum AppMessage {
     ModelDeleted(Result<String>),
     NewChat,
     LoadSession(ChatSession),
+    VoiceToggled(bool),
+    VoiceListen(usize),
+    VoiceState { enabled: bool, note: String },
+    VoiceInput(usize, String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -174,6 +179,7 @@ pub struct AiDashboardApp {
     rx: mpsc::Receiver<AppMessage>,
     api_client: Option<OllamaClient>,
     cli_client: Option<OllamaCli>,
+    voice: Option<VoiceEngine>,
     last_ollama_url: String,
     last_theme: Theme,
     models: Vec<Model>,
@@ -216,6 +222,7 @@ impl AiDashboardApp {
             rx,
             api_client,
             cli_client,
+            voice: None,
             last_ollama_url: settings.ollama_url.clone(),
             last_theme: settings.theme.clone(),
             models: Vec::new(),
@@ -521,6 +528,23 @@ impl AiDashboardApp {
                             role_idx,
                             &model_name,
                         );
+                        if self.settings.voice_enabled {
+                            if let Some(eng) = self.voice.clone() {
+                                if let Some(last) = self.slots[idx]
+                                    .chat
+                                    .messages()
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m.role == "assistant")
+                                {
+                                    let text: String =
+                                        last.content.chars().take(1000).collect();
+                                    self.rt.spawn(async move {
+                                        let _ = eng.speak(&text).await;
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 AppMessage::EditorSuggestion(id, res) => {
@@ -616,6 +640,76 @@ impl AiDashboardApp {
                         self.status = format!("Loaded '{}' into slot {}", s.name, f + 1);
                     }
                     self.tab = Tab::Chat;
+                }
+                AppMessage::VoiceToggled(req) => {
+                    if req {
+                        match VoiceEngine::new(
+                            self.settings.tts_voice.clone(),
+                            self.settings.stt_model.clone(),
+                        ) {
+                            Ok(eng) if eng.is_available() => {
+                                self.voice = Some(eng);
+                                self.settings.voice_enabled = true;
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.save_settings(&self.settings);
+                                }
+                                self.status =
+                                    "Voice on: replies will be read aloud".to_string();
+                                let _ = self.tx.send(AppMessage::VoiceState {
+                                    enabled: true,
+                                    note: String::new(),
+                                });
+                            }
+                            Ok(_) | Err(_) => {
+                                self.status =
+                                    "Voice unavailable: install piper + whisper-cli"
+                                        .to_string();
+                                let _ = self.tx.send(AppMessage::VoiceState {
+                                    enabled: false,
+                                    note: "missing piper/whisper binaries".to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        self.voice = None;
+                        self.settings.voice_enabled = false;
+                        if let Some(st) = self.storage.as_ref() {
+                            let _ = st.save_settings(&self.settings);
+                        }
+                        self.status = "Voice off".to_string();
+                        let _ = self.tx.send(AppMessage::VoiceState {
+                            enabled: false,
+                            note: String::new(),
+                        });
+                    }
+                }
+                AppMessage::VoiceListen(idx) => {
+                    if let Some(eng) = self.voice.clone() {
+                        let tx = self.tx.clone();
+                        self.status = "Listening (5s)...".to_string();
+                        self.rt.spawn(async move {
+                            let result = eng.listen().await.unwrap_or_default();
+                            let _ = tx.send(AppMessage::VoiceInput(idx, result));
+                        });
+                    } else {
+                        self.status = "Voice is off — toggle Voice ON first".to_string();
+                    }
+                }
+                AppMessage::VoiceState { enabled, note } => {
+                    for slot in &mut self.slots {
+                        slot.chat.set_voice_enabled(enabled);
+                    }
+                    if !note.is_empty() {
+                        self.status = format!("Voice off ({})", note);
+                    }
+                }
+                AppMessage::VoiceInput(idx, text) => {
+                    if text.trim().is_empty() {
+                        self.status = "Heard nothing".to_string();
+                    } else if let Some(slot) = self.slots.get_mut(idx) {
+                        slot.chat.append_input(&text);
+                        self.status = "Dictated into chat input".to_string();
+                    }
                 }
             }
         }

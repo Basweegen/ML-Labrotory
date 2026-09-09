@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use tokio::process::Command as TokioCommand;
 
+#[derive(Clone)]
 pub struct VoiceEngine {
     piper_path: PathBuf,
     whisper_path: PathBuf,
