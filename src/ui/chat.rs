@@ -486,9 +486,25 @@ impl ChatPanel {
                             );
                         }
                     }
-                    if !is_user && msg.role == "assistant" && !blocks.is_empty() {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("Copy")
+                            .on_hover_text("Copy message text")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(msg.content.clone());
+                        }
+                        if !is_user && msg.role == "assistant" {
+                            let speak = ui.small_button("\u{1F50A}");
+                            if speak.on_hover_text("Read this message aloud").clicked()
+                            {
+                                let _ = tx.send(
+                                    crate::ui::app::AppMessage::SpeakText(msg.content.clone()),
+                                );
+                            }
+                        }
+                        if !is_user && msg.role == "assistant" && !blocks.is_empty() {
                             if ui.small_button("Copy code").clicked() {
                                 if let Some((_, code)) = blocks.iter().max_by_key(|(_, c)| c.len()) {
                                     ui.ctx().copy_text(code.clone());
@@ -508,8 +524,8 @@ impl ChatPanel {
                                     ));
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 });
         });
         ui.add_space(4.0);

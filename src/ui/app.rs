@@ -43,6 +43,7 @@ pub enum AppMessage {
     Audit(String, String),
     Broadcast(String),
     PullProgress(String),
+    SpeakText(String),
     StreamHandle(usize, tokio::task::JoinHandle<()>),
     StopStream(usize),
 }
@@ -914,6 +915,17 @@ impl AiDashboardApp {
                     } else if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.append_input(&text);
                         self.status = "Dictated into chat input".to_string();
+                    }
+                }
+                AppMessage::SpeakText(text) => {
+                    if let Some(eng) = self.voice.clone() {
+                        let text: String = text.chars().take(1000).collect();
+                        self.status = "Reading message aloud…".to_string();
+                        self.rt.spawn(async move {
+                            let _ = eng.speak(&text).await;
+                        });
+                    } else {
+                        self.status = "Voice unavailable — toggle Voice ON first".to_string();
                     }
                 }
             }
