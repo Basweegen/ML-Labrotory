@@ -91,14 +91,26 @@ impl EditorPanel {
                 .on_hover_text("Write the editor to this file (folders created as needed)")
                 .clicked()
             {
-                self.save_to_file();
+                let ok = self.save_to_file();
+                if !self.file_path.trim().is_empty() {
+                    let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                        if ok { "file.save".to_string() } else { "file.save_failed".to_string() },
+                        self.file_path.trim().to_string(),
+                    ));
+                }
             }
             if ui
                 .button(egui::RichText::new("Open").size(13.0))
                 .on_hover_text("Load this file into the editor")
                 .clicked()
             {
-                self.open_from_file();
+                let ok = self.open_from_file();
+                if !self.file_path.trim().is_empty() {
+                    let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                        if ok { "file.open".to_string() } else { "file.open_failed".to_string() },
+                        self.file_path.trim().to_string(),
+                    ));
+                }
             }
         });
         if !self.file_status.is_empty() {
@@ -306,6 +318,10 @@ impl EditorPanel {
 
         let full_prompt = format!("{}\n\n```{}\n{}\n```", prompt_prefix, self.language, self.code);
         if let Err(hits) = self.gate.check(&full_prompt) {
+            let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                "secret.blocked".to_string(),
+                "editor assist".to_string(),
+            ));
             let kinds: Vec<String> = hits
                 .iter()
                 .map(|h| format!("{} ({})", h.kind, h.preview))
@@ -385,40 +401,48 @@ impl EditorPanel {
             .to_string()
     }
 
-    fn save_to_file(&mut self) {
+    fn save_to_file(&mut self) -> bool {
         let path = std::path::PathBuf::from(self.file_path.trim());
         if path.as_os_str().is_empty() {
             self.file_status = "Pick a file path first.".to_string();
-            return;
+            return false;
         }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     self.file_status = format!("Can't create folder: {}", e);
-                    return;
+                    return false;
                 }
             }
         }
         match std::fs::write(&path, &self.code) {
             Ok(()) => {
                 self.file_status = format!("Saved {} bytes to {}", self.code.len(), path.display());
+                true
             }
-            Err(e) => self.file_status = format!("Save failed: {}", e),
+            Err(e) => {
+                self.file_status = format!("Save failed: {}", e);
+                false
+            }
         }
     }
 
-    fn open_from_file(&mut self) {
+    fn open_from_file(&mut self) -> bool {
         let path = self.file_path.trim().to_string();
         if path.is_empty() {
             self.file_status = "Pick a file path first.".to_string();
-            return;
+            return false;
         }
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 self.code = text;
                 self.file_status = format!("Opened {} ({} bytes)", path, self.code.len());
+                true
             }
-            Err(e) => self.file_status = format!("Open failed: {}", e),
+            Err(e) => {
+                self.file_status = format!("Open failed: {}", e);
+                false
+            }
         }
     }
 

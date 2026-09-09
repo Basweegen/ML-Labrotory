@@ -533,6 +533,10 @@ impl ChatPanel {
         }
         if let Err(hits) = self.gate.check(&prompt) {
             self.push_system_note(Self::secret_warning(&hits));
+            let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                "secret.blocked".to_string(),
+                format!("chat slot {}", slot_idx + 1),
+            ));
             return;
         }
         if self.send_prompt(

@@ -40,6 +40,7 @@ pub enum AppMessage {
     VoiceInput(usize, String),
     ChatChunk(usize, u64, String),
     EditorChunk(usize, String),
+    Audit(String, String),
     Broadcast(String),
     PullProgress(String),
     StreamHandle(usize, tokio::task::JoinHandle<()>),
@@ -317,6 +318,7 @@ impl AiDashboardApp {
                     slot.model = Some(name.clone());
                 }
                 self.status = format!("Slot {} now runs {}", idx + 1, name);
+                self.audit("model.assign", format!("slot {} -> {}", idx + 1, name));
                 let sizes = self.current_sizes(None);
                 self.report = ResourceGuard::evaluate(&self.mem, &sizes);
             }
@@ -338,6 +340,7 @@ impl AiDashboardApp {
                 self.slots.push(ModelSlot::new(id, ModelRole::General));
                 self.focused_slot = self.slots.len() - 1;
                 self.status = format!("Slot {} added", self.slots.len());
+                self.audit("slot.add", format!("slot {}", self.slots.len()));
             }
             Err(e) => {
                 self.status = format!("Cannot add slot: {}", e);
@@ -473,6 +476,13 @@ impl AiDashboardApp {
         }
     }
 
+    /// Append a security-activity event (best effort; never fails the action).
+    fn audit(&self, kind: &str, detail: String) {
+        if let Some(st) = self.storage.as_ref() {
+            let _ = st.log_audit(kind, &detail);
+        }
+    }
+
     /// Abort any in-flight stream for a slot (Stop / resend / remove).
     fn abort_slot(&mut self, idx: usize) {
         if let Some(h) = self.inflight.remove(&idx) {
@@ -580,6 +590,7 @@ impl AiDashboardApp {
                         }
                         self.status =
                             "Ask all blocked: possible secret — resend to override".to_string();
+                        self.audit("broadcast.blocked", "secret guard".to_string());
                         continue;
                     }
                     let models = self.models.clone();
@@ -613,6 +624,9 @@ impl AiDashboardApp {
                     } else {
                         format!("Asked {} slot{}", sent, if sent == 1 { "" } else { "s" })
                     };
+                    if sent > 0 {
+                        self.audit("broadcast.sent", format!("{} slots", sent));
+                    }
                 }
                 AppMessage::ChatChunk(idx, seq, piece) => {
                     if let Some(slot) = self.slots.get_mut(idx) {
@@ -754,10 +768,12 @@ impl AiDashboardApp {
                     match res {
                         Ok(n) => {
                             self.status = format!("Pulled {}", n);
+                            self.audit("model.pull", format!("ok {}", n));
                             self.models_panel.note_pull_finished(true);
                         }
                         Err(e) => {
                             self.status = format!("Pull failed: {}", e);
+                            self.audit("model.pull_failed", format!("{}", e));
                             self.models_panel.note_pull_finished(false);
                         }
                     }
@@ -770,13 +786,17 @@ impl AiDashboardApp {
                     match res {
                         Ok(n) => {
                             self.status = format!("Deleted {}", n);
+                            self.audit("model.delete", format!("{}", n));
                             for slot in &mut self.slots {
                                 if slot.model.as_deref() == Some(&n) {
                                     slot.model = None;
                                 }
                             }
                         }
-                        Err(e) => self.status = format!("Delete failed: {}", e),
+                        Err(e) => {
+                            self.status = format!("Delete failed: {}", e);
+                            self.audit("model.delete_failed", format!("{}", e));
+                        }
                     }
                     self.models_panel.note_transfer_finished();
                     self.refresh_models();
@@ -795,9 +815,14 @@ impl AiDashboardApp {
                         slot.chat.stop_stream();
                     }
                     self.status = format!("Slot {} stopped", idx + 1);
+                    self.audit("chat.stop", format!("slot {}", idx + 1));
+                }
+                AppMessage::Audit(kind, detail) => {
+                    self.audit(&kind, detail);
                 }
                 AppMessage::NewChat => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    self.audit("chat.new", format!("slot {}", f + 1));
                     self.abort_slot(f);
                     if let Some(slot) = self.slots.get_mut(f) {
                         slot.chat.clear_chat();
@@ -815,6 +840,7 @@ impl AiDashboardApp {
                         slot.session_created = s.created_at;
                         slot.last_saved_revision = slot.chat.revision();
                         self.status = format!("Loaded '{}' into slot {}", s.name, f + 1);
+                        self.audit("chat.load", format!("'{}' -> slot {}", s.name, f + 1));
                     }
                     self.tab = Tab::Chat;
                 }
@@ -832,6 +858,7 @@ impl AiDashboardApp {
                                 }
                                 self.status =
                                     "Voice on: replies will be read aloud".to_string();
+                                self.audit("voice.on", String::new());
                                 let _ = self.tx.send(AppMessage::VoiceState {
                                     enabled: true,
                                     note: String::new(),
@@ -854,6 +881,7 @@ impl AiDashboardApp {
                             let _ = st.save_settings(&self.settings);
                         }
                         self.status = "Voice off".to_string();
+                        self.audit("voice.off", String::new());
                         let _ = self.tx.send(AppMessage::VoiceState {
                             enabled: false,
                             note: String::new(),
@@ -1234,6 +1262,7 @@ impl AiDashboardApp {
             if let Some(slot) = self.slots.get_mut(i) {
                 slot.model = None;
                 self.status = format!("Slot {} cleared", i + 1);
+                self.audit("model.unassign", format!("slot {}", i + 1));
             }
         }
         if let Some((i, r)) = pending_role {
@@ -1257,6 +1286,7 @@ impl AiDashboardApp {
                 self.slots.remove(i);
                 self.focused_slot = self.focused_slot.min(self.slots.len() - 1);
                 self.status = format!("Slot {} removed", i + 1);
+                self.audit("slot.remove", format!("slot {}", i + 1));
             }
         }
         if add_pressed {

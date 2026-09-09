@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +14,32 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// One security-activity event (model pulls, assigns, voice, file saves,
+/// secret blocks...). Newest last by key; viewer reverses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub ts: DateTime<Utc>,
+    pub kind: String,
+    pub detail: String,
+}
+
+impl AuditEntry {
+    /// Bound field sizes so one runaway detail can't bloat the tree.
+    pub fn sanitize(mut self) -> Self {
+        if self.kind.len() > 64 {
+            self.kind.truncate(64);
+        }
+        if self.detail.len() > 500 {
+            let mut end = 500;
+            while !self.detail.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.detail.truncate(end);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +113,8 @@ pub struct Storage {
     _db: Db,
     sessions_tree: sled::Tree,
     config_tree: sled::Tree,
+    audit_tree: sled::Tree,
+    audit_seq: AtomicU64,
 }
 
 impl Storage {
@@ -98,7 +127,14 @@ impl Storage {
         let db = sled::open(db_path)?;
         let sessions_tree = db.open_tree("sessions")?;
         let config_tree = db.open_tree("config")?;
-        Ok(Self { _db: db, sessions_tree, config_tree })
+        let audit_tree = db.open_tree("audit")?;
+        Ok(Self {
+            _db: db,
+            sessions_tree,
+            config_tree,
+            audit_tree,
+            audit_seq: AtomicU64::new(0),
+        })
     }
 
     pub fn save_session(&self, session: &ChatSession) -> Result<()> {
@@ -151,6 +187,71 @@ impl Storage {
         Ok(sessions)
     }
 
+    /// Max audit rows kept; oldest evicted first.
+    pub const MAX_AUDIT_ROWS: usize = 2000;
+
+    pub fn log_audit(&self, kind: &str, detail: &str) -> Result<()> {
+        // Key = millis ++ pid ++ seq (16 bytes): millis alone collides for
+        // same-millisecond bursts, and the per-instance seq restarts in every
+        // process, so the pid scopes concurrent writers (tests included).
+        // (Older builds used nanos*10000, which overflowed u64 and collapsed
+        // every key to u64::MAX — those rows are filtered on load.)
+        let millis = Utc::now().timestamp_millis().max(0) as u64;
+        let pid = std::process::id();
+        let seq = self.audit_seq.fetch_add(1, Ordering::Relaxed);
+        let mut key = Vec::with_capacity(16);
+        key.extend_from_slice(&millis.to_be_bytes());
+        key.extend_from_slice(&pid.to_be_bytes());
+        key.extend_from_slice(&seq.to_be_bytes());
+        let entry = AuditEntry {
+            ts: Utc::now(),
+            kind: kind.to_string(),
+            detail: detail.to_string(),
+        }
+        .sanitize();
+        self.audit_tree.insert(key, bincode::serialize(&entry)?)?;
+        while self.audit_tree.len() > Self::MAX_AUDIT_ROWS {
+            let oldest = self.audit_tree.iter().next().transpose()?.map(|(k, _)| k);
+            match oldest {
+                Some(k) => {
+                    self.audit_tree.remove(k)?;
+                }
+                None => break,
+            }
+        }
+        self.audit_tree.flush()?;
+        Ok(())
+    }
+
+    /// Newest first.
+    pub fn load_audit(&self) -> Result<Vec<AuditEntry>> {
+        let mut out = Vec::new();
+        for entry in self.audit_tree.iter() {
+            let (key, value) = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            // Drop legacy rows from the u64::MAX key-collision bug: pre-fix
+            // builds saturated every key, keeping only the latest row there.
+            // (A valid millis key can't reach MAX before the year ~58000.)
+            if key.len() == 8 && key.iter().all(|&b| b == 0xFF) {
+                continue;
+            }
+            if value.len() > 64 * 1024 {
+                continue;
+            }
+            match bincode::deserialize::<AuditEntry>(&value) {
+                Ok(a) => out.push(a.sanitize()),
+                Err(_) => continue,
+            }
+        }
+        // Explicit timestamp sort: keys only guarantee uniqueness, not total
+        // time order across key-scheme generations (nanos, millis-packed,
+        // millis+pid+seq). Newest first.
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        Ok(out)
+    }
+
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
         self.sessions_tree.remove(id.as_bytes())?;
         self.sessions_tree.flush()?;
@@ -175,4 +276,70 @@ impl Storage {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// The store lives at a fixed user path: serialize tests that open it.
+    static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn store_lock() -> std::sync::MutexGuard<'static, ()> {
+        STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn audit_write_then_read() {
+        let _guard = store_lock();
+        let st = Storage::new().expect("open store");
+        let before = st.audit_tree.len();
+        st.log_audit("test.selfcheck", "roundtrip-probe").expect("log");
+        st.log_audit("test.selfcheck", "roundtrip-probe").expect("log");
+        st.log_audit("test.selfcheck", "roundtrip-probe").expect("log");
+        assert_eq!(st.audit_tree.len(), before + 3, "three rows stored");
+        let v = st.load_audit().expect("load");
+        let mut legacy = 0usize;
+        for e in st.audit_tree.iter().flatten() {
+            if e.0.len() == 8 && e.0.iter().all(|&b| b == 0xFF) {
+                legacy += 1;
+            }
+        }
+        assert_eq!(v.len(), st.audit_tree.len() - legacy, "load returns every row");
+        assert_eq!(&v[0].kind, "test.selfcheck");
+        assert_eq!(&v[0].detail, "roundtrip-probe");
+    }
+
+    #[test]
+    fn audit_load_matches_tree() {
+        let _guard = store_lock();
+        let st = Storage::new().expect("open store");
+        let n = st.audit_tree.len();
+        let mut legacy = 0usize;
+        for e in st.audit_tree.iter() {
+            if let Ok((k, _)) = e {
+                if k.len() == 8 && k.iter().all(|&b| b == 0xFF) {
+                    legacy += 1;
+                }
+            }
+        }
+        let v = st.load_audit().expect("load audit");
+        assert_eq!(v.len(), n - legacy, "load returns every valid row");
+        for w in v.windows(2) {
+            assert!(w[0].ts >= w[1].ts, "newest first");
+        }
+    }
+
+    #[test]
+    fn audit_entry_sanitize_bounds() {
+        let a = AuditEntry {
+            ts: Utc::now(),
+            kind: "k".repeat(100),
+            detail: "d".repeat(1000),
+        }
+        .sanitize();
+        assert!(a.kind.len() <= 64);
+        assert!(a.detail.len() <= 500);
+    }
 }

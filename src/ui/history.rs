@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::storage::{ChatSession, Storage};
+use crate::storage::{AuditEntry, ChatSession, Storage};
 use serde_json;
 use std::sync::mpsc;
 
@@ -8,6 +8,7 @@ pub struct HistoryPanel {
     selected_session: Option<usize>,
     show_session_detail: bool,
     loaded: bool,
+    audit: Vec<AuditEntry>,
 }
 
 impl HistoryPanel {
@@ -17,6 +18,7 @@ impl HistoryPanel {
             selected_session: None,
             show_session_detail: false,
             loaded: false,
+            audit: Vec::new(),
         }
     }
 
@@ -28,6 +30,9 @@ impl HistoryPanel {
     fn reload(&mut self, storage: &Storage) {
         if let Ok(sessions) = storage.load_sessions() {
             self.sessions = sessions;
+        }
+        if let Ok(audit) = storage.load_audit() {
+            self.audit = audit;
         }
         self.loaded = true;
     }
@@ -41,6 +46,43 @@ impl HistoryPanel {
         if !self.loaded {
             self.reload(storage);
         }
+        // Audit rows arrive from app actions at any time; refresh cheaply on
+        // every show so the trail never looks stale.
+        if let Ok(audit) = storage.load_audit() {
+            self.audit = audit;
+        }
+
+        egui::CollapsingHeader::new(format!("Security activity ({})", self.audit.len()))
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                    if self.audit.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No security events yet.")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+                        );
+                    }
+                    for a in &self.audit {
+                        // Test scaffolding stays in the store but out of the UI.
+                        if a.kind.starts_with("test.") {
+                            continue;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {:<16}  {}",
+                                a.ts.format("%m-%d %H:%M"),
+                                a.kind,
+                                a.detail
+                            ))
+                            .size(11.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                        );
+                    }
+                });
+            });
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.heading(egui::RichText::new("📜 Chat History").size(22.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
