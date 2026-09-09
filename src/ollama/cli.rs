@@ -81,7 +81,11 @@ impl OllamaCli {
         Ok(response.models)
     }
 
-    pub async fn pull_model(&self, name: &str) -> Result<()> {
+    pub async fn pull_model(
+        &self,
+        name: &str,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<()> {
         validate_model_name(name)?;
         let mut child = Command::new(&self.ollama_path)
             .args(["pull", name])
@@ -100,9 +104,14 @@ impl OllamaCli {
 
         let last_error_stdout = last_error.clone();
         let last_error_stderr = last_error.clone();
+        let progress_stdout = progress.clone();
+        let progress_stderr = progress.clone();
 
         let stdout_task = async move {
             while let Some(line) = stdout_reader.next_line().await? {
+                if let Some(tx) = &progress_stdout {
+                    let _ = tx.send(line.clone()).await;
+                }
                 if line.contains("error") || line.contains("Error") {
                     let mut err = last_error_stdout.lock().await;
                     err.push_str(&line);

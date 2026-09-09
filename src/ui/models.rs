@@ -8,6 +8,7 @@ pub struct ModelsPanel {
     pull_input: String,
     pulling: bool,
     deleting: Option<String>,
+    pull_lines: Vec<String>,
 }
 
 impl ModelsPanel {
@@ -16,6 +17,25 @@ impl ModelsPanel {
             pull_input: String::new(),
             pulling: false,
             deleting: None,
+            pull_lines: Vec::new(),
+        }
+    }
+
+    /// A progress line from `ollama pull`. Bounded; overlong lines trimmed.
+    pub fn push_progress(&mut self, line: String) {
+        let mut line = line.replace('\r', " ");
+        if line.len() > 160 {
+            line.truncate(160);
+            line.push('…');
+        }
+        if line.trim().is_empty() {
+            return;
+        }
+        self.pull_lines.push(line);
+        const CAP: usize = 30;
+        if self.pull_lines.len() > CAP {
+            let overflow = self.pull_lines.len() - CAP;
+            self.pull_lines.drain(0..overflow);
         }
     }
 
@@ -77,6 +97,22 @@ impl ModelsPanel {
                     ui.spinner();
                     ui.label(egui::RichText::new("Pulling…").color(egui::Color32::from_rgb(0x88, 0xaa, 0xcc)));
                 }
+                if !self.pull_lines.is_empty() {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &self.pull_lines {
+                                ui.label(
+                                    egui::RichText::new(line)
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                                );
+                            }
+                        });
+                }
             });
         });
 
@@ -116,7 +152,6 @@ impl ModelsPanel {
                     .spacing([16.0, 12.0])
                     .striped(true)
                     .show(ui, |ui| {
-                        ui.add_space(4.0);
                         ui.strong(egui::RichText::new("Name").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Size").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Fit").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
@@ -125,7 +160,6 @@ impl ModelsPanel {
                         ui.end_row();
 
                         for model in models.iter() {
-                            ui.add_space(4.0);
                             ui.label(egui::RichText::new(&model.name).size(13.0).color(egui::Color32::WHITE));
                             ui.label(egui::RichText::new(crate::resources::format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
                             {
@@ -178,15 +212,25 @@ impl ModelsPanel {
         rt: &Runtime,
     ) {
         self.pulling = true;
+        self.pull_lines.clear();
         let name = name.to_string();
         let tx = tx.clone();
 
         // Prefer CLI for pull (shows progress)
         if let Some(client) = cli_client {
             let client = client.clone();
+            let tx_done = tx.clone();
+            let (ptx, mut prx) = tokio::sync::mpsc::channel::<String>(100);
             rt.spawn(async move {
-                let result = client.pull_model(&name).await;
-                let _ = tx.send(crate::ui::app::AppMessage::ModelPulled(result.map(|_| name)));
+                while let Some(line) = prx.recv().await {
+                    let _ = tx.send(crate::ui::app::AppMessage::PullProgress(line));
+                }
+            });
+            rt.spawn(async move {
+                let result = client.pull_model(&name, Some(ptx)).await;
+                let _ = tx_done.send(crate::ui::app::AppMessage::ModelPulled(
+                    result.map(|_| name),
+                ));
             });
         } else if let Some(client) = api_client {
             let client = client.clone();
@@ -198,7 +242,16 @@ impl ModelsPanel {
     }
 
     pub fn note_transfer_finished(&mut self) {
+        self.note_pull_finished(true);
+    }
+
+    /// On failure the CLI output stays visible (it holds the error);
+    /// on success the lines clear back to a clean panel.
+    pub fn note_pull_finished(&mut self, ok: bool) {
         self.pulling = false;
+        if ok {
+            self.pull_lines.clear();
+        }
     }
 
     fn delete_model(
@@ -226,5 +279,27 @@ impl ModelsPanel {
                 let _ = tx.send(crate::ui::app::AppMessage::ModelDeleted(result.map(|_| name)));
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_caps_and_trims() {
+        let mut p = ModelsPanel::new();
+        for i in 0..40 {
+            p.push_progress(format!("line {i}"));
+        }
+        assert_eq!(p.pull_lines.len(), 30);
+        assert_eq!(p.pull_lines[0], "line 10");
+        p.push_progress("   ".to_string());
+        assert_eq!(p.pull_lines.len(), 30);
+        p.push_progress("x".repeat(200));
+        assert!(p.pull_lines.last().unwrap().len() <= 165);
+        p.note_transfer_finished();
+        assert!(p.pull_lines.is_empty());
+        assert!(!p.pulling);
     }
 }

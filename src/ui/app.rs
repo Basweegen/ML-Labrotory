@@ -39,6 +39,7 @@ pub enum AppMessage {
     VoiceState { enabled: bool, note: String },
     VoiceInput(usize, String),
     ChatChunk(usize, u64, String),
+    PullProgress(String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -605,10 +606,15 @@ impl AiDashboardApp {
                 }
                 AppMessage::ModelPulled(res) => {
                     match res {
-                        Ok(n) => self.status = format!("Pulled {}", n),
-                        Err(e) => self.status = format!("Pull failed: {}", e),
+                        Ok(n) => {
+                            self.status = format!("Pulled {}", n);
+                            self.models_panel.note_pull_finished(true);
+                        }
+                        Err(e) => {
+                            self.status = format!("Pull failed: {}", e);
+                            self.models_panel.note_pull_finished(false);
+                        }
                     }
-                    self.models_panel.note_transfer_finished();
                     self.refresh_models();
                 }
                 AppMessage::RefreshModels => {
@@ -628,6 +634,9 @@ impl AiDashboardApp {
                     }
                     self.models_panel.note_transfer_finished();
                     self.refresh_models();
+                }
+                AppMessage::PullProgress(line) => {
+                    self.models_panel.push_progress(line);
                 }
                 AppMessage::NewChat => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
