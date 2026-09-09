@@ -282,7 +282,20 @@ impl ChatPanel {
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
                 if send_btn.clicked() {
                 self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
-            }
+                }
+                ui.add_space(4.0);
+                let ask_btn = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Ask all").size(13.0))
+                            .fill(egui::Color32::from_rgb(0x00, 0x55, 0x55))
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .on_hover_text("Send this input to every slot with a model");
+                if ask_btn.clicked() {
+                    if let Some(prompt) = self.take_broadcast() {
+                        let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                    }
+                }
 
                 if self.is_streaming {
                     ui.add_space(4.0);
@@ -293,6 +306,7 @@ impl ChatPanel {
                     ).on_hover_text("Stop generation");
                     if stop_btn.clicked() {
                         self.stop_stream();
+                        let _ = tx.send(crate::ui::app::AppMessage::StopStream(slot_idx));
                     }
                 }
             });
@@ -479,14 +493,55 @@ impl ChatPanel {
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
     ) {
-        let Some(model_name) = selected_model else { return };
-        let Some(client) = api_client else { return };
+        // Trim the newline Enter inserts before the send triggers (the Enter
+        // path bypasses the button's enabled guard).
+        let prompt = self.input.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.send_prompt(
+            prompt,
+            _models,
+            selected_model,
+            role_prompt,
+            slot_idx,
+            api_client,
+            tx,
+            rt,
+        ) {
+            self.input.clear();
+        }
+    }
 
-        // Trim the newline Enter inserts before the send triggers, and refuse
-        // empty sends (the Enter path bypasses the button's enabled guard).
+    /// Drain the input for a broadcast. None when empty/streaming.
+    pub fn take_broadcast(&mut self) -> Option<String> {
         let prompt = self.input.trim().to_string();
         if prompt.is_empty() || self.is_streaming {
-            return;
+            return None;
+        }
+        self.input.clear();
+        Some(prompt)
+    }
+
+    /// Send an explicit prompt (single Sends and broadcasts share this).
+    /// False when skipped (no model/link, already streaming).
+    pub fn send_prompt(
+        &mut self,
+        prompt: String,
+        _models: &[crate::ollama::api::Model],
+        selected_model: &Option<String>,
+        role_prompt: &str,
+        slot_idx: usize,
+        api_client: &Option<OllamaClient>,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
+    ) -> bool {
+        let Some(model_name) = selected_model else { return false };
+        let Some(client) = api_client else { return false };
+
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() || self.is_streaming {
+            return false;
         }
 
         let prompt = if prompt.len() > Self::MAX_CONTENT_CHARS {
@@ -516,7 +571,8 @@ impl ChatPanel {
         self.send_started = Some(Instant::now());
 
         let role_prompt = role_prompt.to_string();
-        rt.spawn(async move {
+        let tx_handle = tx.clone();
+        let h = rt.spawn(async move {
             let mut messages = Vec::new();
             if !role_prompt.trim().is_empty() {
                 messages.push(Message {
@@ -555,6 +611,8 @@ impl ChatPanel {
                 slot_idx, seq, result,
             ));
         });
+        let _ = tx_handle.send(crate::ui::app::AppMessage::StreamHandle(slot_idx, h));
+        true
     }
 
     /// Returns (success, elapsed_secs, response_chars) as a training signal.

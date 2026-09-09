@@ -40,6 +40,7 @@ pub enum AppMessage {
     VoiceInput(usize, String),
     ChatChunk(usize, u64, String),
     EditorChunk(usize, String),
+    Broadcast(String),
     PullProgress(String),
     StreamHandle(usize, tokio::task::JoinHandle<()>),
     StopStream(usize),
@@ -94,6 +95,19 @@ impl ModelRole {
             ModelRole::Custom(s) => s.clone(),
         }
     }
+}
+
+/// Shared identity + memory + slot role, sent as the system prompt.
+fn compose_system_prompt(persona: &str, memory: &str, slot: &ModelSlot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !persona.trim().is_empty() {
+        parts.push(persona.trim().to_string());
+    }
+    if !memory.trim().is_empty() {
+        parts.push(format!("Remembered facts:\n{}", memory.trim()));
+    }
+    parts.push(slot.role_prompt());
+    parts.join("\n\n")
 }
 
 /// One runnable model slot: a model assignment + a role + its own chat history.
@@ -551,6 +565,39 @@ impl AiDashboardApp {
     fn poll_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                AppMessage::Broadcast(prompt) => {
+                    let models = self.models.clone();
+                    let api = self.api_client.clone();
+                    let persona = self.settings.persona.clone();
+                    let memory = self.settings.memory.clone();
+                    let mut sent = 0usize;
+                    for idx in 0..self.slots.len() {
+                        let model = self.slots[idx].model.clone();
+                        let role_prompt = {
+                            let s = &self.slots[idx];
+                            compose_system_prompt(&persona, &memory, s)
+                        };
+                        if let Some(slot) = self.slots.get_mut(idx) {
+                            if slot.chat.send_prompt(
+                                prompt.clone(),
+                                &models,
+                                &model,
+                                &role_prompt,
+                                idx,
+                                &api,
+                                &self.tx,
+                                &self.rt,
+                            ) {
+                                sent += 1;
+                            }
+                        }
+                    }
+                    self.status = if sent == 0 {
+                        "Ask all: no slot answered (need models, idle chats)".to_string()
+                    } else {
+                        format!("Asked {} slot{}", sent, if sent == 1 { "" } else { "s" })
+                    };
+                }
                 AppMessage::ChatChunk(idx, seq, piece) => {
                     if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.push_chunk(seq, &piece);
@@ -1207,17 +1254,11 @@ impl AiDashboardApp {
         // Focused slot chat. One shared identity for every model:
         // persona (who I am) + memory (what I remember) + slot role (job).
         let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
-        let role_prompt = {
-            let mut parts: Vec<String> = Vec::new();
-            if !self.settings.persona.trim().is_empty() {
-                parts.push(self.settings.persona.trim().to_string());
-            }
-            if !self.settings.memory.trim().is_empty() {
-                parts.push(format!("Remembered facts:\n{}", self.settings.memory.trim()));
-            }
-            parts.push(self.slots[f].role_prompt());
-            parts.join("\n\n")
-        };
+        let role_prompt = compose_system_prompt(
+            &self.settings.persona,
+            &self.settings.memory,
+            &self.slots[f],
+        );
         let slot_model = self.slots[f].model.clone();
         let slot_role = self.slots[f].role.label();
         ui.horizontal(|ui| {
