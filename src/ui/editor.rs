@@ -295,7 +295,7 @@ impl EditorPanel {
         let base = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         base.join("Documents")
             .join("Code_air")
-            .join("ml_app")
+            .join("ml_lab")
             .join("main.py")
             .to_string_lossy()
             .to_string()

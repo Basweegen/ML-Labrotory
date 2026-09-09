@@ -53,7 +53,7 @@ impl ModelsPanel {
             ui.label(egui::RichText::new("Pull New Model").size(15.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let text_response = ui.add(
+                let _text_response = ui.add(
                     egui::TextEdit::singleline(&mut self.pull_input)
                         .desired_width(300.0)
                         .font(egui::TextStyle::Monospace)
@@ -127,7 +127,7 @@ impl ModelsPanel {
                         for model in models.iter() {
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new(&model.name).size(13.0).color(egui::Color32::WHITE));
-                            ui.label(egui::RichText::new(format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                            ui.label(egui::RichText::new(crate::resources::format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
                             {
                                 let (txt, (rr, gg, bb)) = crate::resources::fit_label(model.size, free);
                                 ui.label(egui::RichText::new(txt).size(13.0).color(egui::Color32::from_rgb(rr, gg, bb)));
@@ -227,15 +227,4 @@ impl ModelsPanel {
             });
         }
     }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-    format!("{:.1} {}", size, UNITS[unit_idx])
 }

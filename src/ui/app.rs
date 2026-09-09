@@ -292,7 +292,6 @@ impl AiDashboardApp {
         let others = self.current_sizes(Some(idx));
         match ResourceGuard::can_fit(&self.mem, &others, new_size) {
             Ok(()) => {
-                eprintln!("AUTOFILL slot={} model={}", idx + 1, name);
                 if let Some(slot) = self.slots.get_mut(idx) {
                     slot.model = Some(name.clone());
                 }
@@ -1133,11 +1132,6 @@ impl eframe::App for AiDashboardApp {
         let zoom = (self.settings.font_size / 14.0).clamp(0.5, 1.75);
         if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
             ui.ctx().set_zoom_factor(zoom);
-        }
-        static ZL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if ZL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 200 {
-            eprintln!("GEO2 zoom={:.2} central={:.0}x{:.0} font={:.0}",
-                ui.ctx().zoom_factor(), ui.available_width(), ui.available_height(), self.settings.font_size);
         }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
         if self.settings.theme != self.last_theme {

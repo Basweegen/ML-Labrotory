@@ -228,7 +228,6 @@ impl ChatPanel {
                         .min_size(egui::vec2(112.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
                 if send_btn.clicked() {
-                    eprintln!("SEND clicked slot={} model={:?}", slot_idx, selected_model);
                     self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
                 }
 
