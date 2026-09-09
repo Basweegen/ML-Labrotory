@@ -181,17 +181,6 @@ impl OllamaClient {
         Ok(())
     }
 
-    pub async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let url = format!("{}/api/chat", self.base_url);
-        let resp = self.client.post(&url).json(&req).send().await?;
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(OllamaError::Api(err).into());
-        }
-        let data: ChatResponse = resp.json().await?;
-        Ok(data)
-    }
-
     /// Streaming chat. Calls `on_chunk` with each content piece as it
     /// arrives; resolves to the fully assembled response when done.
     pub async fn chat_stream(

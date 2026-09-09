@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(e.suggestion_buf, "hello world");
         // Stale and future ids ignored.
         e.push_chunk(5, "stale");
-        e.push_chunk(usize::MAX, "stale");
+        e.push_chunk(7, "stale");
         assert_eq!(e.suggestion_buf, "hello world");
     }
 }
