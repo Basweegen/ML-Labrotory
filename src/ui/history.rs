@@ -1,11 +1,13 @@
 use eframe::egui;
 use crate::storage::{ChatSession, Storage};
 use serde_json;
+use std::sync::mpsc;
 
 pub struct HistoryPanel {
     pub sessions: Vec<ChatSession>,
     selected_session: Option<usize>,
     show_session_detail: bool,
+    loaded: bool,
 }
 
 impl HistoryPanel {
@@ -14,10 +16,31 @@ impl HistoryPanel {
             sessions: Vec::new(),
             selected_session: None,
             show_session_detail: false,
+            loaded: false,
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, storage: &Storage) {
+    /// Force a reload next time the tab is shown (called after an autosave).
+    pub fn mark_dirty(&mut self) {
+        self.loaded = false;
+    }
+
+    fn reload(&mut self, storage: &Storage) {
+        if let Ok(sessions) = storage.load_sessions() {
+            self.sessions = sessions;
+        }
+        self.loaded = true;
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        storage: &Storage,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+    ) {
+        if !self.loaded {
+            self.reload(storage);
+        }
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.heading(egui::RichText::new("📜 Chat History").size(22.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
@@ -29,9 +52,9 @@ impl HistoryPanel {
                         .corner_radius(egui::CornerRadius::same(6))
                 );
                 if refresh_btn.clicked() {
-                    if let Ok(sessions) = storage.load_sessions() {
-                        self.sessions = sessions;
-                    }
+                    self.reload(storage);
+                    self.selected_session = None;
+                    self.show_session_detail = false;
                 }
                 ui.add_space(8.0);
                 let new_btn = ui.add(
@@ -40,6 +63,7 @@ impl HistoryPanel {
                         .corner_radius(egui::CornerRadius::same(6))
                 );
                 if new_btn.clicked() {
+                    let _ = tx.send(crate::ui::app::AppMessage::NewChat);
                     self.selected_session = None;
                     self.show_session_detail = false;
                 }
@@ -127,6 +151,15 @@ impl HistoryPanel {
                     
                     let session_id = session.id;
                     ui.horizontal(|ui| {
+                        let open_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("Open in chat").size(13.0))
+                                .fill(egui::Color32::from_rgb(0x00, 0x55, 0xaa))
+                                .corner_radius(egui::CornerRadius::same(6))
+                        );
+                        if open_btn.on_hover_text("Load this session into the focused chat slot").clicked() {
+                            let _ = tx.send(crate::ui::app::AppMessage::LoadSession(session.clone()));
+                        }
+                        ui.add_space(8.0);
                         let delete_btn = ui.add(
                             egui::Button::new(egui::RichText::new("🗑 Delete Session").size(13.0))
                                 .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))

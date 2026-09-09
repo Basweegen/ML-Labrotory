@@ -1,15 +1,17 @@
 use anyhow::Result;
+use chrono::Utc;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
+use uuid::Uuid;
 
 use crate::neural::ModelProfileNetwork;
 use crate::ollama::api::{ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
-use crate::storage::{AppSettings, Storage, Theme};
+use crate::storage::{AppSettings, ChatSession, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
@@ -28,6 +30,8 @@ pub enum AppMessage {
     ModelSelected(String),
     ModelPulled(Result<String>),
     ModelDeleted(Result<String>),
+    NewChat,
+    LoadSession(ChatSession),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -88,6 +92,9 @@ pub struct ModelSlot {
     pub role: ModelRole,
     pub custom_role: String,
     pub chat: ChatPanel,
+    pub session_id: Uuid,
+    pub session_created: chrono::DateTime<chrono::Utc>,
+    pub last_saved_revision: u64,
 }
 
 impl ModelSlot {
@@ -98,6 +105,9 @@ impl ModelSlot {
             role,
             custom_role: String::new(),
             chat: ChatPanel::new(),
+            session_id: Uuid::new_v4(),
+            session_created: Utc::now(),
+            last_saved_revision: 0,
         }
     }
 
@@ -307,6 +317,62 @@ impl AiDashboardApp {
         }
     }
 
+    // ---------- chat persistence ----------
+
+    /// Write slots whose chat changed since the last save. Empty chats are
+    /// skipped so cleared/new slots don't leave junk rows.
+    fn autosave_dirty_slots(&mut self) {
+        for idx in 0..self.slots.len() {
+            let dirty =
+                self.slots[idx].chat.revision() != self.slots[idx].last_saved_revision;
+            if !dirty || self.slots[idx].chat.messages().is_empty() {
+                continue;
+            }
+            let session = ChatSession {
+                id: self.slots[idx].session_id,
+                name: Self::session_name(idx, &self.slots[idx]),
+                model: self.slots[idx]
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "(no model)".to_string()),
+                messages: self.slots[idx].chat.messages().to_vec(),
+                created_at: self.slots[idx].session_created,
+                updated_at: Utc::now(),
+            };
+            if let Some(st) = self.storage.as_ref() {
+                if st.save_session(&session).is_ok() {
+                    self.slots[idx].last_saved_revision =
+                        self.slots[idx].chat.revision();
+                    self.history.mark_dirty();
+                }
+            }
+        }
+    }
+
+    /// Session title from the first user message (first 8 words, 48 chars max).
+    fn session_name(idx: usize, slot: &ModelSlot) -> String {
+        let first_user = slot
+            .chat
+            .messages()
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let title: String = first_user
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if title.is_empty() {
+            return format!("Slot {} chat", idx + 1);
+        }
+        let mut end = title.len().min(48);
+        while !title.is_char_boundary(end) {
+            end -= 1;
+        }
+        title[..end].to_string()
+    }
+
     // ---------- model loading ----------
 
     fn refresh_models(&mut self) {
@@ -417,6 +483,26 @@ impl AiDashboardApp {
                     }
                     self.models_panel.note_transfer_finished();
                     self.refresh_models();
+                }
+                AppMessage::NewChat => {
+                    let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(slot) = self.slots.get_mut(f) {
+                        slot.chat.clear_chat();
+                        slot.session_id = Uuid::new_v4();
+                        slot.session_created = Utc::now();
+                        self.status = format!("Slot {} started a new chat", f + 1);
+                    }
+                }
+                AppMessage::LoadSession(s) => {
+                    let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(slot) = self.slots.get_mut(f) {
+                        slot.chat.load_messages(s.messages.clone());
+                        slot.session_id = s.id;
+                        slot.session_created = s.created_at;
+                        slot.last_saved_revision = slot.chat.revision();
+                        self.status = format!("Loaded '{}' into slot {}", s.name, f + 1);
+                    }
+                    self.tab = Tab::Chat;
                 }
             }
         }
@@ -936,7 +1022,7 @@ impl eframe::App for AiDashboardApp {
                 }
                 Tab::History => {
                     if let Some(st) = self.storage.as_ref() {
-                        self.history.show(ui, st);
+                        self.history.show(ui, st, &self.tx);
                     } else {
                         ui.label("Storage unavailable.");
                     }
@@ -960,6 +1046,8 @@ impl eframe::App for AiDashboardApp {
                 }
             });
         });
+
+        self.autosave_dirty_slots();
 
         // Keep the resource meter and spinners live.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
