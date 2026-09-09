@@ -1,7 +1,7 @@
 use crate::neural::ModelProfileNetwork;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use egui_plot::{Line, Plot, PlotPoints};
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -14,6 +14,8 @@ pub struct NeuralVizPanel {
     pub selected_layer: usize,
     pub weight_hovered: Option<(usize, usize, usize)>, // (layer, row, col)
     pub last_loss: Option<f32>,
+    pub profile_input: String,
+    pub profile_result: Option<Vec<f32>>,
 }
 
 impl Default for NeuralVizPanel {
@@ -26,6 +28,8 @@ impl Default for NeuralVizPanel {
             selected_layer: 0,
             weight_hovered: None,
             last_loss: None,
+            profile_input: String::new(),
+            profile_result: None,
         }
     }
 }
@@ -52,6 +56,11 @@ impl NeuralVizPanel {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(12.0);
+
+        self.show_profiler(ui, network);
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(16.0);
 
         if self.show_architecture {
             self.render_architecture(ui, network);
@@ -601,5 +610,122 @@ impl NeuralVizPanel {
     fn stat_row(&self, ui: &mut egui::Ui, label: &str, value: &str) {
         ui.label(egui::RichText::new(label).size(12.0).color(Color32::from_rgb(0x88, 0x88, 0x88)));
         ui.label(egui::RichText::new(value).size(12.0).color(Color32::WHITE).strong());
+    }
+}
+impl NeuralVizPanel {
+    /// Interactive probe: encode free text into the profiler's 8-dim feature
+    /// space and show the live network's output distribution. Outputs are
+    /// argmax indices, not model names — the net learns which response
+    /// pattern fits, not which model. Random until chat turns accumulate.
+    fn show_profiler(&mut self, ui: &mut egui::Ui, network: &ModelProfileNetwork) {
+        ui.label(egui::RichText::new("Task Profiler").size(18.0).color(Color32::from_rgb(0x00, 0xaa, 0xff)).strong());
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(format!(
+            "Live read-out of the profiler net ({} turn{} of experience).",
+            network.experience_buffer.len(),
+            if network.experience_buffer.len() == 1 { "" } else { "s" }
+        )).size(11.0).color(Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.profile_input)
+                    .desired_width(200.0)
+                    .hint_text("Describe a task, e.g. debug this borrow error"),
+            );
+            let go = ui.button("Profile").clicked()
+                || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if go && !self.profile_input.trim().is_empty() {
+                let feats = Self::profile_features(&self.profile_input);
+                let input = Array1::from_vec(feats.to_vec());
+                let out = network.forward(&input);
+                self.profile_result = Some(out.to_vec());
+            }
+        });
+        if let Some(probs) = self.profile_result.clone() {
+            ui.add_space(4.0);
+            let best = probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            for (i, p) in probs.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!(
+                        "out {}{}",
+                        i,
+                        if i == best { " ★" } else { "" }
+                    ))
+                    .size(12.0)
+                    .color(if i == best {
+                        Color32::from_rgb(0xff, 0xaa, 0x00)
+                    } else {
+                        Color32::from_rgb(0xaa, 0xaa, 0xaa)
+                    }));
+                    ui.add(
+                        egui::ProgressBar::new(p.clamp(0.0, 1.0))
+                            .desired_width(220.0)
+                            .show_percentage(),
+                    );
+                });
+            }
+        }
+        ui.add_space(4.0);
+    }
+
+    /// Heuristic 8-dim probe features. Same spirit as the training-time
+    /// features in observe_chat: cheap text statistics, all clamped to
+    /// [0, 1] so a novel input can't blow up the forward pass.
+    fn profile_features(text: &str) -> [f32; 8] {
+        let chars = text.chars().count().max(1) as f32;
+        let words = text.split_whitespace().count() as f32;
+        let lines = text.lines().count() as f32;
+        let qmarks = text.chars().filter(|&c| c == '?').count() as f32;
+        let digits = text.chars().filter(|c| c.is_ascii_digit()).count() as f32;
+        let upper = text
+            .chars()
+            .filter(|c| c.is_alphabetic() && c.is_uppercase())
+            .count() as f32;
+        let codey = text
+            .chars()
+            .filter(|c| matches!(c, '{' | '}' | ';' | '=' | '(' | ')' | '`'))
+            .count() as f32;
+        let fences = if text.contains("```") { 1.0 } else { 0.0 };
+        [
+            (chars / 2000.0).min(1.0),
+            (words / 300.0).min(1.0),
+            fences,
+            (qmarks / 3.0).min(1.0),
+            (lines / 40.0).min(1.0),
+            (digits / chars * 5.0).min(1.0),
+            (upper / chars * 3.0).min(1.0),
+            (codey / 20.0).min(1.0),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiler_features_bounded() {
+        let f = NeuralVizPanel::profile_features("What is ```code``` here?? {{}} ABC 123\nline2");
+        assert_eq!(f.len(), 8);
+        assert!(f.iter().all(|v| (0.0..=1.0).contains(v)));
+        assert_eq!(f[2], 1.0);
+        let g = NeuralVizPanel::profile_features("");
+        assert!(g.iter().all(|v| (0.0..=1.0).contains(v)));
+        assert_eq!(g[2], 0.0);
+    }
+
+    #[test]
+    fn profiler_forward_sums_to_one() {
+        let net = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        let feats = NeuralVizPanel::profile_features("debug my rust code?");
+        let out = net.forward(&Array1::from_vec(feats.to_vec()));
+        assert_eq!(out.len(), 4);
+        let sum: f32 = out.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4, "softmax must sum to 1, got {sum}");
     }
 }
