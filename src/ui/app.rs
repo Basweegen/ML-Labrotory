@@ -156,6 +156,7 @@ enum Tab {
     Editor,
     History,
     Neural,
+    Compare,
     Settings,
 }
 
@@ -167,6 +168,7 @@ impl Tab {
             Tab::Editor => "Editor",
             Tab::History => "History",
             Tab::Neural => "Neural",
+            Tab::Compare => "Compare",
             Tab::Settings => "Settings",
         }
     }
@@ -178,6 +180,7 @@ impl Tab {
             Tab::Editor => "📝",
             Tab::History => "📜",
             Tab::Neural => "🧠",
+            Tab::Compare => "⚖",
             Tab::Settings => "⚙",
         }
     }
@@ -189,6 +192,7 @@ impl Tab {
             Tab::Editor,
             Tab::History,
             Tab::Neural,
+            Tab::Compare,
             Tab::Settings,
         ]
     }
@@ -547,6 +551,98 @@ impl AiDashboardApp {
                 let _ = st.save_settings(&self.settings);
             }
         }
+    }
+
+    /// Side-by-side latest assistant reply per slot. Read-only: broadcast
+    /// once in Chat, compare here.
+    fn show_compare(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.heading(
+                egui::RichText::new("\u{2696} Compare slot answers")
+                    .size(22.0)
+                    .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+            );
+        });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Latest assistant reply per slot — broadcast once, read side by side.")
+                .size(12.0)
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(8.0);
+        let answered: Vec<(usize, &ModelSlot)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.chat.messages().iter().any(|m| m.role == "assistant"))
+            .collect();
+        if answered.is_empty() {
+            ui.label(
+                egui::RichText::new("No answers yet — ask something in Chat (Ask all hits every slot).")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+            );
+            return;
+        }
+        egui::ScrollArea::horizontal()
+            .id_salt("compare_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, slot) in answered {
+                        if let Some(last) = slot
+                            .chat
+                            .messages()
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == "assistant")
+                        {
+                            egui::Frame::group(&ui.style())
+                                .fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x1e))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(280.0);
+                                    ui.set_max_width(340.0);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Slot {} \u{00B7} {} [{}]",
+                                            i + 1,
+                                            slot.model
+                                                .clone()
+                                                .unwrap_or("(empty)".to_string()),
+                                            slot.role.label()
+                                        ))
+                                        .size(13.0)
+                                        .strong(),
+                                    );
+                                    ui.separator();
+                                    let mut text = last.content.chars().take(4000).collect::<String>();
+                                    if last.content.chars().count() > 4000 {
+                                        text.push_str("\n…[truncated for compare]");
+                                    }
+                                    egui::ScrollArea::vertical()
+                                        .max_height(300.0)
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(text)
+                                                    .size(13.0)
+                                                    .color(egui::Color32::WHITE),
+                                            );
+                                        });
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(last.timestamp.format("%H:%M").to_string())
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                                    );
+                                });
+                        }
+                    }
+                });
+            });
     }
 
     // ---------- model loading ----------
@@ -1488,6 +1584,9 @@ impl eframe::App for AiDashboardApp {
                 }
                 Tab::Neural => {
                     self.neural_panel.show(ui, &self.network);
+                }
+                Tab::Compare => {
+                    self.show_compare(ui);
                 }
                 Tab::Settings => {
                     if self.storage.is_some() {
