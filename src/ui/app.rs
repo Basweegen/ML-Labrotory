@@ -624,6 +624,7 @@ impl AiDashboardApp {
                                         text.push_str("\n…[truncated for compare]");
                                     }
                                     egui::ScrollArea::vertical()
+                                        .id_salt(format!("compare_card_{i}"))
                                         .max_height(300.0)
                                         .show(ui, |ui| {
                                             ui.label(
