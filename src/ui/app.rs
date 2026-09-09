@@ -1035,6 +1035,20 @@ impl AiDashboardApp {
 
     // ---------- UI ----------
 
+    /// Set the Settings font size and persist it (shared by the A+/A-
+    /// buttons and the Ctrl+= / Ctrl+- / Ctrl+0 shortcuts).
+    fn set_zoom(&mut self, size: f32) {
+        self.settings.font_size = size.clamp(10.0, 32.0);
+        if let Some(st) = self.storage.as_ref() {
+            let _ = st.save_settings(&self.settings);
+        }
+    }
+
+    fn bump_zoom(&mut self, delta: f32) {
+        let next = self.settings.font_size + delta;
+        self.set_zoom(next);
+    }
+
     fn show_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(
@@ -1103,13 +1117,10 @@ impl AiDashboardApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("A+")
-                    .on_hover_text("Zoom in (saved to Settings → Font size)")
+                    .on_hover_text("Zoom in (Ctrl+=, saved to Settings → Font size)")
                     .clicked()
                 {
-                    self.settings.font_size = (self.settings.font_size + 1.0).clamp(10.0, 32.0);
-                    if let Some(st) = self.storage.as_ref() {
-                        let _ = st.save_settings(&self.settings);
-                    }
+                    self.bump_zoom(1.0);
                 }
                 ui.label(
                     egui::RichText::new(format!(
@@ -1121,13 +1132,10 @@ impl AiDashboardApp {
                 );
                 if ui
                     .small_button("A−")
-                    .on_hover_text("Zoom out (saved to Settings → Font size)")
+                    .on_hover_text("Zoom out (Ctrl+-, saved to Settings → Font size)")
                     .clicked()
                 {
-                    self.settings.font_size = (self.settings.font_size - 1.0).clamp(10.0, 32.0);
-                    if let Some(st) = self.storage.as_ref() {
-                        let _ = st.save_settings(&self.settings);
-                    }
+                    self.bump_zoom(-1.0);
                 }
             });
         });
@@ -1480,6 +1488,16 @@ impl eframe::App for AiDashboardApp {
         let zoom = (self.settings.font_size / 14.0).clamp(0.5, 1.75);
         if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
             ui.ctx().set_zoom_factor(zoom);
+        }
+        // Keyboard zoom: Ctrl+= / Ctrl+- / Ctrl+0 mirror the A+/A- buttons.
+        if ui.ctx().input(|i| i.modifiers.ctrl) {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Equals)) {
+                self.bump_zoom(1.0);
+            } else if ui.ctx().input(|i| i.key_pressed(egui::Key::Minus)) {
+                self.bump_zoom(-1.0);
+            } else if ui.ctx().input(|i| i.key_pressed(egui::Key::Num0)) {
+                self.set_zoom(14.0);
+            }
         }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
         if self.settings.theme != self.last_theme {
