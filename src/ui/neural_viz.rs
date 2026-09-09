@@ -13,6 +13,7 @@ pub struct NeuralVizPanel {
     pub show_architecture: bool,
     pub selected_layer: usize,
     pub weight_hovered: Option<(usize, usize, usize)>, // (layer, row, col)
+    pub last_loss: Option<f32>,
 }
 
 impl Default for NeuralVizPanel {
@@ -24,6 +25,7 @@ impl Default for NeuralVizPanel {
             show_architecture: true,
             selected_layer: 0,
             weight_hovered: None,
+            last_loss: None,
         }
     }
 }
@@ -577,6 +579,23 @@ impl NeuralVizPanel {
                 }
                 ui.end_row();
             });
+
+        ui.add_space(4.0);
+        match self.last_loss {
+            Some(l) => self.stat_row(
+                ui,
+                "Last train loss",
+                &format!("{:.6} ({} experiences)", l, network.experience_buffer.len()),
+            ),
+            None => self.stat_row(
+                ui,
+                "Training",
+                &format!(
+                    "collecting ({} / 32 turns to first step)",
+                    network.experience_buffer.len().min(32)
+                ),
+            ),
+        }
     }
 
     fn stat_row(&self, ui: &mut egui::Ui, label: &str, value: &str) {

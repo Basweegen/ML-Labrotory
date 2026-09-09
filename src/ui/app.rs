@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
+use ndarray::Array1;
 
 use crate::neural::ModelProfileNetwork;
 use crate::ollama::api::{ChatResponse, Model, OllamaClient};
@@ -234,7 +235,7 @@ impl AiDashboardApp {
             settings,
             storage,
             neural_panel: NeuralVizPanel::new(),
-            network: ModelProfileNetwork::new(8, vec![16, 16], 4),
+            network: Self::load_network(),
             mem,
             mem_checked: Instant::now(),
             report,
@@ -373,6 +374,78 @@ impl AiDashboardApp {
         title[..end].to_string()
     }
 
+    // ---------- profiler network training ----------
+
+    fn network_path() -> std::path::PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("ai-dashboard")
+            .join("network.bin")
+    }
+
+    /// Load the persisted profiler net; fall back to fresh on any mismatch.
+    fn load_network() -> ModelProfileNetwork {
+        let path = Self::network_path().to_string_lossy().to_string();
+        if let Ok(net) = ModelProfileNetwork::load(&path) {
+            if net.input_dim == 8 && net.hidden_dims == vec![16, 16] && net.output_dim == 4 {
+                return net;
+            }
+        }
+        ModelProfileNetwork::new(8, vec![16, 16], 4)
+    }
+
+    /// Feed a completed chat turn into the profiler network as training signal.
+    /// Context is an 8-dim heuristic feature vector (sizes, latency, outcome).
+    fn observe_chat(
+        &mut self,
+        idx: usize,
+        ok: bool,
+        elapsed: f32,
+        prompt_chars: usize,
+        resp_chars: usize,
+        hist_len: usize,
+        role_idx: usize,
+        model_name: &str,
+    ) {
+        let hash = model_name
+            .bytes()
+            .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+        let ctx = Array1::from_vec(vec![
+            (prompt_chars as f32 / 50_000.0).min(1.0),
+            (hist_len as f32 / 20.0).min(1.0),
+            if ok { 1.0 } else { 0.0 },
+            (elapsed / 120.0).min(1.0),
+            (resp_chars as f32 / 50_000.0).min(1.0),
+            (idx as f32 / 8.0).min(1.0),
+            role_idx as f32 / 6.0,
+            ((hash % 100) as f32) / 100.0,
+        ]);
+        let action = self.network.select_model_profile(&ctx);
+        let reward = if ok {
+            1.0 + (1.0 - (elapsed / 120.0).min(1.0)) * 0.5
+        } else {
+            -0.5
+        };
+        self.network.add_experience(crate::neural::Experience {
+            state: ctx.clone().into(),
+            action,
+            reward,
+            next_state: ctx.into(),
+            done: true,
+        });
+        self.network.update_performance(reward);
+        if self.network.experience_buffer.len() >= 32 {
+            if let Ok(loss) = self.network.train_step() {
+                if loss.is_finite() && loss > 0.0 {
+                    self.neural_panel.add_training_loss(loss);
+                    self.neural_panel.last_loss = Some(loss);
+                    let path = Self::network_path().to_string_lossy().to_string();
+                    let _ = self.network.save(&path);
+                }
+            }
+        }
+    }
+
     // ---------- model loading ----------
 
     fn refresh_models(&mut self) {
@@ -406,8 +479,48 @@ impl AiDashboardApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMessage::ChatResponse(idx, res) => {
-                    if let Some(slot) = self.slots.get_mut(idx) {
-                        slot.chat.handle_response(res);
+                    if idx < self.slots.len() {
+                        let (ok, elapsed, resp_chars);
+                        let prompt_chars: usize;
+                        let hist_len: usize;
+                        let role_idx: usize;
+                        let model_name: String;
+                        {
+                            let slot = &mut self.slots[idx];
+                            prompt_chars = slot
+                                .chat
+                                .messages()
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == "user")
+                                .map(|m| m.content.len())
+                                .unwrap_or(0);
+                            hist_len = slot.chat.messages().len();
+                            role_idx = match slot.role {
+                                ModelRole::General => 0,
+                                ModelRole::Coder => 1,
+                                ModelRole::Researcher => 2,
+                                ModelRole::Critic => 3,
+                                ModelRole::Planner => 4,
+                                ModelRole::Writer => 5,
+                                ModelRole::Custom(_) => 6,
+                            };
+                            model_name = slot.model.clone().unwrap_or_default();
+                            let out = slot.chat.handle_response(res);
+                            ok = out.0;
+                            elapsed = out.1;
+                            resp_chars = out.2;
+                        }
+                        self.observe_chat(
+                            idx,
+                            ok,
+                            elapsed,
+                            prompt_chars,
+                            resp_chars,
+                            hist_len,
+                            role_idx,
+                            &model_name,
+                        );
                     }
                 }
                 AppMessage::EditorSuggestion(id, res) => {

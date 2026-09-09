@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
 use crate::storage::ChatMessage;
 use std::sync::mpsc;
+use std::time::Instant;
 use tokio::runtime::Runtime;
 
 pub struct ChatPanel {
@@ -11,6 +12,7 @@ pub struct ChatPanel {
     is_streaming: bool,
     voice_enabled: bool,
     revision: u64,
+    send_started: Option<Instant>,
 }
 
 impl ChatPanel {
@@ -21,6 +23,7 @@ impl ChatPanel {
             is_streaming: false,
             voice_enabled: false,
             revision: 0,
+            send_started: None,
         }
     }
 
@@ -442,7 +445,7 @@ impl ChatPanel {
         let history: Vec<(String, String)> = self.messages.iter().rev().take(20).rev()
             .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
-        eprintln!("SEND start slot={} model={} prompt_chars={} hist={}", slot_idx, model_name, prompt.len(), history.len());
+        self.send_started = Some(Instant::now());
 
         let role_prompt = role_prompt.to_string();
         rt.spawn(async move {
@@ -476,17 +479,24 @@ impl ChatPanel {
         });
     }
 
-    pub fn handle_response(&mut self, response: Result<ChatResponse>) {
-        eprintln!("SEND done ok={}", response.is_ok());
+    /// Returns (success, elapsed_secs, response_chars) as a training signal.
+    pub fn handle_response(&mut self, response: Result<ChatResponse>) -> (bool, f32, usize) {
         self.is_streaming = false;
+        let elapsed = self
+            .send_started
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        self.send_started = None;
         match response {
             Ok(resp) => {
+                let n = resp.message.content.len();
                 let msg = ChatMessage {
                     role: "assistant".to_string(),
                     content: Self::cap_content(&resp.message.content),
                     timestamp: chrono::Utc::now(),
                 };
                 self.push_capped(msg);
+                (true, elapsed, n)
             }
             Err(e) => {
                 let em = format!("Request failed: {e}");
@@ -496,6 +506,7 @@ impl ChatPanel {
                     timestamp: chrono::Utc::now(),
                 };
                 self.push_capped(msg);
+                (false, elapsed, 0)
             }
         }
     }
