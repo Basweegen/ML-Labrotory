@@ -204,6 +204,7 @@ pub struct AiDashboardApp {
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
     last_ollama_url: String,
     last_allow_remote: bool,
+    linked: bool,
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
@@ -250,6 +251,7 @@ impl AiDashboardApp {
             inflight: HashMap::new(),
             last_ollama_url: settings.ollama_url.clone(),
             last_allow_remote: settings.allow_remote,
+            linked: false,
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
@@ -715,6 +717,7 @@ impl AiDashboardApp {
                     self.models_loading = false;
                     match res {
                         Ok(m) => {
+                            self.linked = true;
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
                             // First: re-attach models saved in the slot layout
@@ -757,6 +760,7 @@ impl AiDashboardApp {
                             }
                         }
                         Err(e) => {
+                            self.linked = false;
                             self.status = format!("Model refresh failed: {}", e);
                         }
                     }
@@ -979,11 +983,26 @@ impl AiDashboardApp {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(self.status.clone())
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
-            );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let (dot, txt) = if self.linked {
+                    (
+                        egui::Color32::from_rgb(0x00, 0xcc, 0x88),
+                        format!("\u{25CF} linked ({})", self.models.len()),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(0xcc, 0x66, 0x66),
+                        "\u{25CF} down".to_string(),
+                    )
+                };
+                ui.label(egui::RichText::new(txt).size(12.0).color(dot));
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(self.status.clone())
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                );
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("A+")
@@ -1098,6 +1117,9 @@ impl AiDashboardApp {
                     .show(ui, |ui| {
                         ui.set_min_width(230.0);
                         ui.set_max_width(300.0);
+                        let stale = model
+                            .as_ref()
+                            .is_some_and(|m| !known.contains_key(m));
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
@@ -1113,6 +1135,13 @@ impl AiDashboardApp {
                                     egui::RichText::new("●")
                                         .size(10.0)
                                         .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+                                );
+                            }
+                            if stale {
+                                ui.label(
+                                    egui::RichText::new("gone from Ollama?")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(0xff, 0x66, 0x66)),
                                 );
                             }
                         });
