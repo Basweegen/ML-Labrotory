@@ -739,7 +739,7 @@ impl AiDashboardApp {
             );
             ui.add(
                 egui::ProgressBar::new(self.report.usage_fraction)
-                    .desired_width(150.0)
+                    .desired_width(120.0)
                     .show_percentage(),
             );
             if self.report.over_budget {
@@ -751,7 +751,7 @@ impl AiDashboardApp {
             } else {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} free · ~{} more models fit",
+                        "{} free · ~{} more fit",
                         resources::format_bytes(self.report.free_for_models_bytes),
                         self.report.max_models_fit,
                     ))
@@ -759,13 +759,14 @@ impl AiDashboardApp {
                     .color(egui::Color32::from_rgb(0x88, 0xcc, 0x88)),
                 );
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(self.status.clone())
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(self.status.clone())
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
-                );
-                ui.separator();
                 if ui
                     .small_button("A+")
                     .on_hover_text("Zoom in (saved to Settings → Font size)")
@@ -854,7 +855,10 @@ impl AiDashboardApp {
         let mut pending_custom: Option<(usize, String)> = None;
         let mut add_pressed = false;
 
-        ui.horizontal_wrapped(|ui| {
+        egui::ScrollArea::horizontal()
+            .id_salt("slot_cards")
+            .show(ui, |ui| {
+            ui.horizontal(|ui| {
             for (i, (id, model, role, custom)) in snapshot.iter().enumerate() {
                 let is_focused = i == self.focused_slot;
                 egui::Frame::group(&ui.style())
@@ -875,6 +879,7 @@ impl AiDashboardApp {
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.set_min_width(230.0);
+                        ui.set_max_width(300.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
@@ -1039,6 +1044,7 @@ impl AiDashboardApp {
                         ui.add_space(16.0);
                     });
                 });
+            });
         });
 
         // Apply pending actions.

@@ -148,6 +148,7 @@ impl ChatPanel {
         let list_h = (ui.available_height() - input_reserve).max(80.0);
         egui::ScrollArea::vertical()
             .max_height(list_h)
+            .stick_to_bottom(true)
             .show(ui, |ui| {
                 if self.messages.is_empty() {
                     ui.horizontal(|ui| {
@@ -193,11 +194,20 @@ impl ChatPanel {
         ui.separator();
 
         ui.add_space(4.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Send column FIRST (right side): never pushed off-screen when
-            // the window is narrow or the zoom is large. The text field
-            // below takes whatever width remains.
-            ui.vertical(|ui| {
+        // Full-width field on its own row; Send/Stop share a right-aligned
+        // row beneath it. (Side by side proved unworkable: in a horizontal
+        // row both the multiline field and the button column expand to full
+        // width, so they wrapped unpredictably.)
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.input)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
+                .font(egui::TextStyle::Body),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let need_model = selected_model.is_none();
                 let need_link = api_client.is_none();
                 let send_enabled = !self.input.trim().is_empty()
@@ -228,8 +238,8 @@ impl ChatPanel {
                         .min_size(egui::vec2(112.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
                 if send_btn.clicked() {
-                    self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
-                }
+                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+            }
 
                 if self.is_streaming {
                     ui.add_space(4.0);
@@ -243,16 +253,6 @@ impl ChatPanel {
                     }
                 }
             });
-            ui.add_space(8.0);
-            let input_w = ui.available_width().max(80.0);
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut self.input)
-                    .desired_rows(3)
-                    .desired_width(input_w)
-                    .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
-                    .font(egui::TextStyle::Body),
-            );
-
             // Enter sends while the field has focus (multiline keeps focus on
             // Enter, so lost_focus() never fires for it). Shift+Enter = newline.
             let send_triggered = ui.input(|i| {
