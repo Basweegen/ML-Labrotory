@@ -9,6 +9,7 @@ pub struct EditorPanel {
     language: String,
     suggestion_id: usize,
     pending_suggestion: Option<String>,
+    suggestion_buf: String,
     file_path: String,
     file_status: String,
 }
@@ -20,6 +21,7 @@ impl EditorPanel {
             language: "rust".to_string(),
             suggestion_id: 0,
             pending_suggestion: None,
+            suggestion_buf: String::new(),
             file_path: Self::default_path(),
             file_status: String::new(),
         }
@@ -173,6 +175,18 @@ impl EditorPanel {
             }
         });
 
+        if !self.suggestion_buf.is_empty() {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("AI Suggestion (streaming):").size(14.0).color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)));
+            ui.add_space(8.0);
+
+            egui::ScrollArea::vertical().max_height(200.0).stick_to_bottom(true).show(ui, |ui| {
+                ui.code(format!("{}▍", self.suggestion_buf));
+            });
+        }
+
         if let Some(suggestion) = self.pending_suggestion.clone() {
             ui.add_space(12.0);
             ui.separator();
@@ -261,12 +275,19 @@ impl EditorPanel {
             let req = ChatRequest {
                 model: model_name,
                 messages,
-                stream: false,
+                stream: true,
                 options: Some(ChatOptions::lowram()),
                 keep_alive: Some("10m".to_string()),
             };
 
-            let result = client.chat(req).await;
+            let result = client
+                .chat_stream(req, |piece| {
+                    let _ = tx.send(crate::ui::app::AppMessage::EditorChunk(
+                        suggestion_id,
+                        piece.to_string(),
+                    ));
+                })
+                .await;
             let _ = tx.send(crate::ui::app::AppMessage::EditorSuggestion(suggestion_id, result));
         });
     }
@@ -367,10 +388,21 @@ impl EditorPanel {
         }
     }
 
+    /// Live token piece for the in-flight suggestion; stale ids ignored.
+    pub fn push_chunk(&mut self, suggestion_id: usize, piece: &str) {
+        if suggestion_id + 1 != self.suggestion_id || piece.is_empty() {
+            return;
+        }
+        if self.suggestion_buf.len() < 50_000 {
+            self.suggestion_buf.push_str(piece);
+        }
+    }
+
     pub fn handle_ai_suggestion(&mut self, suggestion_id: usize, response: Result<crate::ollama::api::ChatResponse, anyhow::Error>) {
         if suggestion_id + 1 != self.suggestion_id {
             return;
         }
+        self.suggestion_buf.clear();
 
         match response {
             Ok(resp) => {
@@ -380,5 +412,27 @@ impl EditorPanel {
                 self.pending_suggestion = Some(format!("Error: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestion_chunk_currency() {
+        let mut e = EditorPanel::new();
+        // No request in flight: stale ids ignored.
+        e.push_chunk(0, "x");
+        assert!(e.suggestion_buf.is_empty());
+        // Simulate an issued request (id 0 -> next id 1).
+        e.suggestion_id = 1;
+        e.push_chunk(0, "hello ");
+        e.push_chunk(0, "world");
+        assert_eq!(e.suggestion_buf, "hello world");
+        // Stale and future ids ignored.
+        e.push_chunk(5, "stale");
+        e.push_chunk(usize::MAX, "stale");
+        assert_eq!(e.suggestion_buf, "hello world");
     }
 }

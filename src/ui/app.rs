@@ -39,6 +39,7 @@ pub enum AppMessage {
     VoiceState { enabled: bool, note: String },
     VoiceInput(usize, String),
     ChatChunk(usize, u64, String),
+    EditorChunk(usize, String),
     PullProgress(String),
     StreamHandle(usize, tokio::task::JoinHandle<()>),
     StopStream(usize),
@@ -620,6 +621,9 @@ impl AiDashboardApp {
                             }
                         }
                     }
+                }
+                AppMessage::EditorChunk(id, piece) => {
+                    self.editor.push_chunk(id, &piece);
                 }
                 AppMessage::EditorSuggestion(id, res) => {
                     self.editor.handle_ai_suggestion(id, res);
