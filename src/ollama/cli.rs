@@ -123,6 +123,9 @@ impl OllamaCli {
 
         let stderr_task = async move {
             while let Some(line) = stderr_reader.next_line().await? {
+                if let Some(tx) = &progress_stderr {
+                    let _ = tx.send(line.clone()).await;
+                }
                 let mut err = last_error_stderr.lock().await;
                 err.push_str(&line);
                 err.push('\n');

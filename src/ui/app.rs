@@ -13,7 +13,7 @@ use crate::ollama::api::{ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
 use crate::voice::VoiceEngine;
-use crate::storage::{AppSettings, ChatSession, Storage, Theme};
+use crate::storage::{AppSettings, ChatSession, SlotConfig, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
@@ -40,6 +40,8 @@ pub enum AppMessage {
     VoiceInput(usize, String),
     ChatChunk(usize, u64, String),
     PullProgress(String),
+    StreamHandle(usize, tokio::task::JoinHandle<()>),
+    StopStream(usize),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -182,6 +184,7 @@ pub struct AiDashboardApp {
     api_client: Option<OllamaClient>,
     cli_client: Option<OllamaCli>,
     voice: Option<VoiceEngine>,
+    inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
     last_ollama_url: String,
     last_theme: Theme,
     models: Vec<Model>,
@@ -225,16 +228,14 @@ impl AiDashboardApp {
             api_client,
             cli_client,
             voice: None,
+            inflight: HashMap::new(),
             last_ollama_url: settings.ollama_url.clone(),
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
             status: "Ready".to_string(),
-            slots: vec![
-                ModelSlot::new(0, ModelRole::General),
-                ModelSlot::new(1, ModelRole::Coder),
-            ],
-            next_slot_id: 2,
+            slots: Self::restore_slots(&settings),
+            next_slot_id: settings.slot_layout.len().max(2),
             focused_slot: 0,
             tab: Tab::Chat,
             editor: EditorPanel::new(),
@@ -454,6 +455,69 @@ impl AiDashboardApp {
         }
     }
 
+    /// Abort any in-flight stream for a slot (Stop / resend / remove).
+    fn abort_slot(&mut self, idx: usize) {
+        if let Some(h) = self.inflight.remove(&idx) {
+            h.abort();
+        }
+    }
+
+    /// Rebuild slots from persisted layout (roles always; models are
+    /// re-attached later once the model list arrives so the RAM guard
+    /// can vet each one).
+    fn restore_slots(settings: &AppSettings) -> Vec<ModelSlot> {
+        if settings.slot_layout.is_empty() {
+            return vec![
+                ModelSlot::new(0, ModelRole::General),
+                ModelSlot::new(1, ModelRole::Coder),
+            ];
+        }
+        settings
+            .slot_layout
+            .iter()
+            .take(32)
+            .enumerate()
+            .map(|(i, c)| {
+                let mut s =
+                    ModelSlot::new(i, Self::role_from_layout(&c.role, &c.custom_role));
+                s.custom_role = c.custom_role.clone();
+                s
+            })
+            .collect()
+    }
+
+    fn role_from_layout(role: &str, custom: &str) -> ModelRole {
+        match role {
+            "General" => ModelRole::General,
+            "Coder" => ModelRole::Coder,
+            "Researcher" => ModelRole::Researcher,
+            "Critic" => ModelRole::Critic,
+            "Planner" => ModelRole::Planner,
+            "Writer" => ModelRole::Writer,
+            r if r.starts_with("Custom") => ModelRole::Custom(custom.to_string()),
+            _ => ModelRole::General,
+        }
+    }
+
+    /// Persist slot model/role assignments when they change.
+    fn sync_slot_layout(&mut self) {
+        let layout: Vec<SlotConfig> = self
+            .slots
+            .iter()
+            .map(|s| SlotConfig {
+                model: s.model.clone(),
+                role: s.role.label(),
+                custom_role: s.custom_role.clone(),
+            })
+            .collect();
+        if layout != self.settings.slot_layout {
+            self.settings.slot_layout = layout;
+            if let Some(st) = self.storage.as_ref() {
+                let _ = st.save_settings(&self.settings);
+            }
+        }
+    }
+
     // ---------- model loading ----------
 
     fn refresh_models(&mut self) {
@@ -495,6 +559,7 @@ impl AiDashboardApp {
                     if self.slots.get(idx).map(|s| s.chat.stream_seq()) != Some(seq) {
                         continue; // stale: stopped or superseded by a newer send
                     }
+                    self.inflight.remove(&idx);
                     if idx < self.slots.len() {
                         let (ok, elapsed, resp_chars);
                         let prompt_chars: usize;
@@ -570,9 +635,23 @@ impl AiDashboardApp {
                         Ok(m) => {
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
-                            // Auto-fill empty slots with the smallest models
+                            // First: re-attach models saved in the slot layout
+                            // (each vetted by the RAM guard); then auto-fill
+                            // any still-empty slots with the smallest models
                             // that fit, so Chat works immediately (Send
                             // enables as soon as a slot has a model).
+                            for i in 0..self.slots.len() {
+                                if self.slots[i].model.is_none() {
+                                    if let Some(want) = self
+                                        .settings
+                                        .slot_layout
+                                        .get(i)
+                                        .and_then(|c| c.model.clone())
+                                    {
+                                        self.try_assign_model(i, want);
+                                    }
+                                }
+                            }
                             if self.slots.iter().any(|s| s.model.is_none()) {
                                 let mut by_size = self.models.clone();
                                 by_size.sort_by_key(|m| m.size);
@@ -638,8 +717,21 @@ impl AiDashboardApp {
                 AppMessage::PullProgress(line) => {
                     self.models_panel.push_progress(line);
                 }
+                AppMessage::StreamHandle(idx, h) => {
+                    if let Some(old) = self.inflight.insert(idx, h) {
+                        old.abort();
+                    }
+                }
+                AppMessage::StopStream(idx) => {
+                    self.abort_slot(idx);
+                    if let Some(slot) = self.slots.get_mut(idx) {
+                        slot.chat.stop_stream();
+                    }
+                    self.status = format!("Slot {} stopped", idx + 1);
+                }
                 AppMessage::NewChat => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    self.abort_slot(f);
                     if let Some(slot) = self.slots.get_mut(f) {
                         slot.chat.clear_chat();
                         slot.session_id = Uuid::new_v4();
@@ -649,6 +741,7 @@ impl AiDashboardApp {
                 }
                 AppMessage::LoadSession(s) => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    self.abort_slot(f);
                     if let Some(slot) = self.slots.get_mut(f) {
                         slot.chat.load_messages(s.messages.clone());
                         slot.session_id = s.id;
@@ -1092,6 +1185,8 @@ impl AiDashboardApp {
         }
         if let Some(i) = pending_remove {
             if self.slots.len() > 1 && i < self.slots.len() {
+                self.abort_slot(i);
+                self.inflight.remove(&i);
                 self.slots.remove(i);
                 self.focused_slot = self.focused_slot.min(self.slots.len() - 1);
                 self.status = format!("Slot {} removed", i + 1);
@@ -1273,6 +1368,7 @@ impl eframe::App for AiDashboardApp {
         });
 
         self.autosave_dirty_slots();
+        self.sync_slot_layout();
 
         // Keep the resource meter and spinners live.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));

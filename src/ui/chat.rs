@@ -174,10 +174,12 @@ impl ChatPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        // Message history. Reserve a fixed block for the input row below:
-        // the list may use everything ABOVE the reserve but never more, so
-        // the input + Send button always have room (no reliance on shrink).
-        let input_reserve = 140.0;
+        // Message history. Reserve room for the input block below (field +
+        // Send row + status + separators ≈ 170px at 100%): the list may use
+        // everything ABOVE the reserve but never more, so Send always has
+        // room. Scales with the Settings zoom factor so large text can't
+        // overflow the reserve.
+        let input_reserve = 170.0 * ui.ctx().zoom_factor();
         let list_h = (ui.available_height() - input_reserve).max(80.0);
         egui::ScrollArea::vertical()
             .max_height(list_h)
@@ -576,7 +578,9 @@ impl ChatPanel {
                 (true, elapsed, n)
             }
             Err(e) => {
-                let em = format!("Request failed: {e}");
+                // No prefix: OllamaError already describes itself
+                // ("API error: ...", "Request failed: ...").
+                let em = format!("{e}");
                 let msg = ChatMessage {
                     role: "system".to_string(),
                     content: Self::cap_content(&em),

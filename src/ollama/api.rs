@@ -135,8 +135,12 @@ impl OllamaClient {
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             anyhow::bail!("refusing non-http ollama url: {:?}", base_url);
         }
+        // Local inference on CPU can take many minutes for a long reply:
+        // only the connect phase gets a short timeout, the body streams
+        // until Ollama finishes (or the user hits Stop).
         let client = Client::builder()
-            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(1800))
             .build()
             .context("Failed to create HTTP client")?;
         Ok(Self {
@@ -209,7 +213,7 @@ impl OllamaClient {
         let mut pending = String::new();
         let mut assembled = String::new();
         let mut last: Option<ChatResponse> = None;
-        let mut feed_line = |line: &str,
+        let feed_line = |line: &str,
                              assembled: &mut String,
                              last: &mut Option<ChatResponse>,
                              on_chunk: &mut dyn FnMut(&str)|

@@ -48,6 +48,17 @@ pub struct AppSettings {
     pub persona: String,
     /// Long-term facts the assistant remembers across models and restarts.
     pub memory: String,
+    /// Slot layout restored on launch (model + role per slot).
+    #[serde(default)]
+    pub slot_layout: Vec<SlotConfig>,
+}
+
+/// One persisted model slot: assignment + role.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SlotConfig {
+    pub model: Option<String>,
+    pub role: String,
+    pub custom_role: String,
 }
 
 impl Default for AppSettings {
@@ -61,6 +72,7 @@ impl Default for AppSettings {
             stt_model: "ggml-base.en.bin".to_string(),
             persona: "You are ML Lab, a calm and direct assistant. Be concise, plain-spoken, and practical. Never mention model names unless asked.".to_string(),
             memory: String::new(),
+            slot_layout: Vec::new(),
         }
     }
 }
