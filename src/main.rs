@@ -4,6 +4,7 @@ mod ui;
 mod voice;
 mod neural;
 mod resources;
+mod security;
 
 use eframe::egui;
 use ui::app::AiDashboardApp;

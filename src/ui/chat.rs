@@ -1,6 +1,7 @@
 use eframe::egui;
 use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
+use crate::security::{ConfirmGate, SecretHit};
 use crate::storage::ChatMessage;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -15,6 +16,7 @@ pub struct ChatPanel {
     send_started: Option<Instant>,
     stream_buf: String,
     stream_seq: u64,
+    gate: ConfirmGate,
 }
 
 impl ChatPanel {
@@ -28,6 +30,7 @@ impl ChatPanel {
             send_started: None,
             stream_buf: String::new(),
             stream_seq: 0,
+            gate: ConfirmGate::new(),
         }
     }
 
@@ -72,6 +75,35 @@ impl ChatPanel {
     /// Bumped on every local change; the app persists the chat when it differs.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// System notice bubble (guard blocks, etc.).
+    pub fn push_system_note(&mut self, content: String) {
+        self.push_capped(ChatMessage {
+            role: "system".to_string(),
+            content,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
+    fn secret_warning(hits: &[SecretHit]) -> String {
+        let mut lines = vec![format!(
+            "Blocked: looks like {} secret{} — resend unchanged within 60s to override:",
+            if hits.len() == 1 { "a" } else { "several" },
+            if hits.len() == 1 { "" } else { "s" }
+        )];
+        for h in hits {
+            lines.push(format!("  \u{2022} {} ({})", h.kind, h.preview));
+        }
+        lines.join("\n")
+    }
+
+    /// Broadcast pre-check on this panel's gate. Err = formatted warning.
+    pub fn broadcast_check(&mut self, prompt: &str) -> Result<(), String> {
+        match self.gate.check(prompt) {
+            Ok(()) => Ok(()),
+            Err(hits) => Err(Self::secret_warning(&hits)),
+        }
     }
 
     /// Current stream generation; the send task tags its chunks with this.
@@ -497,6 +529,10 @@ impl ChatPanel {
         // path bypasses the button's enabled guard).
         let prompt = self.input.trim().to_string();
         if prompt.is_empty() {
+            return;
+        }
+        if let Err(hits) = self.gate.check(&prompt) {
+            self.push_system_note(Self::secret_warning(&hits));
             return;
         }
         if self.send_prompt(

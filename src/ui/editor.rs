@@ -11,6 +11,7 @@ pub struct EditorPanel {
     pending_suggestion: Option<String>,
     suggestion_buf: String,
     show_diff: bool,
+    gate: crate::security::ConfirmGate,
     file_path: String,
     file_status: String,
 }
@@ -24,6 +25,7 @@ impl EditorPanel {
             pending_suggestion: None,
             suggestion_buf: String::new(),
             show_diff: true,
+            gate: crate::security::ConfirmGate::new(),
             file_path: Self::default_path(),
             file_status: String::new(),
         }
@@ -303,6 +305,17 @@ impl EditorPanel {
         let Some(client) = api_client else { return };
 
         let full_prompt = format!("{}\n\n```{}\n{}\n```", prompt_prefix, self.language, self.code);
+        if let Err(hits) = self.gate.check(&full_prompt) {
+            let kinds: Vec<String> = hits
+                .iter()
+                .map(|h| format!("{} ({})", h.kind, h.preview))
+                .collect();
+            self.file_status = format!(
+                "Blocked: possible secret ({}). Send again within 60s to override.",
+                kinds.join(", ")
+            );
+            return;
+        }
         let model_name = model_name.clone();
         let client = client.clone();
         let tx = tx.clone();

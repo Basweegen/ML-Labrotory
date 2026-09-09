@@ -566,6 +566,19 @@ impl AiDashboardApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMessage::Broadcast(prompt) => {
+                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(note) = self
+                        .slots
+                        .get_mut(f0)
+                        .and_then(|s| s.chat.broadcast_check(&prompt).err())
+                    {
+                        if let Some(slot) = self.slots.get_mut(f0) {
+                            slot.chat.push_system_note(note);
+                        }
+                        self.status =
+                            "Ask all blocked: possible secret — resend to override".to_string();
+                        continue;
+                    }
                     let models = self.models.clone();
                     let api = self.api_client.clone();
                     let persona = self.settings.persona.clone();
