@@ -123,7 +123,8 @@ impl ModelsPanel {
         // Model list
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(format!("Installed Models ({})", models.len())).size(15.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            let total_disk: u64 = models.iter().map(|m| m.size).sum();
+            ui.label(egui::RichText::new(format!("Installed Models ({}) \u{00B7} {} on disk", models.len(), crate::resources::format_bytes(total_disk))).size(15.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
         });
 
         ui.add_space(8.0);
@@ -148,12 +149,14 @@ impl ModelsPanel {
                 });
                 ui.add_space(4.0);
                 egui::Grid::new("models_grid")
-                    .num_columns(5)
+                    .num_columns(7)
                     .spacing([16.0, 12.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong(egui::RichText::new("Name").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Size").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
+                        ui.strong(egui::RichText::new("Params").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
+                        ui.strong(egui::RichText::new("Quant").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Fit").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Modified").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.strong(egui::RichText::new("Actions").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
@@ -162,6 +165,17 @@ impl ModelsPanel {
                         for model in models.iter() {
                             ui.label(egui::RichText::new(&model.name).size(13.0).color(egui::Color32::WHITE));
                             ui.label(egui::RichText::new(crate::resources::format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                            {
+                                let (params, quant) = match &model.details {
+                                    Some(d) => (
+                                        if d.parameter_size.is_empty() { "\u{2014}".to_string() } else { d.parameter_size.clone() },
+                                        if d.quantization_level.is_empty() { "\u{2014}".to_string() } else { d.quantization_level.clone() },
+                                    ),
+                                    None => ("\u{2014}".to_string(), "\u{2014}".to_string()),
+                                };
+                                ui.label(egui::RichText::new(params).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                                ui.label(egui::RichText::new(quant).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                            }
                             {
                                 let (txt, (rr, gg, bb)) = crate::resources::fit_label(model.size, free);
                                 ui.label(egui::RichText::new(txt).size(13.0).color(egui::Color32::from_rgb(rr, gg, bb)));
@@ -200,6 +214,7 @@ impl ModelsPanel {
                         }
                     });
             }
+            ui.add_space(4.0);
         });
     }
 
