@@ -10,6 +10,7 @@ pub struct EditorPanel {
     suggestion_id: usize,
     pending_suggestion: Option<String>,
     suggestion_buf: String,
+    show_diff: bool,
     file_path: String,
     file_status: String,
 }
@@ -22,6 +23,7 @@ impl EditorPanel {
             suggestion_id: 0,
             pending_suggestion: None,
             suggestion_buf: String::new(),
+            show_diff: true,
             file_path: Self::default_path(),
             file_status: String::new(),
         }
@@ -200,6 +202,32 @@ impl EditorPanel {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
+                ui.checkbox(&mut self.show_diff, "Show diff vs current code");
+            });
+            if self.show_diff {
+                let diff = Self::diff_lines(&self.code, &suggestion);
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for (sign, line) in diff.iter().take(400) {
+                            let col = match sign {
+                                '+' => egui::Color32::from_rgb(0x44, 0xdd, 0x77),
+                                '-' => egui::Color32::from_rgb(0xff, 0x66, 0x66),
+                                _ => egui::Color32::from_rgb(0x88, 0x88, 0x88),
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{sign} {line}"))
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(col),
+                            );
+                        }
+                    });
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
                 let apply_btn = ui.add(
                     egui::Button::new(egui::RichText::new("Apply Suggestion").size(13.0))
                         .fill(egui::Color32::from_rgb(0x00, 0x77, 0x55))
@@ -221,6 +249,28 @@ impl EditorPanel {
                 }
             });
         }
+    }
+
+    /// Line diff of current code (old) vs AI suggestion (new).
+    /// Returns (sign, text): '+' added, '-' removed, ' ' context.
+    pub fn diff_lines(old: &str, new: &str) -> Vec<(char, String)> {
+        use similar::{ChangeTag, TextDiff};
+        let diff = TextDiff::from_lines(old, new);
+        let mut out = Vec::new();
+        for op in diff.ops() {
+            for change in diff.iter_changes(op) {
+                let sign = match change.tag() {
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
+                    ChangeTag::Equal => ' ',
+                };
+                out.push((
+                    sign,
+                    change.value().trim_end_matches('\n').to_string(),
+                ));
+            }
+        }
+        out
     }
 
     fn syntax_for_language(lang: &str) -> Syntax {
@@ -434,5 +484,17 @@ mod tests {
         e.push_chunk(5, "stale");
         e.push_chunk(7, "stale");
         assert_eq!(e.suggestion_buf, "hello world");
+    }
+
+    #[test]
+    fn diff_marks_changes() {
+        let d = EditorPanel::diff_lines("a\nb\nc\n", "a\nB\nc\nd\n");
+        let signs: String = d.iter().map(|(s, _)| *s).collect();
+        assert!(signs.contains(' '), "context lines kept");
+        assert!(signs.contains('-'), "removal marked");
+        assert!(signs.contains('+'), "addition marked");
+        assert_eq!(EditorPanel::diff_lines("", "").len(), 0);
+        let same = EditorPanel::diff_lines("x\n", "x\n");
+        assert!(same.iter().all(|(s, _)| *s == ' '));
     }
 }
