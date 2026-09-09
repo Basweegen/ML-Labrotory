@@ -513,3 +513,39 @@ impl AdaptiveModelSelector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forward_is_distribution() {
+        let net = ModelProfileNetwork::new(4, vec![8], 3);
+        let out = net.forward(&Array1::zeros(4));
+        assert_eq!(out.len(), 3);
+        let s: f32 = out.iter().sum();
+        assert!((s - 1.0).abs() < 1e-4, "softmax sums to 1, got {s}");
+        assert!(out.iter().all(|&v| v > 0.0 && v < 1.0));
+        assert!(net.select_model_profile(&Array1::zeros(4)) < 3);
+    }
+
+    #[test]
+    fn experience_clamped_and_train_runs() {
+        let mut net = ModelProfileNetwork::new(4, vec![8], 3);
+        assert_eq!(net.train_step().unwrap(), 0.0);
+        for _ in 0..8 {
+            net.add_experience(Experience {
+                state: Array1::zeros(4).into(),
+                action: 99,
+                reward: f32::INFINITY,
+                next_state: Array1::zeros(4).into(),
+                done: true,
+            });
+        }
+        assert_eq!(net.experience_buffer.len(), 8);
+        assert!(net.experience_buffer.iter().all(|e| e.action == 2));
+        assert!(net.experience_buffer.iter().all(|e| e.reward == 0.0));
+        let loss = net.train_step().unwrap();
+        assert!(loss.is_finite() && loss >= 0.0);
+    }
+}

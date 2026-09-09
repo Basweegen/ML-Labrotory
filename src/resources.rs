@@ -170,3 +170,60 @@ pub fn fit_label(model_size: u64, free_for_models_bytes: u64) -> (&'static str, 
         ("Skip", (0xcc, 0x66, 0x66))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_reserve_split() {
+        let m = MemoryStats {
+            total_bytes: 100,
+            available_bytes: 40,
+        };
+        assert_eq!(m.used_bytes(), 60);
+        assert_eq!(m.model_budget_bytes(), 85);
+        assert_eq!(m.reserve_bytes(), 15);
+    }
+
+    #[test]
+    fn guard_blocks_over_budget() {
+        let m = MemoryStats {
+            total_bytes: 100,
+            available_bytes: 100,
+        };
+        assert!(ResourceGuard::can_fit(&m, &[], 85).is_ok());
+        assert!(ResourceGuard::can_fit(&m, &[], 86).is_err());
+        let r = ResourceGuard::evaluate(&m, &[50]);
+        assert!(!r.over_budget);
+        assert_eq!(r.models_used_bytes, 50);
+        assert_eq!(r.free_for_models_bytes, 35);
+    }
+
+    #[test]
+    fn unknown_sizes_estimate_high() {
+        let known: HashMap<String, u64> = HashMap::new();
+        assert_eq!(
+            ResourceGuard::size_for_model("x", &known),
+            ESTIMATED_MODEL_BYTES
+        );
+        let mut k = HashMap::new();
+        k.insert("m".to_string(), 0);
+        assert_eq!(
+            ResourceGuard::size_for_model("m", &k),
+            ESTIMATED_MODEL_BYTES
+        );
+        k.insert("m".to_string(), 7);
+        assert_eq!(ResourceGuard::size_for_model("m", &k), 7);
+    }
+
+    #[test]
+    fn format_and_tiers() {
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(0), "0.0 B");
+        assert!(hardware_tier(1).contains("LOW"));
+        assert!(hardware_tier(u64::MAX).contains("HIGH"));
+        assert_eq!(fit_label(1, 100).0, "Fits");
+        assert_eq!(fit_label(1000, 100).0, "Skip");
+    }
+}
