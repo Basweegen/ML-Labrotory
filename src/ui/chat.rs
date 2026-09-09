@@ -13,6 +13,8 @@ pub struct ChatPanel {
     voice_enabled: bool,
     revision: u64,
     send_started: Option<Instant>,
+    stream_buf: String,
+    stream_seq: u64,
 }
 
 impl ChatPanel {
@@ -24,6 +26,8 @@ impl ChatPanel {
             voice_enabled: false,
             revision: 0,
             send_started: None,
+            stream_buf: String::new(),
+            stream_seq: 0,
         }
     }
 
@@ -68,6 +72,35 @@ impl ChatPanel {
     /// Bumped on every local change; the app persists the chat when it differs.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Current stream generation; the send task tags its chunks with this.
+    pub fn stream_seq(&self) -> u64 {
+        self.stream_seq
+    }
+
+    /// Live token piece from the streaming task. Stale generations (after
+    /// Stop / resend) are ignored via the sequence number.
+    pub fn push_chunk(&mut self, seq: u64, piece: &str) {
+        if seq != self.stream_seq || piece.is_empty() {
+            return;
+        }
+        self.is_streaming = true;
+        if self.stream_buf.len() < Self::MAX_CONTENT_CHARS {
+            let room = Self::MAX_CONTENT_CHARS - self.stream_buf.len();
+            let mut end = piece.len().min(room);
+            while !piece.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.stream_buf.push_str(&piece[..end]);
+        }
+    }
+
+    /// User-pressed Stop: invalidate in-flight chunks, drop the partial.
+    pub fn stop_stream(&mut self) {
+        self.stream_seq = self.stream_seq.saturating_add(1);
+        self.is_streaming = false;
+        self.stream_buf.clear();
     }
 
     /// Replace chat contents with a stored session (History -> Open in chat).
@@ -178,7 +211,15 @@ impl ChatPanel {
                 for i in start..total {
                     self.show_message(ui, &self.messages[i], tx);
                 }
-                if self.is_streaming {
+                if !self.stream_buf.is_empty() {
+                    let tmp = ChatMessage {
+                        role: "assistant".to_string(),
+                        content: format!("{}▍", self.stream_buf),
+                        timestamp: chrono::Utc::now(),
+                    };
+                    self.show_message(ui, &tmp, tx);
+                }
+                if self.is_streaming && self.stream_buf.is_empty() {
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
                         ui.spinner();
@@ -249,7 +290,7 @@ impl ChatPanel {
                                 .corner_radius(egui::CornerRadius::same(6))
                     ).on_hover_text("Stop generation");
                     if stop_btn.clicked() {
-                        self.is_streaming = false;
+                        self.stop_stream();
                     }
                 }
             });
@@ -467,6 +508,9 @@ impl ChatPanel {
         let history: Vec<(String, String)> = self.messages.iter().rev().take(20).rev()
             .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
+        self.stream_buf.clear();
+        self.stream_seq = self.stream_seq.saturating_add(1);
+        let seq = self.stream_seq;
         self.send_started = Some(Instant::now());
 
         let role_prompt = role_prompt.to_string();
@@ -491,19 +535,30 @@ impl ChatPanel {
             let req = ChatRequest {
                 model: model_name,
                 messages,
-                stream: false,
+                stream: true,
                 options: Some(ChatOptions::lowram()),
                 keep_alive: Some("10m".to_string()),
             };
 
-            let result = client.chat(req).await;
-            let _ = tx.send(crate::ui::app::AppMessage::ChatResponse(slot_idx, result));
+            let result = client
+                .chat_stream(req, |piece| {
+                    let _ = tx.send(crate::ui::app::AppMessage::ChatChunk(
+                        slot_idx,
+                        seq,
+                        piece.to_string(),
+                    ));
+                })
+                .await;
+            let _ = tx.send(crate::ui::app::AppMessage::ChatResponse(
+                slot_idx, seq, result,
+            ));
         });
     }
 
     /// Returns (success, elapsed_secs, response_chars) as a training signal.
     pub fn handle_response(&mut self, response: Result<ChatResponse>) -> (bool, f32, usize) {
         self.is_streaming = false;
+        self.stream_buf.clear();
         let elapsed = self
             .send_started
             .map(|t| t.elapsed().as_secs_f32())

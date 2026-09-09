@@ -23,7 +23,7 @@ use crate::ui::settings::SettingsPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
-    ChatResponse(usize, Result<ChatResponse>),
+    ChatResponse(usize, u64, Result<ChatResponse>),
     EditorSuggestion(usize, Result<ChatResponse>),
     /// Code handed from a chat bubble to the Editor tab (code, lang tag).
     ChatToEditor(String, String),
@@ -38,6 +38,7 @@ pub enum AppMessage {
     VoiceListen(usize),
     VoiceState { enabled: bool, note: String },
     VoiceInput(usize, String),
+    ChatChunk(usize, u64, String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -484,7 +485,15 @@ impl AiDashboardApp {
     fn poll_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                AppMessage::ChatResponse(idx, res) => {
+                AppMessage::ChatChunk(idx, seq, piece) => {
+                    if let Some(slot) = self.slots.get_mut(idx) {
+                        slot.chat.push_chunk(seq, &piece);
+                    }
+                }
+                AppMessage::ChatResponse(idx, seq, res) => {
+                    if self.slots.get(idx).map(|s| s.chat.stream_seq()) != Some(seq) {
+                        continue; // stale: stopped or superseded by a newer send
+                    }
                     if idx < self.slots.len() {
                         let (ok, elapsed, resp_chars);
                         let prompt_chars: usize;

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use futures::StreamExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -187,4 +188,64 @@ impl OllamaClient {
         Ok(data)
     }
 
+    /// Streaming chat. Calls `on_chunk` with each content piece as it
+    /// arrives; resolves to the fully assembled response when done.
+    pub async fn chat_stream(
+        &self,
+        req: ChatRequest,
+        mut on_chunk: impl FnMut(&str) + Send,
+    ) -> Result<ChatResponse> {
+        let url = format!("{}/api/chat", self.base_url);
+        let mut req = req;
+        req.stream = true;
+        let resp = self.client.post(&url).json(&req).send().await?;
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(OllamaError::Api(err).into());
+        }
+        let mut stream = resp.bytes_stream();
+        // Ollama sends one JSON object per line, but a TCP chunk can split a
+        // line anywhere: buffer until each full line arrives.
+        let mut pending = String::new();
+        let mut assembled = String::new();
+        let mut last: Option<ChatResponse> = None;
+        let mut feed_line = |line: &str,
+                             assembled: &mut String,
+                             last: &mut Option<ChatResponse>,
+                             on_chunk: &mut dyn FnMut(&str)|
+         -> Result<()> {
+            let line = line.trim();
+            if line.is_empty() {
+                return Ok(());
+            }
+            let msg: ChatResponse = serde_json::from_str(line)
+                .map_err(|e| OllamaError::Api(format!("bad stream line: {e}")))?;
+            if !msg.message.content.is_empty() {
+                assembled.push_str(&msg.message.content);
+                on_chunk(&msg.message.content);
+            }
+            *last = Some(msg);
+            Ok(())
+        };
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(OllamaError::Request)?;
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = pending.find('\n') {
+                let line: String = pending.drain(..=pos).collect();
+                feed_line(&line, &mut assembled, &mut last, &mut on_chunk)?;
+            }
+        }
+        if !pending.trim().is_empty() {
+            let tail = std::mem::take(&mut pending);
+            feed_line(&tail, &mut assembled, &mut last, &mut on_chunk)?;
+        }
+        match last {
+            Some(mut fin) => {
+                fin.message.content = assembled;
+                fin.done = true;
+                Ok(fin)
+            }
+            None => Err(OllamaError::Api("empty stream".into()).into()),
+        }
+    }
 }
