@@ -201,6 +201,7 @@ pub struct AiDashboardApp {
     voice: Option<VoiceEngine>,
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
     last_ollama_url: String,
+    last_allow_remote: bool,
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
@@ -232,7 +233,8 @@ impl AiDashboardApp {
             .as_ref()
             .and_then(|s| s.load_settings().ok())
             .unwrap_or_default();
-        let api_client = OllamaClient::new(settings.ollama_url.clone()).ok();
+        let api_client =
+            OllamaClient::new(settings.ollama_url.clone(), settings.allow_remote).ok();
         let cli_client = OllamaCli::new().ok();
         let mem = resources::system_memory();
         let report = ResourceGuard::evaluate(&mem, &[]);
@@ -245,6 +247,7 @@ impl AiDashboardApp {
             voice: None,
             inflight: HashMap::new(),
             last_ollama_url: settings.ollama_url.clone(),
+            last_allow_remote: settings.allow_remote,
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
@@ -1320,10 +1323,17 @@ impl eframe::App for AiDashboardApp {
         }
         self.poll_messages();
 
-        // Re-create the API client if the URL changed in settings.
-        if self.settings.ollama_url != self.last_ollama_url {
+        // Re-create the API client if the URL or the remote flag changed.
+        if self.settings.ollama_url != self.last_ollama_url
+            || self.settings.allow_remote != self.last_allow_remote
+        {
             self.last_ollama_url = self.settings.ollama_url.clone();
-            self.api_client = OllamaClient::new(self.settings.ollama_url.clone()).ok();
+            self.last_allow_remote = self.settings.allow_remote;
+            self.api_client = OllamaClient::new(
+                self.settings.ollama_url.clone(),
+                self.settings.allow_remote,
+            )
+            .ok();
             self.refresh_models();
         }
 

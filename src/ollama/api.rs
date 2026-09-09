@@ -128,12 +128,54 @@ pub struct OllamaClient {
     base_url: String,
 }
 
+/// Host part of an http(s) URL (lowercased, port/userinfo stripped).
+fn url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host_port = rest.split('/').next().unwrap_or("");
+    if let Some(bracketed) = host_port.strip_prefix('[') {
+        return bracketed
+            .split(']')
+            .next()
+            .filter(|h| !h.is_empty())
+            .map(|h| h.to_ascii_lowercase());
+    }
+    let host = host_port
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
 impl OllamaClient {
-    pub fn new(base_url: impl Into<String>) -> Result<Self> {
+    pub fn new(base_url: impl Into<String>, allow_remote: bool) -> Result<Self> {
         let base_url: String = base_url.into();
-        // SSRF guard: settings-stored URL must be local http(s); reject file:// etc.
+        // SSRF guard: settings-stored URL must be http(s); reject file:// etc.
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             anyhow::bail!("refusing non-http ollama url: {:?}", base_url);
+        }
+        // Default-deny remote servers: a stray/compromised URL must not turn
+        // the dashboard into a relay into the LAN or cloud metadata endpoints.
+        if !allow_remote {
+            match url_host(&base_url) {
+                Some(h) if host_is_loopback(&h) => {}
+                _ => anyhow::bail!(
+                    "refusing non-local ollama url {:?} (enable Settings → Allow remote Ollama to override)",
+                    base_url
+                ),
+            }
         }
         // Local inference on CPU can take many minutes for a long reply:
         // only the connect phase gets a short timeout, the body streams
@@ -240,5 +282,38 @@ impl OllamaClient {
             }
             None => Err(OllamaError::Api("empty stream".into()).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_policy() {
+        assert!(OllamaClient::new("http://localhost:11434", false).is_ok());
+        assert!(OllamaClient::new("http://LOCALHOST:11434", false).is_ok());
+        assert!(OllamaClient::new("http://127.0.0.1:11434", false).is_ok());
+        assert!(OllamaClient::new("http://127.9.9.9:11434", false).is_ok());
+        assert!(OllamaClient::new("http://[::1]:11434", false).is_ok());
+        assert!(OllamaClient::new("https://localhost:11434", false).is_ok());
+    }
+
+    #[test]
+    fn remote_denied_by_default() {
+        assert!(OllamaClient::new("http://192.168.1.5:11434", false).is_err());
+        assert!(OllamaClient::new("http://10.0.0.2:11434", false).is_err());
+        assert!(OllamaClient::new("http://ollama.lan:11434", false).is_err());
+        assert!(OllamaClient::new("http://169.254.169.254/", false).is_err());
+        assert!(OllamaClient::new("http://example.com/", false).is_err());
+        assert!(OllamaClient::new("ftp://localhost/x", false).is_err());
+        assert!(OllamaClient::new("not a url", false).is_err());
+    }
+
+    #[test]
+    fn remote_allowed_with_flag() {
+        assert!(OllamaClient::new("http://192.168.1.5:11434", true).is_ok());
+        assert!(OllamaClient::new("http://ollama.lan:11434", true).is_ok());
+        assert!(OllamaClient::new("ftp://x/", true).is_err());
     }
 }

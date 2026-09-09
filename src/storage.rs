@@ -48,6 +48,9 @@ pub struct AppSettings {
     pub persona: String,
     /// Long-term facts the assistant remembers across models and restarts.
     pub memory: String,
+    /// When false (default), Ollama URLs are restricted to localhost.
+    #[serde(default)]
+    pub allow_remote: bool,
     /// Slot layout restored on launch (model + role per slot).
     #[serde(default)]
     pub slot_layout: Vec<SlotConfig>,
@@ -73,6 +76,7 @@ impl Default for AppSettings {
             persona: "You are ML Lab, a calm and direct assistant. Be concise, plain-spoken, and practical. Never mention model names unless asked.".to_string(),
             memory: String::new(),
             slot_layout: Vec::new(),
+            allow_remote: false,
         }
     }
 }

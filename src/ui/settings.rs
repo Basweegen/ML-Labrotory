@@ -101,6 +101,15 @@ impl SettingsPanel {
             }
         });
 
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut settings.allow_remote,
+                "Allow remote (non-localhost) Ollama server",
+            );
+        });
+        ui.label(egui::RichText::new("Off = localhost only (recommended). Only enable for a LAN server you trust; the app will relay your prompts there.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Changes to URL take effect immediately").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
 
