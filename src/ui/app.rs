@@ -46,6 +46,8 @@ pub enum AppMessage {
     SpeakText(String),
     StreamHandle(usize, tokio::task::JoinHandle<()>),
     StopStream(usize),
+    StopAll,
+    Notice(String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -919,6 +921,19 @@ impl AiDashboardApp {
                     self.status = format!("Slot {} stopped", idx + 1);
                     self.audit("chat.stop", format!("slot {}", idx + 1));
                 }
+                AppMessage::StopAll => {
+                    for i in 0..self.slots.len() {
+                        self.abort_slot(i);
+                        if let Some(slot) = self.slots.get_mut(i) {
+                            slot.chat.stop_stream();
+                        }
+                    }
+                    self.status = "Stopped all slots".to_string();
+                    self.audit("chat.stop_all", "all slots".to_string());
+                }
+                AppMessage::Notice(s) => {
+                    self.status = s;
+                }
                 AppMessage::Audit(kind, detail) => {
                     self.audit(&kind, detail);
                 }
@@ -1197,6 +1212,17 @@ impl AiDashboardApp {
         let mut pending_custom: Option<(usize, String)> = None;
         let mut add_pressed = false;
 
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if ui
+                .small_button("\u{23F9} Stop all")
+                .on_hover_text("Stop generation on every slot")
+                .clicked()
+            {
+                let _ = self.tx.send(AppMessage::StopAll);
+            }
+        });
+        ui.add_space(4.0);
         egui::ScrollArea::horizontal()
             .id_salt("slot_cards")
             .show(ui, |ui| {

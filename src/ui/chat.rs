@@ -359,19 +359,64 @@ impl ChatPanel {
             ui.add_space(4.0);
             let model_txt = selected_model.clone().unwrap_or("(no model)".to_string());
             let link_txt = if api_client.is_some() { "Ollama: linked" } else { "Ollama: NOT linked" };
+            let turns = self.messages.len();
+            let chars: usize = self.messages.iter().map(|m| m.content.chars().count()).sum();
             ui.label(
                 egui::RichText::new(format!(
-                    "Slot {} -> {} | {} | {} model(s) listed",
+                    "Slot {} -> {} | {} | {} model(s) | {} turns \u{00B7} {} chars",
                     slot_idx + 1,
                     model_txt,
                     link_txt,
                     _models.len(),
+                    turns,
+                    chars,
                 ))
                 .size(11.0)
                 .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Save .md")
+                    .on_hover_text("Export this slot transcript to a markdown file")
+                    .clicked()
+                {
+                    let stem = format!(
+                        "slot{}-{}",
+                        slot_idx + 1,
+                        selected_model.clone().unwrap_or("chat".to_string()),
+                    );
+                    let note = match crate::ui::history::HistoryPanel::export_path(&stem) {
+                        Some(path) => {
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            match std::fs::write(&path, Self::slot_markdown(selected_model, &self.messages)) {
+                                Ok(()) => format!("Saved {}", path.display()),
+                                Err(e) => format!("Export failed: {e}"),
+                            }
+                        }
+                        None => "Export failed: bad slot name.".to_string(),
+                    };
+                    let _ = tx.send(crate::ui::app::AppMessage::Notice(note));
+                }
+            });
         });
         ui.add_space(8.0);
+    }
+
+    /// Render this slot's transcript as markdown (same shape as History export).
+    fn slot_markdown(model: &Option<String>, messages: &[ChatMessage]) -> String {
+        let mut md = format!("# {}\n\n", model.clone().unwrap_or("chat".to_string()));
+        for m in messages {
+            let who = match m.role.as_str() {
+                "user" => "You",
+                "assistant" => "Assistant",
+                "system" => "System",
+                _ => "Note",
+            };
+            md.push_str(&format!("## {who}\n\n{}\n\n", m.content));
+        }
+        md
     }
 
     /// Split ```fences into (lang, code) blocks.
@@ -704,5 +749,36 @@ impl ChatPanel {
                 (false, elapsed, 0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn slot_markdown_shapes() {
+        let md = ChatPanel::slot_markdown(
+            &Some("llama3.2:1b".to_string()),
+            &[msg("user", "hi"), msg("assistant", "Hello.")],
+        );
+        assert!(md.starts_with("# llama3.2:1b\n"));
+        assert!(md.contains("## You"));
+        assert!(md.contains("## Assistant"));
+        assert!(md.contains("Hello."));
+    }
+
+    #[test]
+    fn slot_markdown_empty_model() {
+        let md = ChatPanel::slot_markdown(&None, &[]);
+        assert_eq!(md, "# chat\n\n");
     }
 }

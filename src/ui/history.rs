@@ -68,7 +68,7 @@ impl HistoryPanel {
         out
     }
 
-    fn export_path(name: &str) -> Option<std::path::PathBuf> {
+    pub(crate) fn export_path(name: &str) -> Option<std::path::PathBuf> {
         let stem: String = name
             .chars()
             .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
