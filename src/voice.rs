@@ -19,24 +19,85 @@ impl VoiceEngine {
         Ok(Self {
             piper_path,
             whisper_path,
-            tts_voice,
-            stt_model,
+            tts_voice: Self::resolve_voice(&tts_voice),
+            stt_model: Self::resolve_model(&stt_model),
         })
     }
 
+    /// Bare names resolve against the app data dir (old settings keep working);
+    /// absolute/existing paths pass through untouched.
+    fn data_file(subdir: &str, name: &str) -> Option<PathBuf> {
+        let base = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ai-dashboard")
+            .join(subdir);
+        let direct = base.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let with_ext = base.join(format!("{}.onnx", name));
+        if with_ext.is_file() {
+            return Some(with_ext);
+        }
+        None
+    }
+
+    fn resolve_voice(name: &str) -> String {
+        if PathBuf::from(name).is_file() {
+            return name.to_string();
+        }
+        if let Some(p) = Self::data_file("voices", name) {
+            return p.to_string_lossy().to_string();
+        }
+        name.to_string()
+    }
+
+    fn resolve_model(name: &str) -> String {
+        if PathBuf::from(name).is_file() {
+            return name.to_string();
+        }
+        if let Some(p) = Self::data_file("whisper", name) {
+            return p.to_string_lossy().to_string();
+        }
+        name.to_string()
+    }
+
+    fn local_bin(name: &str) -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".local/bin").join(name))
+    }
+
+    /// Absolute path for a bare binary name via `which`, if present on PATH.
+    fn on_path(name: &str) -> Option<PathBuf> {
+        let out = Command::new("which").arg(name).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if p.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(p))
+        }
+    }
+
     fn find_piper() -> Result<PathBuf> {
-        let paths = [
-            "/usr/bin/piper",
-            "/usr/local/bin/piper",
-            "piper",
+        let mut paths: Vec<PathBuf> = vec![
+            PathBuf::from("/usr/bin/piper"),
+            PathBuf::from("/usr/local/bin/piper"),
         ];
-        
-        for path in paths {
-            if Command::new(path).arg("--version").output().is_ok() {
-                return Ok(PathBuf::from(path));
-            }
+        if let Some(p) = Self::on_path("piper") {
+            paths.push(p);
+        }
+        if let Some(p) = Self::local_bin("piper") {
+            paths.push(p);
         }
         
+        for path in &paths {
+            if Command::new(path).arg("--help").output().is_ok() {
+                return Ok(path.clone());
+            }
+        }
+
         if let Ok(output) = Command::new("which").arg("piper").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -50,21 +111,27 @@ impl VoiceEngine {
     }
 
     fn find_whisper() -> Result<PathBuf> {
-        let paths = [
-            "/usr/bin/whisper.cpp",
-            "/usr/local/bin/whisper.cpp",
-            "/usr/bin/whisper-cli",
-            "/usr/local/bin/whisper-cli",
-            "whisper-cli",
-            "whisper.cpp",
+        let mut paths: Vec<PathBuf> = vec![
+            PathBuf::from("/usr/bin/whisper.cpp"),
+            PathBuf::from("/usr/local/bin/whisper.cpp"),
+            PathBuf::from("/usr/bin/whisper-cli"),
+            PathBuf::from("/usr/local/bin/whisper-cli"),
         ];
-        
-        for path in paths {
-            if Command::new(path).arg("--help").output().is_ok() {
-                return Ok(PathBuf::from(path));
+        for name in ["whisper-cli", "whisper.cpp"] {
+            if let Some(p) = Self::on_path(name) {
+                paths.push(p);
+            }
+            if let Some(p) = Self::local_bin(name) {
+                paths.push(p);
             }
         }
         
+        for path in &paths {
+            if Command::new(path).arg("--help").output().is_ok() {
+                return Ok(path.clone());
+            }
+        }
+
         if let Ok(output) = Command::new("which").arg("whisper-cli").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -181,5 +248,30 @@ impl Default for VoiceEngine {
             tts_voice: "en_US-lessac-medium".to_string(),
             stt_model: "ggml-base.en.bin".to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_passes_existing_paths_through() {
+        assert_eq!(VoiceEngine::resolve_voice("/tmp/x.onnx"), "/tmp/x.onnx");
+        assert_eq!(VoiceEngine::resolve_model("/tmp/y.bin"), "/tmp/y.bin");
+    }
+
+    #[test]
+    fn resolve_passes_unknown_names_through() {
+        assert_eq!(
+            VoiceEngine::resolve_voice("definitely-not-a-voice-xyz"),
+            "definitely-not-a-voice-xyz"
+        );
+    }
+
+    #[test]
+    fn local_bin_points_at_home() {
+        let p = VoiceEngine::local_bin("piper").expect("home dir");
+        assert!(p.ends_with(".local/bin/piper"));
     }
 }
