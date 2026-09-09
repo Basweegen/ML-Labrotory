@@ -21,8 +21,6 @@ pub struct CliListResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error("CLI not found: {0}")]
-    NotFound(String),
     #[error("Command failed: {0}")]
     Command(String),
     #[error("Parse error: {0}")]
@@ -57,10 +55,6 @@ pub fn validate_model_name(name: &str) -> Result<()> {
 }
 
 impl OllamaCli {
-    pub fn get_ollama_path(&self) -> &str {
-        &self.ollama_path
-    }
-    
     pub fn new() -> Result<Self> {
         let ollama_path = which::which("ollama")
             .context("ollama CLI not found in PATH")?
@@ -152,19 +146,4 @@ impl OllamaCli {
         Ok(())
     }
 
-    pub async fn run_model(&self, name: &str, prompt: &str) -> Result<String> {
-        let output = Command::new(&self.ollama_path)
-            .args(["run", name, prompt])
-            .output()
-            .await
-            .map_err(|e| CliError::Command(e.to_string()))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(CliError::Command(err.to_string()).into());
-        }
-
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(text)
-    }
 }

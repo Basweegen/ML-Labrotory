@@ -66,10 +66,10 @@ impl Default for AppSettings {
 }
 
 pub struct Storage {
-    db: Db,
+    // Kept alive for the trees; never read directly.
+    _db: Db,
     sessions_tree: sled::Tree,
     config_tree: sled::Tree,
-    profiles_tree: sled::Tree,
 }
 
 impl Storage {
@@ -82,8 +82,7 @@ impl Storage {
         let db = sled::open(db_path)?;
         let sessions_tree = db.open_tree("sessions")?;
         let config_tree = db.open_tree("config")?;
-        let profiles_tree = db.open_tree("profiles")?;
-        Ok(Self { db, sessions_tree, config_tree, profiles_tree })
+        Ok(Self { _db: db, sessions_tree, config_tree })
     }
 
     pub fn save_session(&self, session: &ChatSession) -> Result<()> {
@@ -142,16 +141,6 @@ impl Storage {
         Ok(())
     }
 
-    pub fn save_ollama_url(&self, url: &str) -> Result<()> {
-        self.config_tree.insert("ollama_url", url.as_bytes())?;
-        self.config_tree.flush()?;
-        Ok(())
-    }
-
-    pub fn get_ollama_url(&self) -> Option<String> {
-        self.config_tree.get("ollama_url").ok().flatten().map(|v| String::from_utf8(v.to_vec()).ok()).flatten()
-    }
-
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {
         let value = bincode::serialize(settings)?;
         self.config_tree.insert("settings", value)?;
@@ -170,92 +159,4 @@ impl Storage {
         }
     }
 
-    pub fn save_profile(&self, profile: &ModelProfile) -> Result<()> {
-        let key = profile.id.as_bytes().to_vec();
-        let value = bincode::serialize(profile)?;
-        self.profiles_tree.insert(key, value)?;
-        self.profiles_tree.flush()?;
-        Ok(())
-    }
-
-    pub fn load_profiles(&self) -> Result<Vec<ModelProfile>> {
-        let mut profiles = Vec::new();
-        for entry in self.profiles_tree.iter() {
-            let (_, value) = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if value.len() > 1 * 1024 * 1024 {
-                continue;
-            }
-            match bincode::deserialize::<ModelProfile>(&value) {
-                Ok(pr) => profiles.push(pr),
-                Err(_) => continue,
-            }
-        }
-        profiles.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(profiles)
-    }
-
-    pub fn delete_profile(&self, id: Uuid) -> Result<()> {
-        self.profiles_tree.remove(id.as_bytes())?;
-        self.profiles_tree.flush()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelProfile {
-    pub id: Uuid,
-    pub name: String,
-    pub model_name: String,
-    pub system_prompt: String,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub max_tokens: u32,
-    pub skills: Vec<Skill>,
-    pub usage_count: u64,
-    pub avg_rating: f32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Default for ModelProfile {
-    fn default() -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            name: "Default".to_string(),
-            model_name: "llama3.1".to_string(),
-            system_prompt: "You are a helpful AI assistant.".to_string(),
-            temperature: 0.7,
-            top_p: 0.9,
-            max_tokens: 4096,
-            skills: Vec::new(),
-            usage_count: 0,
-            avg_rating: 0.0,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Skill {
-    pub name: String,
-    pub description: String,
-    pub proficiency: f32,
-    pub last_used: DateTime<Utc>,
-    pub usage_count: u32,
-}
-
-impl Skill {
-    pub fn new(name: String, description: String) -> Self {
-        Self {
-            name,
-            description,
-            proficiency: 0.0,
-            last_used: Utc::now(),
-            usage_count: 0,
-        }
-    }
 }

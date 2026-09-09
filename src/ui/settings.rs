@@ -93,7 +93,6 @@ impl SettingsPanel {
             );
             if response.changed() {
                 settings.ollama_url = url.clone();
-                let _ = storage.save_ollama_url(&url);
             }
 
             ui.add_space(8.0);

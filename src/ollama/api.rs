@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use futures::{StreamExt, TryStreamExt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -114,46 +113,12 @@ pub struct ChatResponse {
     pub eval_duration: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GenerateRequest {
-    pub model: String,
-    pub prompt: String,
-    pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<ChatOptions>,
-    // See ChatRequest.keep_alive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GenerateResponse {
-    pub model: String,
-    pub created_at: String,
-    pub response: String,
-    pub done: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_duration: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub load_duration: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_eval_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_eval_duration: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub eval_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub eval_duration: Option<u64>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OllamaError {
     #[error("Request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("API error: {0}")]
     Api(String),
-    #[error("Model not found: {0}")]
-    NotFound(String),
 }
 
 #[derive(Clone)]
@@ -222,43 +187,4 @@ impl OllamaClient {
         Ok(data)
     }
 
-    pub async fn chat_stream(
-        &self,
-        req: ChatRequest,
-    ) -> Result<Vec<ChatResponse>> {
-        let url = format!("{}/api/chat", self.base_url);
-        let mut req = req;
-        req.stream = true;
-        let resp = self.client.post(&url).json(&req).send().await?;
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(OllamaError::Api(err).into());
-        }
-        let mut stream = resp.bytes_stream();
-        let mut results = Vec::new();
-        use futures::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| OllamaError::Request(e))?;
-            let text = String::from_utf8(chunk.to_vec())?;
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let resp: ChatResponse = serde_json::from_str(line)?;
-                results.push(resp);
-            }
-        }
-        Ok(results)
-    }
-
-    pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
-        let url = format!("{}/api/generate", self.base_url);
-        let resp = self.client.post(&url).json(&req).send().await?;
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(OllamaError::Api(err).into());
-        }
-        let data: GenerateResponse = resp.json().await?;
-        Ok(data)
-    }
 }

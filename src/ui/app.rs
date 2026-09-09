@@ -440,7 +440,7 @@ impl AiDashboardApp {
             done: true,
         });
         self.network.update_performance(reward);
-        if self.network.experience_buffer.len() >= 32 {
+        if self.network.experience_buffer.len() >= 4 {
             if let Ok(loss) = self.network.train_step() {
                 if loss.is_finite() && loss > 0.0 {
                     self.neural_panel.add_training_loss(loss);

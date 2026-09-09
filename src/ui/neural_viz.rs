@@ -591,8 +591,8 @@ impl NeuralVizPanel {
                 ui,
                 "Training",
                 &format!(
-                    "collecting ({} / 32 turns to first step)",
-                    network.experience_buffer.len().min(32)
+                    "collecting ({} / 4 turns to first step)",
+                    network.experience_buffer.len().min(4)
                 ),
             ),
         }

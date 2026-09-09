@@ -61,7 +61,6 @@ pub fn system_memory() -> MemoryStats {
 
 #[derive(Debug, Clone)]
 pub struct ResourceReport {
-    pub total_bytes: u64,
     pub reserve_bytes: u64,
     pub budget_bytes: u64,
     pub system_used_bytes: u64,
@@ -95,7 +94,6 @@ impl ResourceGuard {
         };
         let max_fit = (free / avg) as usize;
         ResourceReport {
-            total_bytes: stats.total_bytes,
             reserve_bytes: stats.reserve_bytes(),
             budget_bytes: budget,
             system_used_bytes: system_used,

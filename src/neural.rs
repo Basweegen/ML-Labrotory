@@ -227,13 +227,20 @@ impl ModelProfileNetwork {
     }
 
     pub fn train_step(&mut self) -> Result<f32> {
-        if self.experience_buffer.len() < 32 {
+        // Small-batch friendly: sample with replacement so training starts
+        // after a handful of turns instead of waiting for 32.
+        if self.experience_buffer.len() < 4 {
             return Ok(0.0);
         }
-        
-        use rand::seq::SliceRandom;
+
         let mut rng = rand::thread_rng();
-        let batch: Vec<_> = self.experience_buffer.choose_multiple(&mut rng, 32).cloned().collect();
+        let n = self.experience_buffer.len().min(32);
+        let batch: Vec<_> = (0..n)
+            .map(|_| {
+                let i = rng.gen_range(0..self.experience_buffer.len());
+                self.experience_buffer[i].clone()
+            })
+            .collect();
         
         let mut weights = self.weights_as_arrays();
         let mut biases = self.biases_as_arrays();
