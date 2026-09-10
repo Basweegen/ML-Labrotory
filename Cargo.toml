@@ -1,6 +1,8 @@
 [package]
 name = "ai-dashboard"
 version = "0.1.0"
+description = "Local-first, security-hardened LLM workbench"
+license = "AGPL-3.0-or-later"
 edition = "2024"
 rust-version = "1.85"
 

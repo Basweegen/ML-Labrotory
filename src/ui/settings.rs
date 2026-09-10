@@ -215,6 +215,16 @@ impl SettingsPanel {
         ui.separator();
         ui.add_space(12.0);
 
+        ui.label(
+            egui::RichText::new(format!(
+                "ML Lab v{} \u{00B7} AGPL-3.0-or-later; commercial licenses: see README",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(8.0);
+
         // Save settings button
         ui.horizontal(|ui| {
             if ui.button(egui::RichText::new("💾 Save Settings").size(13.0)).clicked() {
