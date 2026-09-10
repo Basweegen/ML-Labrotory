@@ -1221,6 +1221,35 @@ impl AiDashboardApp {
             {
                 let _ = self.tx.send(AppMessage::StopAll);
             }
+            ui.add_space(8.0);
+            if ui
+                .small_button("Export all .md")
+                .on_hover_text("Export every slot transcript to one markdown file")
+                .clicked()
+            {
+                let mut md = String::new();
+                for (i, slot) in self.slots.iter().enumerate() {
+                    md.push_str(&format!(
+                        "# Slot {} \u{00B7} {} [{}]\n\n{}",
+                        i + 1,
+                        slot.model.clone().unwrap_or("(empty)".to_string()),
+                        slot.role.label(),
+                        crate::ui::chat::ChatPanel::slot_markdown(&slot.model, slot.chat.messages())
+                    ));
+                }
+                self.status = match crate::ui::history::HistoryPanel::export_path("all-slots") {
+                    Some(path) => {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::write(&path, md) {
+                            Ok(()) => format!("Saved {}", path.display()),
+                            Err(e) => format!("Export failed: {e}"),
+                        }
+                    }
+                    None => "Export failed: bad export name.".to_string(),
+                };
+            }
         });
         ui.add_space(4.0);
         egui::ScrollArea::horizontal()

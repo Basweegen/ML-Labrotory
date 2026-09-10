@@ -381,6 +381,17 @@ impl ChatPanel {
             if send_triggered {
                 self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
             }
+            // Ctrl+Enter broadcasts the field to every slot (Enter alone sends here).
+            let broadcast_triggered = ui.input(|i| {
+                i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl
+            }) && response.has_focus()
+                && !self.input.trim().is_empty()
+                && !self.is_streaming;
+            if broadcast_triggered {
+                if let Some(prompt) = self.take_broadcast() {
+                    let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                }
+            }
         });
         ui.add_space(4.0);
         // Status line: always shows what this chat needs to work.
@@ -456,7 +467,7 @@ impl ChatPanel {
     }
 
     /// Render this slot's transcript as markdown (same shape as History export).
-    fn slot_markdown(model: &Option<String>, messages: &[ChatMessage]) -> String {
+    pub(crate) fn slot_markdown(model: &Option<String>, messages: &[ChatMessage]) -> String {
         let mut md = format!("# {}\n\n", model.clone().unwrap_or("chat".to_string()));
         for m in messages {
             let who = match m.role.as_str() {
@@ -465,7 +476,11 @@ impl ChatPanel {
                 "system" => "System",
                 _ => "Note",
             };
-            md.push_str(&format!("## {who}\n\n{}\n\n", m.content));
+            md.push_str(&format!(
+                "## {who} ({})\n\n{}\n\n",
+                m.timestamp.format("%H:%M"),
+                m.content
+            ));
         }
         md
     }
@@ -840,8 +855,8 @@ mod tests {
             &[msg("user", "hi"), msg("assistant", "Hello.")],
         );
         assert!(md.starts_with("# llama3.2:1b\n"));
-        assert!(md.contains("## You"));
-        assert!(md.contains("## Assistant"));
+        assert!(md.contains("## You ("));
+        assert!(md.contains("## Assistant ("));
         assert!(md.contains("Hello."));
     }
 
