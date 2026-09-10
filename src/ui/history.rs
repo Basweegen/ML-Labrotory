@@ -83,6 +83,20 @@ impl HistoryPanel {
         Some(base.join("Code_air").join("ml_lab_exports").join(format!("{stem}.md")))
     }
 
+    /// Render the audit trail as markdown (test.* scaffolding excluded, like the viewer).
+    fn audit_markdown(audit: &[crate::storage::AuditEntry]) -> String {
+        let mut md = String::from("# Security activity\n\n");
+        for a in audit.iter().filter(|a| !a.kind.starts_with("test.")) {
+            md.push_str(&format!(
+                "- {} `{}` {}\n",
+                a.ts.format("%Y-%m-%d %H:%M"),
+                a.kind,
+                a.detail
+            ));
+        }
+        md
+    }
+
     /// Force a reload next time the tab is shown (called after an autosave).
     pub fn mark_dirty(&mut self) {
         self.loaded = false;
@@ -113,6 +127,28 @@ impl HistoryPanel {
             self.audit = audit;
         }
 
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if ui
+                .small_button("Export audit .md")
+                .on_hover_text("Write the security activity log to a markdown file")
+                .clicked()
+            {
+                self.notice = match Self::export_path("audit-log") {
+                    Some(path) => {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::write(&path, Self::audit_markdown(&self.audit)) {
+                            Ok(()) => format!("Audit saved to {}", path.display()),
+                            Err(e) => format!("Audit export failed: {e}"),
+                        }
+                    }
+                    None => "Audit export failed: bad export name.".to_string(),
+                };
+            }
+        });
+        ui.add_space(4.0);
         egui::CollapsingHeader::new(format!("Security activity ({})", self.audit.len()))
             .default_open(true)
             .show(ui, |ui| {
@@ -449,5 +485,30 @@ mod tests {
         assert!(HistoryPanel::export_path("   ").is_none());
         let p = HistoryPanel::export_path("My chat: v2!").unwrap();
         assert!(p.to_string_lossy().ends_with("My_chat_v2.md"));
+    }
+}
+
+#[cfg(test)]
+mod audit_export_tests {
+    use super::*;
+
+    #[test]
+    fn audit_markdown_skips_scaffolding() {
+        let rows = vec![
+            crate::storage::AuditEntry {
+                ts: chrono::Utc::now(),
+                kind: "chat.stop_all".to_string(),
+                detail: "all slots".to_string(),
+            },
+            crate::storage::AuditEntry {
+                ts: chrono::Utc::now(),
+                kind: "test.selfcheck".to_string(),
+                detail: "roundtrip-probe".to_string(),
+            },
+        ];
+        let md = HistoryPanel::audit_markdown(&rows);
+        assert!(md.starts_with("# Security activity\n"));
+        assert!(md.contains("chat.stop_all"));
+        assert!(!md.contains("test.selfcheck"));
     }
 }

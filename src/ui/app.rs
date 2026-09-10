@@ -1525,6 +1525,19 @@ impl eframe::App for AiDashboardApp {
                 self.set_zoom(14.0);
             }
         }
+        // Slot focus: Alt+1 / Alt+2 / Alt+3 (Alt avoids clashing with typing).
+        if ui.ctx().input(|i| i.modifiers.alt) {
+            for (key, idx) in [
+                (egui::Key::Num1, 0),
+                (egui::Key::Num2, 1),
+                (egui::Key::Num3, 2),
+            ] {
+                if ui.ctx().input(|i| i.key_pressed(key)) && idx < self.slots.len() {
+                    self.focused_slot = idx;
+                    self.status = format!("Slot {} focused", idx + 1);
+                }
+            }
+        }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
         if self.settings.theme != self.last_theme {
             self.last_theme = self.settings.theme.clone();

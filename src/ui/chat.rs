@@ -17,6 +17,7 @@ pub struct ChatPanel {
     stream_buf: String,
     stream_seq: u64,
     gate: ConfirmGate,
+    last_reply_secs: Option<f32>,
 }
 
 impl ChatPanel {
@@ -31,6 +32,7 @@ impl ChatPanel {
             stream_buf: String::new(),
             stream_seq: 0,
             gate: ConfirmGate::new(),
+            last_reply_secs: None,
         }
     }
 
@@ -328,6 +330,33 @@ impl ChatPanel {
                         let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
                     }
                 }
+                ui.add_space(4.0);
+                let can_retry = !self.is_streaming
+                    && selected_model.is_some()
+                    && api_client.is_some()
+                    && self.last_user_prompt().is_some();
+                let retry_btn = ui
+                    .add_enabled(
+                        can_retry,
+                        egui::Button::new(egui::RichText::new("Retry").size(13.0))
+                            .fill(egui::Color32::from_rgb(0x55, 0x33, 0x00))
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .on_hover_text("Resend the last prompt as a new turn");
+                if retry_btn.clicked() {
+                    if let Some(prompt) = self.last_user_prompt() {
+                        self.input = prompt;
+                        self.send_message(
+                            _models,
+                            selected_model,
+                            role_prompt,
+                            slot_idx,
+                            api_client,
+                            tx,
+                            rt,
+                        );
+                    }
+                }
 
                 if self.is_streaming {
                     ui.add_space(4.0);
@@ -361,20 +390,42 @@ impl ChatPanel {
             let link_txt = if api_client.is_some() { "Ollama: linked" } else { "Ollama: NOT linked" };
             let turns = self.messages.len();
             let chars: usize = self.messages.iter().map(|m| m.content.chars().count()).sum();
+            let tok = chars / 4;
             ui.label(
                 egui::RichText::new(format!(
-                    "Slot {} -> {} | {} | {} model(s) | {} turns \u{00B7} {} chars",
+                    "Slot {} -> {} | {} | {} model(s) | {} turns \u{00B7} {} chars \u{00B7} ~{} tok \u{00B7} {}",
                     slot_idx + 1,
                     model_txt,
                     link_txt,
                     _models.len(),
                     turns,
                     chars,
+                    tok,
+                    Self::fmt_latency(self.last_reply_secs),
                 ))
                 .size(11.0)
                 .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let bar_tok = self.messages.iter().map(|m| m.content.chars().count()).sum::<usize>() / 4;
+                ui.add(
+                    egui::ProgressBar::new((bar_tok as f32 / 8000.0).clamp(0.0, 1.0))
+                        .desired_width(70.0)
+                        .show_percentage(),
+                )
+                .on_hover_text("Rough context use: chars/4 vs an 8k-token budget");
+                if ui
+                    .small_button("Copy all")
+                    .on_hover_text("Copy this slot transcript to the clipboard")
+                    .clicked()
+                {
+                    let md = Self::slot_markdown(selected_model, &self.messages);
+                    ui.ctx().copy_text(md.clone());
+                    let _ = tx.send(crate::ui::app::AppMessage::Notice(format!(
+                        "Copied {} chars",
+                        md.chars().count()
+                    )));
+                }
                 if ui
                     .small_button("Save .md")
                     .on_hover_text("Export this slot transcript to a markdown file")
@@ -417,6 +468,23 @@ impl ChatPanel {
             md.push_str(&format!("## {who}\n\n{}\n\n", m.content));
         }
         md
+    }
+
+    /// Latest user prompt, if any (powers Retry).
+    fn last_user_prompt(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+    }
+
+    /// Short latency chip for the status line.
+    fn fmt_latency(secs: Option<f32>) -> String {
+        match secs {
+            Some(s) => format!("{s:.1}s reply"),
+            None => "\u{2014}".to_string(),
+        }
     }
 
     /// Split ```fences into (lang, code) blocks.
@@ -727,6 +795,7 @@ impl ChatPanel {
         self.send_started = None;
         match response {
             Ok(resp) => {
+                self.last_reply_secs = Some(elapsed);
                 let n = resp.message.content.len();
                 let msg = ChatMessage {
                     role: "assistant".to_string(),
@@ -780,5 +849,30 @@ mod tests {
     fn slot_markdown_empty_model() {
         let md = ChatPanel::slot_markdown(&None, &[]);
         assert_eq!(md, "# chat\n\n");
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn latency_chip_shapes() {
+        assert_eq!(ChatPanel::fmt_latency(None), "\u{2014}");
+        assert_eq!(ChatPanel::fmt_latency(Some(12.345)), "12.3s reply");
+    }
+
+    #[test]
+    fn last_prompt_picks_newest_user() {
+        let mut p = ChatPanel::new();
+        assert!(p.last_user_prompt().is_none());
+        for (role, content) in [("user", "first"), ("assistant", "hi"), ("user", "second")] {
+            p.messages.push(ChatMessage {
+                role: role.to_string(),
+                content: content.to_string(),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        assert_eq!(p.last_user_prompt().as_deref(), Some("second"));
     }
 }
