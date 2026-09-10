@@ -27,6 +27,7 @@ pub enum AppMessage {
     EditorSuggestion(usize, Result<ChatResponse>),
     /// Code handed from a chat bubble to the Editor tab (code, lang tag).
     ChatToEditor(String, String),
+    EditorToChat(String),
     ModelsLoaded(Result<Vec<Model>>),
     RefreshModels,
     ModelSelected(String),
@@ -747,8 +748,16 @@ impl AiDashboardApp {
                             }
                         }
                     }
+                    let skipped = self.slots.len().saturating_sub(sent);
                     self.status = if sent == 0 {
                         "Ask all: no slot answered (need models, idle chats)".to_string()
+                    } else if skipped > 0 {
+                        format!(
+                            "Asked {} slot{} ({} skipped: no model or busy)",
+                            sent,
+                            if sent == 1 { "" } else { "s" },
+                            skipped
+                        )
                     } else {
                         format!("Asked {} slot{}", sent, if sent == 1 { "" } else { "s" })
                     };
@@ -832,6 +841,15 @@ impl AiDashboardApp {
                 }
                 AppMessage::EditorSuggestion(id, res) => {
                     self.editor.handle_ai_suggestion(id, res);
+                }
+                AppMessage::EditorToChat(code) => {
+                    let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(slot) = self.slots.get_mut(f) {
+                        slot.chat.append_input(&code);
+                    }
+                    self.tab = Tab::Chat;
+                    self.status = format!("Editor code sent to slot {}", f + 1);
+                    self.audit("editor.to_chat", format!("slot {}", f + 1));
                 }
                 AppMessage::ChatToEditor(code, lang) => {
                     self.editor.set_code_from_chat(code, lang);

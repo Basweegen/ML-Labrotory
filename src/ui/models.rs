@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use tokio::runtime::Runtime;
 
 pub struct ModelsPanel {
+    filter: String,
     pull_input: String,
     pulling: bool,
     deleting: Option<String>,
@@ -14,6 +15,7 @@ pub struct ModelsPanel {
 impl ModelsPanel {
     pub fn new() -> Self {
         Self {
+            filter: String::new(),
             pull_input: String::new(),
             pulling: false,
             deleting: None,
@@ -147,6 +149,19 @@ impl ModelsPanel {
                         crate::resources::format_bytes(free),
                     )).size(12.0).color(egui::Color32::from_rgb(0x88, 0xcc, 0x88)));
                 });
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Filter:")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .desired_width(200.0)
+                            .hint_text("model name..."),
+                    );
+                });
                 ui.add_space(4.0);
                 egui::Grid::new("models_grid")
                     .num_columns(7)
@@ -162,7 +177,20 @@ impl ModelsPanel {
                         ui.strong(egui::RichText::new("Actions").size(13.0).color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)));
                         ui.end_row();
 
-                        for model in models.iter() {
+                        let query = self.filter.trim().to_lowercase();
+                        let shown = models
+                            .iter()
+                            .filter(|m| query.is_empty() || m.name.to_lowercase().contains(&query))
+                            .count();
+                        ui.label(
+                            egui::RichText::new(format!("Showing {} of {}", shown, models.len()))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+                        );
+                        ui.end_row();
+                        for model in models.iter().filter(|m| {
+                            query.is_empty() || m.name.to_lowercase().contains(&query)
+                        }) {
                             ui.label(egui::RichText::new(&model.name).size(13.0).color(egui::Color32::WHITE));
                             ui.label(egui::RichText::new(crate::resources::format_bytes(model.size)).size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
                             {

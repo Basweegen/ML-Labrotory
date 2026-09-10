@@ -54,6 +54,14 @@ impl EditorPanel {
                 if clear_btn.clicked() {
                     self.code.clear();
                 }
+                ui.add_space(8.0);
+                if ui
+                    .small_button("Send to chat")
+                    .on_hover_text("Copy the editor code into the focused chat input")
+                    .clicked()
+                {
+                    let _ = tx.send(crate::ui::app::AppMessage::EditorToChat(self.code.clone()));
+                }
             });
         });
 
