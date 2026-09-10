@@ -835,10 +835,12 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::ChatResponse(idx, seq, res) => {
+                    // Retire the handle even when stale: a stopped or
+                    // superseded request must not leave a finished task behind.
+                    self.inflight.remove(&idx);
                     if self.slots.get(idx).map(|s| s.chat.stream_seq()) != Some(seq) {
                         continue; // stale: stopped or superseded by a newer send
                     }
-                    self.inflight.remove(&idx);
                     if idx < self.slots.len() {
                         let (ok, elapsed, resp_chars);
                         let prompt_chars: usize;
