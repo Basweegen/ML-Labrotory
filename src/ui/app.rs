@@ -1525,17 +1525,29 @@ impl eframe::App for AiDashboardApp {
                 self.set_zoom(14.0);
             }
         }
-        // Slot focus: Alt+1 / Alt+2 / Alt+3 (Alt avoids clashing with typing).
+        // Slot focus: Alt+1/2/3 or F1/F2/F3 (Alt/F-keys never clash with typing).
+        // F-keys exist because synthetic key events don't always produce digits.
+        let mut focus_req: Option<usize> = None;
         if ui.ctx().input(|i| i.modifiers.alt) {
             for (key, idx) in [
                 (egui::Key::Num1, 0),
                 (egui::Key::Num2, 1),
                 (egui::Key::Num3, 2),
             ] {
-                if ui.ctx().input(|i| i.key_pressed(key)) && idx < self.slots.len() {
-                    self.focused_slot = idx;
-                    self.status = format!("Slot {} focused", idx + 1);
+                if ui.ctx().input(|i| i.key_pressed(key)) {
+                    focus_req = Some(idx);
                 }
+            }
+        }
+        for (key, idx) in [(egui::Key::F1, 0), (egui::Key::F2, 1), (egui::Key::F3, 2)] {
+            if ui.ctx().input(|i| i.key_pressed(key)) {
+                focus_req = Some(idx);
+            }
+        }
+        if let Some(idx) = focus_req {
+            if idx < self.slots.len() {
+                self.focused_slot = idx;
+                self.status = format!("Slot {} focused", idx + 1);
             }
         }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
