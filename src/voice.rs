@@ -9,6 +9,9 @@ pub struct VoiceEngine {
     whisper_path: PathBuf,
     tts_voice: String,
     stt_model: String,
+    /// PID of the live `aplay` child, if any (shared across clones so any
+    /// handle can stop playback; the speak task reaps the child on wait).
+    player_pid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 }
 
 impl VoiceEngine {
@@ -21,6 +24,7 @@ impl VoiceEngine {
             whisper_path,
             tts_voice: Self::resolve_voice(&tts_voice),
             stt_model: Self::resolve_model(&stt_model),
+            player_pid: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -170,14 +174,31 @@ impl VoiceEngine {
             .stdin(std::process::Stdio::piped())
             .spawn()?;
         
+        if let Some(id) = play.id() {
+            *self.player_pid.lock().unwrap() = Some(id);
+        }
+
         if let Some(mut stdin) = play.stdin.take() {
             use tokio::io::AsyncWriteExt;
             stdin.write_all(&output.stdout).await?;
         }
         
-        play.wait().await?;
+        let status = play.wait().await;
+        *self.player_pid.lock().unwrap() = None;
+        status?;
         
         Ok(())
+    }
+
+    /// Kill live playback, if any. The speak task reaps the child on wait.
+    pub async fn stop(&self) {
+        let pid = self.player_pid.lock().unwrap().take();
+        if let Some(pid) = pid {
+            let _ = TokioCommand::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status()
+                .await;
+        }
     }
 
     pub async fn listen(&self) -> Result<String> {
@@ -246,6 +267,7 @@ impl Default for VoiceEngine {
             piper_path: PathBuf::from("piper"),
             whisper_path: PathBuf::from("whisper-cli"),
             tts_voice: "en_US-lessac-medium".to_string(),
+            player_pid: std::sync::Arc::new(std::sync::Mutex::new(None)),
             stt_model: "ggml-base.en.bin".to_string(),
         })
     }

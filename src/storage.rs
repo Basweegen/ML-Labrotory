@@ -282,6 +282,25 @@ impl Storage {
         Ok(())
     }
 
+    /// Pinned session ids (JSON list of uuid strings). Survives struct
+    /// changes because it never touches the session blobs.
+    pub fn save_pins(&self, pins: &[uuid::Uuid]) -> Result<()> {
+        let ids: Vec<String> = pins.iter().map(|u| u.to_string()).collect();
+        self.config_tree
+            .insert("pins", serde_json::to_vec(&ids)?)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    pub fn load_pins(&self) -> Result<Vec<uuid::Uuid>> {
+        if let Some(value) = self.config_tree.get("pins")? {
+            let ids: Vec<String> = serde_json::from_slice(&value)?;
+            Ok(ids.iter().filter_map(|s| s.parse().ok()).collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {
         let value = bincode::serialize(settings)?;
         self.config_tree.insert("settings", value)?;
@@ -323,6 +342,19 @@ mod tests {
         let n = st.clear_audit().expect("clear");
         assert!(n >= 1);
         assert_eq!(st.audit_tree.len(), 0);
+    }
+
+    #[test]
+    fn pins_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("aidash-test-{}-pins", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open");
+        assert!(st.load_pins().expect("load").is_empty());
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        st.save_pins(&[a, b]).expect("save");
+        assert_eq!(st.load_pins().expect("reload"), vec![a, b]);
+        st.save_pins(&[]).expect("clear");
+        assert!(st.load_pins().expect("empty").is_empty());
     }
 
     #[test]

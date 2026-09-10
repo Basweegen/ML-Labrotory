@@ -18,6 +18,8 @@ pub struct ChatPanel {
     stream_seq: u64,
     gate: ConfirmGate,
     last_reply_secs: Option<f32>,
+    reply_secs_total: f32,
+    reply_count: u32,
     pub history_depth: usize,
 }
 
@@ -34,6 +36,8 @@ impl ChatPanel {
             stream_seq: 0,
             gate: ConfirmGate::new(),
             last_reply_secs: None,
+            reply_secs_total: 0.0,
+            reply_count: 0,
             history_depth: 20,
         }
     }
@@ -59,11 +63,16 @@ impl ChatPanel {
             stream_seq: 0,
             gate: ConfirmGate::new(),
             last_reply_secs: self.last_reply_secs,
+            reply_secs_total: self.reply_secs_total,
+            reply_count: self.reply_count,
             history_depth: self.history_depth,
         }
     }
 
     pub fn clear_chat(&mut self) {
+        self.last_reply_secs = None;
+        self.reply_secs_total = 0.0;
+        self.reply_count = 0;
         self.messages.clear();
         self.messages.shrink_to_fit();
         self.input.clear();
@@ -215,6 +224,13 @@ impl ChatPanel {
                 .on_hover_text("Record 5s from mic and transcribe into the input box");
             if mic_btn.clicked() {
                 let _ = tx.send(crate::ui::app::AppMessage::VoiceListen(slot_idx));
+            }
+            if ui
+                .small_button("Stop voice")
+                .on_hover_text("Stop read-aloud playback")
+                .clicked()
+            {
+                let _ = tx.send(crate::ui::app::AppMessage::StopSpeak);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0);
@@ -437,7 +453,7 @@ impl ChatPanel {
                     turns,
                     chars,
                     tok,
-                    Self::fmt_latency(self.last_reply_secs),
+                    Self::fmt_latency(self.last_reply_secs, self.reply_secs_total, self.reply_count),
                 ))
                 .size(11.0)
                 .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
@@ -519,9 +535,12 @@ impl ChatPanel {
             .map(|m| m.content.clone())
     }
 
-    /// Short latency chip for the status line.
-    fn fmt_latency(secs: Option<f32>) -> String {
+    /// Short latency chip for the status line (last + running average).
+    fn fmt_latency(secs: Option<f32>, total: f32, count: u32) -> String {
         match secs {
+            Some(s) if count > 1 => {
+                format!("{s:.1}s reply \u{00B7} avg {:.1}s", total / count as f32)
+            }
             Some(s) => format!("{s:.1}s reply"),
             None => "\u{2014}".to_string(),
         }
@@ -845,6 +864,8 @@ impl ChatPanel {
         match response {
             Ok(resp) => {
                 self.last_reply_secs = Some(elapsed);
+                self.reply_secs_total += elapsed;
+                self.reply_count += 1;
                 let n = resp.message.content.len();
                 let msg = ChatMessage {
                     role: "assistant".to_string(),
@@ -907,8 +928,12 @@ mod panel_tests {
 
     #[test]
     fn latency_chip_shapes() {
-        assert_eq!(ChatPanel::fmt_latency(None), "\u{2014}");
-        assert_eq!(ChatPanel::fmt_latency(Some(12.345)), "12.3s reply");
+        assert_eq!(ChatPanel::fmt_latency(None, 0.0, 0), "\u{2014}");
+        assert_eq!(ChatPanel::fmt_latency(Some(12.345), 12.345, 1), "12.3s reply");
+        assert_eq!(
+            ChatPanel::fmt_latency(Some(10.0), 30.0, 3),
+            "10.0s reply \u{00B7} avg 10.0s"
+        );
     }
 
     #[test]

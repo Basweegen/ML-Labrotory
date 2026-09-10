@@ -46,6 +46,7 @@ pub enum AppMessage {
     Broadcast(String),
     PullProgress(String),
     SpeakText(String),
+    StopSpeak,
     StreamHandle(usize, tokio::task::JoinHandle<()>),
     StopStream(usize),
     StopAll,
@@ -215,6 +216,7 @@ pub struct AiDashboardApp {
     linked: bool,
     ollama_version: Option<String>,
     frame_ms: f32,
+    clear_chats_armed: bool,
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
@@ -264,6 +266,7 @@ impl AiDashboardApp {
             linked: false,
             ollama_version: None,
             frame_ms: 0.0,
+            clear_chats_armed: false,
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
@@ -1143,6 +1146,16 @@ impl AiDashboardApp {
                         self.status = "Dictated into chat input".to_string();
                     }
                 }
+                AppMessage::StopSpeak => {
+                    if let Some(eng) = self.voice.clone() {
+                        self.rt.spawn(async move {
+                            eng.stop().await;
+                        });
+                        self.status = "Voice stopped".to_string();
+                    } else {
+                        self.status = "Voice unavailable — toggle Voice ON first".to_string();
+                    }
+                }
                 AppMessage::SpeakText(text) => {
                     if let Some(eng) = self.voice.clone() {
                         let text: String = text.chars().take(1000).collect();
@@ -1347,6 +1360,28 @@ impl AiDashboardApp {
                 .clicked()
             {
                 self.fill_empty_slots();
+            }
+            ui.add_space(8.0);
+            if self.clear_chats_armed {
+                if ui.small_button("Confirm clear").clicked() {
+                    let mut n = 0usize;
+                    for i in 0..self.slots.len() {
+                        self.abort_slot(i);
+                        if let Some(slot) = self.slots.get_mut(i) {
+                            n += slot.chat.messages().len();
+                            slot.chat.clear_chat();
+                        }
+                    }
+                    self.status = format!("Cleared {} messages", n);
+                    self.audit("chat.clear_all", format!("{} messages", n));
+                    self.clear_chats_armed = false;
+                }
+            } else if ui
+                .small_button("Clear chats")
+                .on_hover_text("Empty every slot (history keeps saved sessions)")
+                .clicked()
+            {
+                self.clear_chats_armed = true;
             }
             ui.add_space(8.0);
             if ui

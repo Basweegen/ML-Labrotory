@@ -10,6 +10,8 @@ pub struct HistoryPanel {
     loaded: bool,
     audit: Vec<AuditEntry>,
     search: String,
+    audit_filter: String,
+    pins: Vec<uuid::Uuid>,
     rename_buf: String,
     delete_all_armed: bool,
     clear_audit_armed: bool,
@@ -25,6 +27,8 @@ impl HistoryPanel {
             loaded: false,
             audit: Vec::new(),
             search: String::new(),
+            audit_filter: String::new(),
+            pins: Vec::new(),
             rename_buf: String::new(),
             delete_all_armed: false,
             clear_audit_armed: false,
@@ -70,7 +74,32 @@ impl HistoryPanel {
         out
     }
 
+    /// Write one session to the exports dir; returns the notice to show.
+    fn write_export(session: &ChatSession, ext: &str) -> String {
+        match Self::export_path_ext(&session.name, ext) {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let body = if ext == "json" {
+                    serde_json::to_string_pretty(&session).unwrap_or_default()
+                } else {
+                    Self::session_markdown(session)
+                };
+                match std::fs::write(&path, body) {
+                    Ok(()) => format!("Exported to {}", path.display()),
+                    Err(e) => format!("Export failed: {e}"),
+                }
+            }
+            None => "Export failed: bad session name.".to_string(),
+        }
+    }
+
     pub(crate) fn export_path(name: &str) -> Option<std::path::PathBuf> {
+        Self::export_path_ext(name, "md")
+    }
+
+    pub(crate) fn export_path_ext(name: &str, ext: &str) -> Option<std::path::PathBuf> {
         let stem: String = name
             .chars()
             .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
@@ -82,7 +111,11 @@ impl HistoryPanel {
             return None;
         }
         let base = dirs::document_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        Some(base.join("Code_air").join("ml_lab_exports").join(format!("{stem}.md")))
+        Some(
+            base.join("Code_air")
+                .join("ml_lab_exports")
+                .join(format!("{stem}.{ext}")),
+        )
     }
 
     /// Render the audit trail as markdown (test.* scaffolding excluded, like the viewer).
@@ -110,6 +143,9 @@ impl HistoryPanel {
         }
         if let Ok(audit) = storage.load_audit() {
             self.audit = audit;
+        }
+        if let Ok(pins) = storage.load_pins() {
+            self.pins = pins;
         }
         self.loaded = true;
     }
@@ -165,6 +201,20 @@ impl HistoryPanel {
             }
         });
         ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Audit filter:")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.audit_filter)
+                    .desired_width(200.0)
+                    .hint_text("event kind..."),
+            );
+        });
+        ui.add_space(4.0);
         egui::CollapsingHeader::new(format!("Security activity ({})", self.audit.len()))
             .default_open(true)
             .show(ui, |ui| {
@@ -176,9 +226,13 @@ impl HistoryPanel {
                                 .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
                         );
                     }
+                    let aq = self.audit_filter.trim().to_lowercase();
                     for a in &self.audit {
                         // Test scaffolding stays in the store but out of the UI.
                         if a.kind.starts_with("test.") {
+                            continue;
+                        }
+                        if !aq.is_empty() && !a.kind.to_lowercase().contains(&aq) {
                             continue;
                         }
                         ui.label(
@@ -275,17 +329,34 @@ impl HistoryPanel {
         ui.add_space(4.0);
 
         let mut clicked_name: Option<(usize, String)> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (idx, session) in self
+        let order: Vec<usize> = {
+            let mut pinned = Vec::new();
+            let mut rest = Vec::new();
+            for (idx, s) in self
                 .sessions
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| Self::matches(s, &self.search)) {
+                .filter(|(_, s)| Self::matches(s, &self.search))
+            {
+                if self.pins.contains(&s.id) {
+                    pinned.push(idx);
+                } else {
+                    rest.push(idx);
+                }
+            }
+            pinned.extend(rest);
+            pinned
+        };
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for idx in order {
+                let session = &self.sessions[idx];
+                // mark variable intentionally unused below; label rebuilt next
+                let mark = if self.pins.contains(&session.id) { "\u{1F4CC} " } else { "" };
                 let is_selected = self.selected_session == Some(idx);
                 let response = ui.selectable_label(
                     is_selected,
                     egui::RichText::new(format!(
-                        "{}  •  {}  •  {} messages  •  {}",
+                        "{mark}{}  \u{2022}  {}  \u{2022}  {} messages  \u{2022}  {}",
                         session.model,
                         session.name,
                         session.messages.len(),
@@ -398,6 +469,22 @@ impl HistoryPanel {
                             let _ = tx.send(crate::ui::app::AppMessage::LoadSession(session.clone()));
                         }
                         ui.add_space(8.0);
+                        let pinned = self.pins.contains(&session.id);
+                        if ui
+                            .small_button(if pinned { "Unpin" } else { "Pin" })
+                            .on_hover_text("Pinned sessions sort first")
+                            .clicked()
+                        {
+                            if pinned {
+                                self.pins.retain(|p| *p != session.id);
+                            } else {
+                                self.pins.push(session.id);
+                            }
+                            if let Err(e) = storage.save_pins(&self.pins) {
+                                self.notice = format!("Pin save failed: {e}");
+                            }
+                        }
+                        ui.add_space(8.0);
                         let delete_btn = ui.add(
                             egui::Button::new(egui::RichText::new("🗑 Delete Session").size(13.0))
                                 .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))
@@ -431,26 +518,15 @@ impl HistoryPanel {
                             .on_hover_text("Write this session as Markdown under Documents/Code_air/ml_lab_exports/")
                             .clicked()
                         {
-                            match Self::export_path(&session.name) {
-                                Some(path) => {
-                                    if let Some(parent) = path.parent() {
-                                        let _ = std::fs::create_dir_all(parent);
-                                    }
-                                    match std::fs::write(&path, Self::session_markdown(&session)) {
-                                        Ok(()) => {
-                                            self.notice =
-                                                format!("Exported to {}", path.display())
-                                        }
-                                        Err(e) => {
-                                            self.notice = format!("Export failed: {e}")
-                                        }
-                                    }
-                                }
-                                None => {
-                                    self.notice =
-                                        "Export failed: bad session name.".to_string()
-                                }
-                            }
+                            self.notice = Self::write_export(&session, "md");
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .small_button("Save .json")
+                            .on_hover_text("Write this session as JSON under Documents/Code_air/ml_lab_exports/")
+                            .clicked()
+                        {
+                            self.notice = Self::write_export(&session, "json");
                         }
                     });
                 }
