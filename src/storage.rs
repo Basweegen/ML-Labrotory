@@ -328,7 +328,8 @@ mod tests {
     #[test]
     fn audit_write_then_read() {
         let _guard = store_lock();
-        let st = Storage::new().expect("open store");
+        let dir = std::env::temp_dir().join(format!("aidash-test-{}-{}", std::process::id(), line!()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
         let before = st.audit_tree.len();
         st.log_audit("test.selfcheck", "roundtrip-probe").expect("log");
         st.log_audit("test.selfcheck", "roundtrip-probe").expect("log");
@@ -349,7 +350,8 @@ mod tests {
     #[test]
     fn audit_load_matches_tree() {
         let _guard = store_lock();
-        let st = Storage::new().expect("open store");
+        let dir = std::env::temp_dir().join(format!("aidash-test-{}-{}", std::process::id(), line!()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
         let n = st.audit_tree.len();
         let mut legacy = 0usize;
         for e in st.audit_tree.iter() {
