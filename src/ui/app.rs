@@ -214,6 +214,7 @@ pub struct AiDashboardApp {
     last_allow_remote: bool,
     linked: bool,
     ollama_version: Option<String>,
+    frame_ms: f32,
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
@@ -262,6 +263,7 @@ impl AiDashboardApp {
             last_allow_remote: settings.allow_remote,
             linked: false,
             ollama_version: None,
+            frame_ms: 0.0,
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
@@ -487,6 +489,13 @@ impl AiDashboardApp {
             }
         }
         ModelProfileNetwork::new(8, vec![16, 16], 4)
+    }
+
+    /// True while anything animates (stream, spinner, pull): deserves a fast tick.
+    fn animating(&self) -> bool {
+        self.models_loading
+            || self.models_panel.is_busy()
+            || self.slots.iter().any(|s| s.chat.is_streaming())
     }
 
     /// Drop the trained profiler net and start fresh (weights + loss curve).
@@ -1238,8 +1247,9 @@ impl AiDashboardApp {
                 }
                 ui.label(
                     egui::RichText::new(format!(
-                        "{:.0}%",
-                        (self.settings.font_size / 14.0).clamp(0.5, 1.75) * 100.0
+                        "{:.0}% \u{00B7} {:.1}ms",
+                        (self.settings.font_size / 14.0).clamp(0.5, 1.75) * 100.0,
+                        self.frame_ms,
                     ))
                     .size(12.0)
                     .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
@@ -1654,6 +1664,7 @@ impl AiDashboardApp {
 
 impl eframe::App for AiDashboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_start = std::time::Instant::now();
         // Apply the Settings-tab font size as a global zoom factor so the UI
         // fits small screens (e.g. MacBook Air) and large monitors alike.
         // 14pt == 100%. Takes effect from the next frame.
@@ -1847,7 +1858,11 @@ impl eframe::App for AiDashboardApp {
         self.autosave_dirty_slots();
         self.sync_slot_layout();
 
-        // Keep the resource meter and spinners live.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        // Keep the meter/spinners live, but don't burn CPU when idle:
+        // fast tick only while something animates.
+        let tick = if self.animating() { 500 } else { 2000 };
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(tick));
+        let ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_ms = if self.frame_ms <= 0.0 { ms } else { self.frame_ms * 0.9 + ms * 0.1 };
     }
 }

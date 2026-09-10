@@ -129,6 +129,10 @@ impl ChatPanel {
     }
 
     /// Current stream generation; the send task tags its chunks with this.
+    pub fn is_streaming(&self) -> bool {
+        self.is_streaming
+    }
+
     pub fn stream_seq(&self) -> u64 {
         self.stream_seq
     }
@@ -564,7 +568,11 @@ impl ChatPanel {
         } else {
             "Assistant"
         };
-        let blocks = Self::code_blocks(&msg.content);
+        let blocks = if msg.content.contains("```") {
+            Self::code_blocks(&msg.content)
+        } else {
+            Vec::new()
+        };
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
             egui::Frame::NONE

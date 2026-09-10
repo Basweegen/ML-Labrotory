@@ -23,6 +23,10 @@ impl ModelsPanel {
         }
     }
 
+    pub fn is_busy(&self) -> bool {
+        self.pulling
+    }
+
     /// A progress line from `ollama pull`. Bounded; overlong lines trimmed.
     pub fn push_progress(&mut self, line: String) {
         let mut line = line.replace('\r', " ");
