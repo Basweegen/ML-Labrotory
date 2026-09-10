@@ -55,7 +55,16 @@ impl NeuralVizPanel {
         });
         ui.add_space(8.0);
         ui.separator();
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Experience buffer: {} samples (train step every 4).",
+                network.experience_buffer.len()
+            ))
+            .size(12.0)
+            .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(8.0);
 
         self.show_profiler(ui, network);
         ui.add_space(16.0);

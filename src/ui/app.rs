@@ -357,6 +357,32 @@ impl AiDashboardApp {
         }
     }
 
+    /// Duplicate the focused slot (model, role, history) behind the same
+    /// budget gate as a fresh slot. The clone gets its own session id so
+    /// future saves never collide with the original.
+    fn try_clone_slot(&mut self) {
+        let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+        let sizes = self.current_sizes(None);
+        match ResourceGuard::can_fit(&self.mem, &sizes, ESTIMATED_MODEL_BYTES) {
+            Ok(()) => {
+                let id = self.next_slot_id;
+                self.next_slot_id += 1;
+                let src = &self.slots[f];
+                let mut slot = ModelSlot::new(id, src.role.clone());
+                slot.model = src.model.clone();
+                slot.custom_role = src.custom_role.clone();
+                slot.chat = src.chat.carry_messages();
+                self.slots.push(slot);
+                self.focused_slot = self.slots.len() - 1;
+                self.status = format!("Slot {} cloned", self.slots.len());
+                self.audit("slot.clone", format!("slot {} from {}", self.slots.len(), f + 1));
+            }
+            Err(e) => {
+                self.status = format!("Cannot clone slot: {}", e);
+            }
+        }
+    }
+
     // ---------- chat persistence ----------
 
     /// Write slots whose chat changed since the last save. Empty chats are
@@ -1223,6 +1249,14 @@ impl AiDashboardApp {
             }
             ui.add_space(8.0);
             if ui
+                .small_button("Clone slot")
+                .on_hover_text("Duplicate the focused slot with its history")
+                .clicked()
+            {
+                self.try_clone_slot();
+            }
+            ui.add_space(8.0);
+            if ui
                 .small_button("Export all .md")
                 .on_hover_text("Export every slot transcript to one markdown file")
                 .clicked()
@@ -1578,6 +1612,17 @@ impl eframe::App for AiDashboardApp {
                 self.focused_slot = idx;
                 self.status = format!("Slot {} focused", idx + 1);
             }
+        }
+        // F4 cycles focus through the slots (Shift+F4 goes backwards).
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F4)) && !self.slots.is_empty() {
+            let back = ui.ctx().input(|i| i.modifiers.shift);
+            let n = self.slots.len();
+            self.focused_slot = if back {
+                (self.focused_slot + n - 1) % n
+            } else {
+                (self.focused_slot + 1) % n
+            };
+            self.status = format!("Slot {} focused", self.focused_slot + 1);
         }
         // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
         if self.settings.theme != self.last_theme {

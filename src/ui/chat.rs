@@ -43,6 +43,23 @@ impl ChatPanel {
     /// streaming megabytes into RAM and into the sled blob on save.
     pub const MAX_CONTENT_CHARS: usize = 50_000;
 
+    /// Copy conversation history into a fresh panel for slot cloning:
+    /// messages (and the latency chip) carry over, live stream/gate/input do not.
+    pub fn carry_messages(&self) -> Self {
+        Self {
+            input: String::new(),
+            messages: self.messages.clone(),
+            is_streaming: false,
+            voice_enabled: self.voice_enabled,
+            revision: 0,
+            send_started: None,
+            stream_buf: String::new(),
+            stream_seq: 0,
+            gate: ConfirmGate::new(),
+            last_reply_secs: self.last_reply_secs,
+        }
+    }
+
     pub fn clear_chat(&mut self) {
         self.messages.clear();
         self.messages.shrink_to_fit();
@@ -875,6 +892,24 @@ mod panel_tests {
     fn latency_chip_shapes() {
         assert_eq!(ChatPanel::fmt_latency(None), "\u{2014}");
         assert_eq!(ChatPanel::fmt_latency(Some(12.345)), "12.3s reply");
+    }
+
+    #[test]
+    fn carry_keeps_history_not_live_state() {
+        let mut p = ChatPanel::new();
+        p.input = "draft".to_string();
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        p.is_streaming = true;
+        p.last_reply_secs = Some(3.0);
+        let q = p.carry_messages();
+        assert_eq!(q.messages.len(), 1);
+        assert_eq!(q.last_reply_secs, Some(3.0));
+        assert!(q.input.is_empty());
+        assert!(!q.is_streaming);
     }
 
     #[test]
