@@ -18,6 +18,7 @@ pub struct ChatPanel {
     stream_seq: u64,
     gate: ConfirmGate,
     last_reply_secs: Option<f32>,
+    pub history_depth: usize,
 }
 
 impl ChatPanel {
@@ -33,6 +34,7 @@ impl ChatPanel {
             stream_seq: 0,
             gate: ConfirmGate::new(),
             last_reply_secs: None,
+            history_depth: 20,
         }
     }
 
@@ -57,6 +59,7 @@ impl ChatPanel {
             stream_seq: 0,
             gate: ConfirmGate::new(),
             last_reply_secs: self.last_reply_secs,
+            history_depth: self.history_depth,
         }
     }
 
@@ -763,7 +766,12 @@ impl ChatPanel {
 
         // Keep continuity: resend recent turns so the model sees persona +
         // memory (in role_prompt) AND the conversation so far.
-        let history: Vec<(String, String)> = self.messages.iter().rev().take(20).rev()
+        let history: Vec<(String, String)> = self
+            .messages
+            .iter()
+            .rev()
+            .take(self.history_depth.max(1))
+            .rev()
             .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
         self.stream_buf.clear();

@@ -201,6 +201,20 @@ impl OllamaClient {
         Ok(data.models)
     }
 
+    /// Server version string (`/api/version` -> {"version": "0.1.2"}).
+    pub async fn version(&self) -> Result<String> {
+        let url = format!("{}/api/version", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(OllamaError::Api(format!("Status: {}", resp.status())).into());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        v.get("version")
+            .and_then(|x| x.as_str())
+            .map(|x| x.to_string())
+            .ok_or_else(|| OllamaError::Api("version missing".to_string()).into())
+    }
+
     pub async fn pull_model(&self, name: &str) -> Result<()> {
         let url = format!("{}/api/pull", self.base_url);
         let body = serde_json::json!({ "name": name });

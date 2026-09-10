@@ -45,6 +45,7 @@ impl ModelsPanel {
         &mut self,
         ui: &mut egui::Ui,
         models: &mut Vec<Model>,
+        ollama_version: &Option<String>,
         api_client: &Option<OllamaClient>,
         cli_client: &Option<OllamaCli>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
@@ -126,7 +127,11 @@ impl ModelsPanel {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             let total_disk: u64 = models.iter().map(|m| m.size).sum();
-            ui.label(egui::RichText::new(format!("Installed Models ({}) \u{00B7} {} on disk", models.len(), crate::resources::format_bytes(total_disk))).size(15.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            let ver = ollama_version
+                .as_ref()
+                .map(|v| format!(" \u{00B7} Ollama v{}", v))
+                .unwrap_or_default();
+            ui.label(egui::RichText::new(format!("Installed Models ({}) \u{00B7} {} on disk{}", models.len(), crate::resources::format_bytes(total_disk), ver)).size(15.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
         });
 
         ui.add_space(8.0);

@@ -159,6 +159,62 @@ impl SettingsPanel {
         ui.separator();
         ui.add_space(12.0);
 
+        // Context section: how much history rides along with each prompt.
+        ui.label(egui::RichText::new("Context (history sent with each prompt)").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Recent turns:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            let mut depth = settings.history_depth;
+            let resp = ui.add(
+                egui::Slider::new(&mut depth, 1..=50).text("turns"),
+            );
+            if resp.changed() {
+                settings.history_depth = depth;
+            }
+        });
+        ui.label(egui::RichText::new("Higher = better continuity, slower + pricier. Saved with the rest.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // Voice section: piper voice + whisper model names (binaries live in ~/.local/bin).
+        ui.label(egui::RichText::new("Voice").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("TTS voice:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            let mut v = settings.tts_voice.clone();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut v)
+                    .desired_width(280.0)
+                    .hint_text("en_US-lessac-medium"),
+            );
+            if resp.changed() {
+                settings.tts_voice = v;
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("STT model:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            let mut m = settings.stt_model.clone();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut m)
+                    .desired_width(280.0)
+                    .hint_text("ggml-base.en.bin"),
+            );
+            if resp.changed() {
+                settings.stt_model = m;
+            }
+        });
+        ui.label(egui::RichText::new("Takes effect on restart. Saved with the rest.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
         // Save settings button
         ui.horizontal(|ui| {
             if ui.button(egui::RichText::new("💾 Save Settings").size(13.0)).clicked() {

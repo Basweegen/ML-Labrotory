@@ -75,12 +75,19 @@ pub struct AppSettings {
     pub persona: String,
     /// Long-term facts the assistant remembers across models and restarts.
     pub memory: String,
+    /// Recent turns resent with each prompt (1-50). Bounds context cost.
+    #[serde(default = "default_history_depth")]
+    pub history_depth: u32,
     /// When false (default), Ollama URLs are restricted to localhost.
     #[serde(default)]
     pub allow_remote: bool,
     /// Slot layout restored on launch (model + role per slot).
     #[serde(default)]
     pub slot_layout: Vec<SlotConfig>,
+}
+
+fn default_history_depth() -> u32 {
+    20
 }
 
 /// One persisted model slot: assignment + role.
@@ -102,6 +109,7 @@ impl Default for AppSettings {
             stt_model: "ggml-base.en.bin".to_string(),
             persona: "You are ML Lab, a calm and direct assistant. Be concise, plain-spoken, and practical. Never mention model names unless asked.".to_string(),
             memory: String::new(),
+            history_depth: default_history_depth(),
             slot_layout: Vec::new(),
             allow_remote: false,
         }
@@ -123,7 +131,15 @@ impl Storage {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("ai-dashboard");
         std::fs::create_dir_all(&data_dir)?;
-        let db_path = data_dir.join("storage");
+        Self::open_path(&data_dir.join("storage"))
+    }
+
+    /// Open a store at an explicit path (tests use a temp dir so the real
+    /// log is never touched).
+    pub fn open_path(db_path: &std::path::Path) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let db = sled::open(db_path)?;
         let sessions_tree = db.open_tree("sessions")?;
         let config_tree = db.open_tree("config")?;
@@ -189,6 +205,14 @@ impl Storage {
 
     /// Max audit rows kept; oldest evicted first.
     pub const MAX_AUDIT_ROWS: usize = 2000;
+
+    /// Drop every audit row; returns how many were removed.
+    pub fn clear_audit(&self) -> Result<usize> {
+        let n = self.audit_tree.len();
+        self.audit_tree.clear()?;
+        self.audit_tree.flush()?;
+        Ok(n)
+    }
 
     pub fn log_audit(&self, kind: &str, detail: &str) -> Result<()> {
         // Key = millis ++ pid ++ seq (16 bytes): millis alone collides for
@@ -288,6 +312,17 @@ mod tests {
 
     fn store_lock() -> std::sync::MutexGuard<'static, ()> {
         STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn audit_clear_empties() {
+        let dir = std::env::temp_dir().join(format!("aidash-test-{}", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open");
+        st.log_audit("x.y", "z").expect("log");
+        assert!(st.audit_tree.len() >= 1);
+        let n = st.clear_audit().expect("clear");
+        assert!(n >= 1);
+        assert_eq!(st.audit_tree.len(), 0);
     }
 
     #[test]

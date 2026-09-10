@@ -29,6 +29,7 @@ pub enum AppMessage {
     ChatToEditor(String, String),
     EditorToChat(String),
     ModelsLoaded(Result<Vec<Model>>),
+    OllamaVersion(String),
     RefreshModels,
     ModelSelected(String),
     ModelPulled(Result<String>),
@@ -212,6 +213,7 @@ pub struct AiDashboardApp {
     last_ollama_url: String,
     last_allow_remote: bool,
     linked: bool,
+    ollama_version: Option<String>,
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
@@ -259,6 +261,7 @@ impl AiDashboardApp {
             last_ollama_url: settings.ollama_url.clone(),
             last_allow_remote: settings.allow_remote,
             linked: false,
+            ollama_version: None,
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
@@ -354,6 +357,32 @@ impl AiDashboardApp {
             }
             Err(e) => {
                 self.status = format!("Cannot add slot: {}", e);
+            }
+        }
+    }
+
+    /// Assign the first listed model to every slot that has none.
+    /// Skips slots already set; reports how many changed.
+    fn fill_empty_slots(&mut self) {
+        let first = self.models.first().map(|m| m.name.clone());
+        match first {
+            Some(name) => {
+                let mut filled = 0usize;
+                for slot in &mut self.slots {
+                    if slot.model.is_none() {
+                        slot.model = Some(name.clone());
+                        filled += 1;
+                    }
+                }
+                self.status = if filled == 0 {
+                    "No empty slots".to_string()
+                } else {
+                    format!("Filled {} empty slot{} with {}", filled, if filled == 1 { "" } else { "s" }, name)
+                };
+                self.audit("slot.fill", format!("{} slots -> {}", filled, name));
+            }
+            None => {
+                self.status = "No models listed — refresh first".to_string();
             }
         }
     }
@@ -458,6 +487,21 @@ impl AiDashboardApp {
             }
         }
         ModelProfileNetwork::new(8, vec![16, 16], 4)
+    }
+
+    /// Drop the trained profiler net and start fresh (weights + loss curve).
+    fn reset_network(&mut self) {
+        self.network = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        let path = Self::network_path().to_string_lossy().to_string();
+        let saved = self.network.save(&path).is_ok();
+        self.neural_panel.training_history.clear();
+        self.neural_panel.last_loss = None;
+        self.status = if saved {
+            "Profiler network reset".to_string()
+        } else {
+            "Profiler network reset (save failed)".to_string()
+        };
+        self.audit("neural.reset", "fresh net".to_string());
     }
 
     /// Feed a completed chat turn into the profiler network as training signal.
@@ -683,6 +727,11 @@ impl AiDashboardApp {
         let api = self.api_client.clone();
         let cli = self.cli_client.clone();
         self.rt.spawn(async move {
+            let version = if let Some(a) = api.clone() {
+                a.version().await.ok()
+            } else {
+                None
+            };
             let result = if let Some(api) = api {
                 api.list_models().await
             } else if let Some(cli) = cli {
@@ -700,6 +749,9 @@ impl AiDashboardApp {
             } else {
                 Err(anyhow::anyhow!("No Ollama service available"))
             };
+            if let Some(v) = version {
+                let _ = tx.send(AppMessage::OllamaVersion(v));
+            }
             let _ = tx.send(AppMessage::ModelsLoaded(result));
         });
     }
@@ -764,6 +816,9 @@ impl AiDashboardApp {
                     if sent > 0 {
                         self.audit("broadcast.sent", format!("{} slots", sent));
                     }
+                }
+                AppMessage::OllamaVersion(v) => {
+                    self.ollama_version = Some(v);
                 }
                 AppMessage::ChatChunk(idx, seq, piece) => {
                     if let Some(slot) = self.slots.get_mut(idx) {
@@ -1275,6 +1330,14 @@ impl AiDashboardApp {
             }
             ui.add_space(8.0);
             if ui
+                .small_button("Fill empty")
+                .on_hover_text("Assign the first listed model to every empty slot")
+                .clicked()
+            {
+                self.fill_empty_slots();
+            }
+            ui.add_space(8.0);
+            if ui
                 .small_button("Export all .md")
                 .on_hover_text("Export every slot transcript to one markdown file")
                 .clicked()
@@ -1559,6 +1622,7 @@ impl AiDashboardApp {
             &self.slots[f],
         );
         let slot_model = self.slots[f].model.clone();
+        let history_depth = self.settings.history_depth.max(1) as usize;
         let slot_role = self.slots[f].role.label();
         ui.horizontal(|ui| {
             ui.label(
@@ -1573,6 +1637,7 @@ impl AiDashboardApp {
         });
         ui.add_space(4.0);
         if let Some(slot) = self.slots.get_mut(f) {
+            slot.chat.history_depth = history_depth;
             slot.chat.show(
                 ui,
                 &models,
@@ -1694,6 +1759,7 @@ impl eframe::App for AiDashboardApp {
                     self.models_panel.show(
                         ui,
                         &mut self.models,
+                        &self.ollama_version,
                         &self.api_client,
                         &self.cli_client,
                         &self.tx,
@@ -1745,6 +1811,17 @@ impl eframe::App for AiDashboardApp {
                     }
                 }
                 Tab::Neural => {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        if ui
+                            .small_button("Reset network")
+                            .on_hover_text("Discard training and start a fresh profiler net")
+                            .clicked()
+                        {
+                            self.reset_network();
+                        }
+                    });
+                    ui.add_space(4.0);
                     self.neural_panel.show(ui, &self.network);
                 }
                 Tab::Compare => {

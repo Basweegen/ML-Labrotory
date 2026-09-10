@@ -12,6 +12,7 @@ pub struct HistoryPanel {
     search: String,
     rename_buf: String,
     delete_all_armed: bool,
+    clear_audit_armed: bool,
     notice: String,
 }
 
@@ -26,6 +27,7 @@ impl HistoryPanel {
             search: String::new(),
             rename_buf: String::new(),
             delete_all_armed: false,
+            clear_audit_armed: false,
             notice: String::new(),
         }
     }
@@ -129,6 +131,20 @@ impl HistoryPanel {
 
         ui.horizontal(|ui| {
             ui.add_space(4.0);
+            if self.clear_audit_armed {
+                if ui.small_button("Confirm clear").clicked() {
+                    match storage.clear_audit() {
+                        Ok(n) => {
+                            self.audit.clear();
+                            self.notice = format!("Cleared {} audit rows.", n);
+                        }
+                        Err(e) => self.notice = format!("Audit clear failed: {e}"),
+                    }
+                    self.clear_audit_armed = false;
+                }
+            } else if ui.small_button("Clear audit").clicked() {
+                self.clear_audit_armed = true;
+            }
             if ui
                 .small_button("Export audit .md")
                 .on_hover_text("Write the security activity log to a markdown file")
