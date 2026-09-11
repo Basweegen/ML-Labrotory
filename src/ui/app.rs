@@ -9,7 +9,7 @@ use uuid::Uuid;
 use ndarray::Array1;
 
 use crate::neural::ModelProfileNetwork;
-use crate::ollama::api::{ChatResponse, Model, OllamaClient};
+use crate::ollama::api::{friendly_error, ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
 use crate::voice::VoiceEngine;
@@ -220,6 +220,8 @@ pub struct AiDashboardApp {
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
+    retry_due: Option<Instant>,
+    retry_count: u32,
     status: String,
     slots: Vec<ModelSlot>,
     next_slot_id: usize,
@@ -270,6 +272,8 @@ impl AiDashboardApp {
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
+            retry_due: None,
+            retry_count: 0,
             status: "Ready".to_string(),
             slots: Self::restore_slots(&settings),
             next_slot_id: settings.slot_layout.len().max(2),
@@ -929,6 +933,8 @@ impl AiDashboardApp {
                     self.models_loading = false;
                     match res {
                         Ok(m) => {
+                            self.retry_due = None;
+                            self.retry_count = 0;
                             self.linked = true;
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
@@ -973,7 +979,20 @@ impl AiDashboardApp {
                         }
                         Err(e) => {
                             self.linked = false;
-                            self.status = format!("Model refresh failed: {}", e);
+                            let why = friendly_error(&e);
+                            const BACKOFF: [u64; 6] = [5, 15, 30, 60, 120, 300];
+                            if self.retry_count < BACKOFF.len() as u32 {
+                                let wait = BACKOFF[self.retry_count as usize];
+                                self.retry_due =
+                                    Some(Instant::now() + std::time::Duration::from_secs(wait));
+                                self.retry_count += 1;
+                                self.status = format!("{why} (retrying in {wait}s…)");
+                            } else {
+                                self.retry_due = None;
+                                self.status = format!(
+                                    "{why} (auto-retry stopped - press Refresh in Models)"
+                                );
+                            }
                         }
                     }
                 }
@@ -997,6 +1016,8 @@ impl AiDashboardApp {
                     self.refresh_models();
                 }
                 AppMessage::RefreshModels => {
+                    self.retry_due = None;
+                    self.retry_count = 0;
                     self.refresh_models();
                 }
                 AppMessage::ModelDeleted(res) => {
@@ -1764,6 +1785,15 @@ impl eframe::App for AiDashboardApp {
             });
         }
         self.poll_messages();
+
+        // A failed model refresh retries itself on backoff so a box whose
+        // Ollama starts late (or restarts) reconnects with no clicks.
+        if let Some(due) = self.retry_due {
+            if Instant::now() >= due {
+                self.retry_due = None;
+                self.refresh_models();
+            }
+        }
 
         // Re-create the API client if the URL or the remote flag changed.
         if self.settings.ollama_url != self.last_ollama_url
