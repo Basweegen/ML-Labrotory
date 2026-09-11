@@ -8,6 +8,197 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
+/// Strip ANSI escape sequences, replacement characters (\u{FFFD}),
+/// and unprintable control characters, preserving \n, \r, \t.
+pub fn sanitize_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // ANSI escape sequence: \x1b[ ... letter
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                while let Some(&next_ch) = chars.peek() {
+                    chars.next();
+                    if next_ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        if ch == '\u{FFFD}' {
+            continue;
+        }
+        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageSegment {
+    Text(String),
+    Think(String),
+    Code { lang: String, code: String },
+}
+
+/// Helper that splits text with markdown code blocks into Text and Code segments.
+fn parse_text_and_code(input: &str) -> Vec<MessageSegment> {
+    let mut segments = Vec::new();
+    let mut rest = input;
+
+    while let Some(start_idx) = rest.find("```") {
+        let before = &rest[..start_idx];
+        if !before.is_empty() {
+            segments.push(MessageSegment::Text(before.to_string()));
+        }
+
+        let after_fence = &rest[start_idx + 3..];
+        if let Some(nl_pos) = after_fence.find('\n') {
+            let lang = after_fence[..nl_pos].trim().to_string();
+            let code_content = &after_fence[nl_pos + 1..];
+            if let Some(end_idx) = code_content.find("```") {
+                let code = code_content[..end_idx].trim_matches('\n').to_string();
+                segments.push(MessageSegment::Code { lang, code });
+                rest = &code_content[end_idx + 3..];
+            } else {
+                // In-progress / unclosed code block (e.g. while streaming)
+                let code = code_content.trim_matches('\n').to_string();
+                segments.push(MessageSegment::Code { lang, code });
+                rest = "";
+                break;
+            }
+        } else {
+            // Started fence and language name, but no newline yet (e.g. "```rust")
+            let lang = after_fence.trim().to_string();
+            segments.push(MessageSegment::Code { lang, code: String::new() });
+            rest = "";
+            break;
+        }
+    }
+
+    if !rest.is_empty() {
+        segments.push(MessageSegment::Text(rest.to_string()));
+    }
+
+    segments
+}
+
+/// Parse full message into Text, Think, and Code segments.
+pub fn parse_segments(content: &str) -> Vec<MessageSegment> {
+    let mut segments = Vec::new();
+    let mut rest = content;
+
+    while let Some(think_start) = rest.find("<think>") {
+        let before_think = &rest[..think_start];
+        if !before_think.is_empty() {
+            segments.extend(parse_text_and_code(before_think));
+        }
+
+        let after_think_tag = &rest[think_start + 7..];
+        if let Some(think_end) = after_think_tag.find("</think>") {
+            let think_content = after_think_tag[..think_end].trim();
+            if !think_content.is_empty() {
+                segments.push(MessageSegment::Think(think_content.to_string()));
+            }
+            rest = &after_think_tag[think_end + 8..];
+        } else {
+            // Active unclosed think block (streaming)
+            let think_content = after_think_tag.trim();
+            if !think_content.is_empty() {
+                segments.push(MessageSegment::Think(think_content.to_string()));
+            }
+            rest = "";
+            break;
+        }
+    }
+
+    if !rest.is_empty() {
+        segments.extend(parse_text_and_code(rest));
+    }
+
+    segments
+}
+
+/// High-contrast, beautifully styled code block frame with language badge,
+/// copy to clipboard, and one-click transfer to the IDE Editor tab.
+pub fn render_code_block(
+    ui: &mut egui::Ui,
+    lang: &str,
+    code: &str,
+    block_id: &str,
+    tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+) {
+    ui.add_space(4.0);
+    let frame = egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(0x0a, 0x0f, 0x1d))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x2d, 0x48)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 8));
+
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let display_lang = if lang.trim().is_empty() {
+                "CODE".to_string()
+            } else {
+                lang.trim().to_uppercase()
+            };
+            ui.label(
+                egui::RichText::new(format!("💻 {}", display_lang))
+                    .size(11.0)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let send_btn = ui.small_button(
+                    egui::RichText::new("📝 Send to Editor")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0xa5, 0xb4, 0xfc)),
+                ).on_hover_text("Open this code block in the IDE / Editor tab");
+                if send_btn.clicked() {
+                    let _ = tx.send(crate::ui::app::AppMessage::ChatToEditor(
+                        code.to_string(),
+                        lang.to_string(),
+                    ));
+                }
+
+                ui.add_space(6.0);
+                let copy_btn = ui.small_button(
+                    egui::RichText::new("📋 Copy")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                ).on_hover_text("Copy code to clipboard");
+                if copy_btn.clicked() {
+                    ui.ctx().copy_text(code.to_string());
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        egui::ScrollArea::horizontal()
+            .id_salt(block_id)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(code)
+                            .monospace()
+                            .size(12.5)
+                            .color(egui::Color32::from_rgb(0xec, 0xf0, 0xf8)),
+                    )
+                );
+            });
+    });
+    ui.add_space(4.0);
+}
+
 pub struct ChatPanel {
     input: String,
     messages: Vec<ChatMessage>,
@@ -153,14 +344,18 @@ impl ChatPanel {
         if seq != self.stream_seq || piece.is_empty() {
             return;
         }
+        let clean = sanitize_text(piece);
+        if clean.is_empty() {
+            return;
+        }
         self.is_streaming = true;
         if self.stream_buf.len() < Self::MAX_CONTENT_CHARS {
             let room = Self::MAX_CONTENT_CHARS - self.stream_buf.len();
-            let mut end = piece.len().min(room);
-            while !piece.is_char_boundary(end) {
+            let mut end = clean.len().min(room);
+            while !clean.is_char_boundary(end) {
                 end -= 1;
             }
-            self.stream_buf.push_str(&piece[..end]);
+            self.stream_buf.push_str(&clean[..end]);
         }
     }
 
@@ -589,11 +784,13 @@ impl ChatPanel {
         } else {
             "Assistant"
         };
+        let segments = parse_segments(&msg.content);
         let blocks = if msg.content.contains("```") {
             Self::code_blocks(&msg.content)
         } else {
             Vec::new()
         };
+
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
             egui::Frame::NONE
@@ -613,56 +810,47 @@ impl ChatPanel {
                                 .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
                         );
                     });
-                    if blocks.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&msg.content)
-                                .size(13.0)
-                                .color(egui::Color32::WHITE),
-                        );
-                    } else {
-                        let mut rest = msg.content.as_str();
-                        let mut bi = 0usize;
-                        while let Some(s) = rest.find("```") {
-                            let before = rest[..s].trim();
-                            if !before.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(before)
-                                        .size(13.0)
-                                        .color(egui::Color32::WHITE),
-                                );
-                            }
-                            if bi < blocks.len() {
-                                let (lang, code) = &blocks[bi];
-                                if !lang.is_empty() {
+
+                    for (seg_idx, seg) in segments.iter().enumerate() {
+                        match seg {
+                            MessageSegment::Text(t) => {
+                                if !t.is_empty() {
                                     ui.label(
-                                        egui::RichText::new(lang.clone())
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+                                        egui::RichText::new(t)
+                                            .size(13.0)
+                                            .color(egui::Color32::WHITE),
                                     );
                                 }
-                                egui::ScrollArea::horizontal().show(ui, |ui| {
-                                    ui.code(code.clone());
+                            }
+                            MessageSegment::Think(th) => {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new("💭 Thought Process")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                                )
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    egui::Frame::NONE
+                                        .fill(egui::Color32::from_rgb(0x13, 0x18, 0x24))
+                                        .corner_radius(egui::CornerRadius::same(4))
+                                        .inner_margin(egui::Margin::same(6))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(th)
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
+                                                    .italics(),
+                                            );
+                                        });
                                 });
-                                bi += 1;
                             }
-                            let after = &rest[s + 3..];
-                            match after.find("```") {
-                                Some(e) => rest = &after[e + 3..],
-                                None => {
-                                    rest = "";
-                                    break;
-                                }
+                            MessageSegment::Code { lang, code } => {
+                                let block_id = format!("chat_cb_{}_{}", seg_idx, code.len());
+                                render_code_block(ui, lang, code, &block_id, tx);
                             }
-                        }
-                        let tail = rest.trim();
-                        if !tail.is_empty() {
-                            ui.label(
-                                egui::RichText::new(tail)
-                                    .size(13.0)
-                                    .color(egui::Color32::WHITE),
-                            );
                         }
                     }
+
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -868,10 +1056,11 @@ impl ChatPanel {
                 self.last_reply_secs = Some(elapsed);
                 self.reply_secs_total += elapsed;
                 self.reply_count += 1;
-                let n = resp.message.content.len();
+                let clean = sanitize_text(&resp.message.content);
+                let n = clean.len();
                 let msg = ChatMessage {
                     role: "assistant".to_string(),
-                    content: Self::cap_content(&resp.message.content),
+                    content: Self::cap_content(&clean),
                     timestamp: chrono::Utc::now(),
                 };
                 self.push_capped(msg);
@@ -880,7 +1069,7 @@ impl ChatPanel {
             Err(e) => {
                 // No prefix: OllamaError already describes itself
                 // ("API error: ...", "Request failed: ...").
-                let em = format!("{e}");
+                let em = sanitize_text(&format!("{e}"));
                 let msg = ChatMessage {
                     role: "system".to_string(),
                     content: Self::cap_content(&em),
@@ -994,5 +1183,50 @@ mod panel_tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].1, "turn 1");
         assert_eq!(history[1].1, "reply 1");
+    }
+
+    #[test]
+    fn sanitize_text_cleans_ansi_and_replacement_artifacts() {
+        let dirty = "\x1b[31mRed Alert\x1b[0m \u{FFFD}clean\x07text\twith\nnewlines";
+        let clean = sanitize_text(dirty);
+        assert_eq!(clean, "Red Alert cleantext\twith\nnewlines");
+    }
+
+    #[test]
+    fn parse_segments_splits_code_and_text() {
+        let content = "Here is the code:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nEnjoy!";
+        let segs = parse_segments(content);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], MessageSegment::Text("Here is the code:\n".to_string()));
+        assert_eq!(segs[1], MessageSegment::Code {
+            lang: "rust".to_string(),
+            code: "fn main() {\n    println!(\"hello\");\n}".to_string(),
+        });
+        assert_eq!(segs[2], MessageSegment::Text("\nEnjoy!".to_string()));
+    }
+
+    #[test]
+    fn parse_segments_handles_unclosed_streaming_code() {
+        let streaming = "Streaming snippet:\n```python\ndef compute(x):\n    return x * 2";
+        let segs = parse_segments(streaming);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0], MessageSegment::Text("Streaming snippet:\n".to_string()));
+        assert_eq!(segs[1], MessageSegment::Code {
+            lang: "python".to_string(),
+            code: "def compute(x):\n    return x * 2".to_string(),
+        });
+    }
+
+    #[test]
+    fn parse_segments_isolates_think_blocks() {
+        let msg = "<think>\nAnalyzing problem\nStep 1: Check constraints\n</think>\nResult:\n```sh\necho done\n```";
+        let segs = parse_segments(msg);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], MessageSegment::Think("Analyzing problem\nStep 1: Check constraints".to_string()));
+        assert_eq!(segs[1], MessageSegment::Text("\nResult:\n".to_string()));
+        assert_eq!(segs[2], MessageSegment::Code {
+            lang: "sh".to_string(),
+            code: "echo done".to_string(),
+        });
     }
 }

@@ -271,15 +271,16 @@ impl OllamaClient {
             return Err(OllamaError::Api(err).into());
         }
         let mut stream = resp.bytes_stream();
-        // Ollama sends one JSON object per line, but a TCP chunk can split a
-        // line anywhere: buffer until each full line arrives.
-        let mut pending = String::new();
+        // Buffer raw bytes across TCP chunk boundaries so multi-byte UTF-8
+        // sequences are never severed mid-character, preventing replacement
+        // character artifacts.
+        let mut pending_bytes: Vec<u8> = Vec::new();
         let mut assembled = String::new();
         let mut last: Option<ChatResponse> = None;
         let feed_line = |line: &str,
-                             assembled: &mut String,
-                             last: &mut Option<ChatResponse>,
-                             on_chunk: &mut dyn FnMut(&str)|
+                         assembled: &mut String,
+                         last: &mut Option<ChatResponse>,
+                         on_chunk: &mut dyn FnMut(&str)|
          -> Result<()> {
             let line = line.trim();
             if line.is_empty() {
@@ -296,15 +297,21 @@ impl OllamaClient {
         };
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(OllamaError::Request)?;
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = pending.find('\n') {
-                let line: String = pending.drain(..=pos).collect();
-                feed_line(&line, &mut assembled, &mut last, &mut on_chunk)?;
+            pending_bytes.extend_from_slice(&chunk);
+            while let Some(pos) = pending_bytes.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = pending_bytes.drain(..=pos).collect();
+                if let Ok(line_str) = std::str::from_utf8(&line_bytes) {
+                    feed_line(line_str, &mut assembled, &mut last, &mut on_chunk)?;
+                } else {
+                    let line_str = String::from_utf8_lossy(&line_bytes);
+                    feed_line(&line_str, &mut assembled, &mut last, &mut on_chunk)?;
+                }
             }
         }
-        if !pending.trim().is_empty() {
-            let tail = std::mem::take(&mut pending);
-            feed_line(&tail, &mut assembled, &mut last, &mut on_chunk)?;
+        if !pending_bytes.is_empty() {
+            let tail = std::mem::take(&mut pending_bytes);
+            let line_str = String::from_utf8_lossy(&tail);
+            feed_line(&line_str, &mut assembled, &mut last, &mut on_chunk)?;
         }
         match last {
             Some(mut fin) => {

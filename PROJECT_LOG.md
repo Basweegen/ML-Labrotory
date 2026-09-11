@@ -79,8 +79,29 @@
   - [x] [COMPLETE] Add missing copyright headers across all modified files.
   - [x] [COMPLETE] Verify zero external telemetry, strict loopback binding, and `0o700`/`0o600` permissions.
   - [x] [COMPLETE] Run test suite: 40/40 unit tests passing.
-- **Defensive Posture & Post-Implementation Validation:**
-  - **Memory Safety:** In-flight tasks properly aborted via `abort()`. History and audit queues strictly bounded.
-  - **SSRF & Loopback Isolation:** Ollama client rejects non-loopback IPs by default. No external HTTP endpoints configured.
-  - **Permissions:** Data directory enforced `0o700`, persistent storage files enforced `0o600`.
+---
+
+## 6. Chat Character Sanitization, Distinct Code Blocks & Integrated IDE Coder Chatbox (2026-09-11)
+- **Pre-Implementation Vulnerability & Error Scan:**
+  - `src/ollama/api.rs`: `from_utf8_lossy(&chunk)` was applied immediately to raw TCP stream chunks in `chat_stream`. When multi-byte UTF-8 sequences (2-4 bytes) were split across chunk boundaries, lossy decoding replaced severed bytes with Unicode replacement character `\u{FFFD}` (``), causing random corrupt characters in chat streams.
+  - `src/ui/chat.rs`: Unsanitized incoming streaming tokens permitted ANSI escape codes (`\x1b[...]`) and control characters into message history and sled persistent storage.
+  - `src/ui/chat.rs`: Code blocks were rendered as plain inline text without distinction from conversation speech bubbles, missing syntax containers, copy buttons, and one-click editor migration.
+  - `src/ui/editor.rs`: IDE tab lacked conversational AI capabilities and dedicated model selection, forcing users to switch tabs to chat and manually copy/paste snippets.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Buffer raw bytes (`Vec<u8>`) across TCP chunk boundaries in `src/ollama/api.rs`, decoding only upon complete newline-delimited JSON lines.
+  - [x] [COMPLETE] Implement `sanitize_text` in `src/ui/chat.rs` to strip ANSI escape codes, unprintable control codes, and replacement artifacts.
+  - [x] [COMPLETE] Implement `parse_segments` in `src/ui/chat.rs` to segment messages into `Text`, `Think`, and `Code` blocks, supporting in-flight streaming and closed blocks.
+  - [x] [COMPLETE] Implement high-contrast styled code container (`render_code_block`) with dark background (`#0a0f1d`), border (`#1e2d48`), uppercase language badge (`💻 LANG`), "📋 Copy Code", and "📝 Send to Editor" buttons.
+  - [x] [COMPLETE] Isolate reasoning model `<think>` tokens into collapsible "💭 Thought Process" disclosure widgets.
+  - [x] [COMPLETE] Architect dual-pane IDE workspace in `src/ui/editor.rs`: Code Editor (left) and interactive AI Coder Chatbox (right).
+  - [x] [COMPLETE] Integrate dedicated model selector dropdown into the AI Coder Chatbox, enabling users to choose specialized coding models (`qwen2.5-coder`, `deepseek-coder`, etc.).
+  - [x] [COMPLETE] Add one-click prompt chips (`[✨ Create]`, `[⚡ Optimize]`, `[🐛 Fix Bugs]`, `[🧪 Tests]`, `[📖 Explain]`).
+  - [x] [COMPLETE] Add one-click `[📥 Apply]` and `[➕ Append]` actions directly on generated code snippets to load them into the editor immediately.
+  - [x] [COMPLETE] Maintain strict copyright header `Copyright 2026 Sean M. Stow. All rights reserved.` across all generated and modified files.
+  - [x] [COMPLETE] Run test suite: 45/45 unit tests passing.
+- **Post-Implementation Security & Memory Validation:**
+  - **Memory Bounds:** Stream buffer and message contents capped at 50,000 characters; in-flight tasks tagged by sequence ID to prevent unbounded memory growth and race conditions.
+  - **Outbound Secret Scanning:** Coder Chat prompts filtered through `ConfirmGate` before dispatching to local Ollama runtime.
+  - **Zero Telemetry & Loopback Binding:** All requests strictly routed to loopback `127.0.0.1:11434`.
+
 
