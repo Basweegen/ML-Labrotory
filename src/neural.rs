@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,34 @@ impl From<SerializableArray1> for Array1<f32> {
     }
 }
 
+/// Per-role track record: how often this job (Coder, Critic, ...) succeeds.
+/// Powers the Train tab skill table. Keyed by role index (0=General,
+/// 1=Coder, 2=Researcher, 3=Critic, 4=Planner, 5=Writer, 6=Custom).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillStat {
+    pub trials: u32,
+    pub wins: u32,
+    pub reward_sum: f32,
+}
+
+impl SkillStat {
+    pub fn win_rate(&self) -> f32 {
+        if self.trials == 0 {
+            0.0
+        } else {
+            self.wins as f32 / self.trials as f32
+        }
+    }
+
+    pub fn avg_reward(&self) -> f32 {
+        if self.trials == 0 {
+            0.0
+        } else {
+            self.reward_sum / self.trials as f32
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileNetwork {
     pub id: Uuid,
@@ -60,6 +89,7 @@ pub struct ModelProfileNetwork {
     pub biases: Vec<SerializableArray1>,
     pub learning_rate: f32,
     pub epsilon: f32,
+    pub skill_stats: HashMap<u8, SkillStat>,
     pub experience_buffer: Vec<Experience>,
     pub performance_history: Vec<f32>,
 }
@@ -108,6 +138,7 @@ impl ModelProfileNetwork {
             biases,
             learning_rate: 0.01,
             epsilon: 0.1,
+            skill_stats: HashMap::new(),
             experience_buffer: Vec::new(),
             performance_history: Vec::new(),
         }
@@ -345,6 +376,19 @@ impl ModelProfileNetwork {
         Ok(total_loss / batch.len() as f32)
     }
 
+    /// Record one finished turn under a role: trials/wins for the skill
+    /// table plus summed reward. Called from observe_chat; also used by
+    /// history replay (role unknown there defaults to General).
+    pub fn record_skill(&mut self, role: u8, ok: bool, reward: f32) {
+        let reward = if reward.is_finite() { reward } else { 0.0 };
+        let stat = self.skill_stats.entry(role.min(6)).or_default();
+        stat.trials = stat.trials.saturating_add(1);
+        if ok {
+            stat.wins = stat.wins.saturating_add(1);
+        }
+        stat.reward_sum += reward;
+    }
+
     pub fn update_performance(&mut self, reward: f32) {
         self.performance_history.push(if reward.is_finite() { reward } else { 0.0 });
         if self.performance_history.len() > 1000 {
@@ -406,6 +450,8 @@ impl ModelProfileNetwork {
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             self.learning_rate = 0.01;
         }
+        // One corrupt sum must not wipe the whole table; drop bad rows.
+        self.skill_stats.retain(|_, s| s.reward_sum.is_finite());
         if !self.epsilon.is_finite() {
             self.epsilon = 0.1;
         } else {
@@ -636,6 +682,23 @@ mod tests {
         // Greedy pick for the trained state is the rewarded action.
         let state = Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
         assert_eq!(net.select_model_profile(&state), 0);
+    }
+
+    #[test]
+    fn skill_stats_aggregate() {
+        let mut net = ModelProfileNetwork::new(4, vec![8], 3);
+        net.record_skill(1, true, 1.2);
+        net.record_skill(1, false, -0.5);
+        net.record_skill(9, true, f32::NAN);
+        let coder = &net.skill_stats[&1];
+        assert_eq!(coder.trials, 2);
+        assert_eq!(coder.wins, 1);
+        assert!((coder.win_rate() - 0.5).abs() < 1e-6);
+        assert!((coder.avg_reward() - 0.35).abs() < 1e-6);
+        // Out-of-range roles clamp to Custom(6); NaN rewards sanitize to 0.
+        assert_eq!(net.skill_stats[&6].trials, 1);
+        net.sanitize();
+        assert!(net.skill_stats[&6].reward_sum.is_finite());
     }
 
     #[test]

@@ -600,6 +600,8 @@ impl AiDashboardApp {
         } else {
             -0.5
         };
+        self.network
+            .record_skill(role_idx.min(6) as u8, ok, reward);
         self.network.add_experience(crate::neural::Experience {
             state: ctx.clone().into(),
             action,

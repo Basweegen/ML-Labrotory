@@ -78,6 +78,42 @@ impl TrainPanel {
         );
         ui.add_space(8.0);
 
+        // ---- skills by role ----
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Skills").size(15.0).strong());
+        });
+        if network.skill_stats.is_empty() {
+            ui.label(
+                egui::RichText::new("No finished turns yet - chat and each role earns its record here.")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+            );
+        } else {
+            egui::Grid::new("skill_table")
+                .num_columns(4)
+                .spacing([16.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Role");
+                    ui.strong("Turns");
+                    ui.strong("Win");
+                    ui.strong("Avg reward");
+                    ui.end_row();
+                    let mut roles: Vec<u8> = network.skill_stats.keys().copied().collect();
+                    roles.sort_unstable();
+                    for r in roles {
+                        if let Some(s) = network.skill_stats.get(&r) {
+                            ui.label(role_name(r));
+                            ui.label(format!("{}", s.trials));
+                            ui.label(format!("{:.0}%", s.win_rate() * 100.0));
+                            ui.label(format!("{:+.2}", s.avg_reward()));
+                            ui.end_row();
+                        }
+                    }
+                });
+        }
+        ui.add_space(8.0);
+
         // ---- knobs ----
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Learning").size(15.0).strong());
@@ -164,5 +200,18 @@ impl TrainPanel {
                     .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
             );
         }
+    }
+}
+
+/// Display name for a skill-table role index (mirrors ModelRole order).
+fn role_name(idx: u8) -> &'static str {
+    match idx {
+        0 => "General",
+        1 => "Coder",
+        2 => "Researcher",
+        3 => "Critic",
+        4 => "Planner",
+        5 => "Writer",
+        _ => "Custom",
     }
 }
