@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
 use crate::security::{ConfirmGate, SecretHit};
 use crate::storage::ChatMessage;
+use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -21,6 +22,11 @@ pub struct ChatPanel {
     reply_secs_total: f32,
     reply_count: u32,
     pub history_depth: usize,
+    /// Parsed ```code fences per message, rebuilt only when `revision`
+    /// changes. Reparsing up to 100 bubbles every frame was the dominant
+    /// CPU cost in long chats; now each edit parses once.
+    block_cache: RefCell<Vec<Vec<(String, String)>>>,
+    block_cache_rev: Cell<u64>,
 }
 
 impl ChatPanel {
@@ -39,6 +45,8 @@ impl ChatPanel {
             reply_secs_total: 0.0,
             reply_count: 0,
             history_depth: 20,
+            block_cache: RefCell::new(Vec::new()),
+            block_cache_rev: Cell::new(0),
         }
     }
 
@@ -66,6 +74,9 @@ impl ChatPanel {
             reply_secs_total: self.reply_secs_total,
             reply_count: self.reply_count,
             history_depth: self.history_depth,
+            block_cache: RefCell::new(Vec::new()),
+            // Mismatched on purpose: first render rebuilds for the carried messages.
+            block_cache_rev: Cell::new(self.revision.wrapping_add(1)),
         }
     }
 
@@ -292,7 +303,8 @@ impl ChatPanel {
                 }
                 let start = total.saturating_sub(100);
                 for i in start..total {
-                    self.show_message(ui, &self.messages[i], tx);
+                    let blocks = self.cached_blocks(i);
+                    self.show_message(ui, &self.messages[i], tx, &blocks);
                 }
                 if !self.stream_buf.is_empty() {
                     let tmp = ChatMessage {
@@ -300,7 +312,8 @@ impl ChatPanel {
                         content: format!("{}▍", self.stream_buf),
                         timestamp: chrono::Utc::now(),
                     };
-                    self.show_message(ui, &tmp, tx);
+                    let tmp_blocks = Self::code_blocks(&tmp.content);
+                    self.show_message(ui, &tmp, tx, &tmp_blocks);
                 }
                 if self.is_streaming && self.stream_buf.is_empty() {
                     ui.horizontal(|ui| {
@@ -586,11 +599,29 @@ impl ChatPanel {
         out
     }
 
+    /// Fence blocks for message `idx`, parsed at most once per edit.
+    fn cached_blocks(&self, idx: usize) -> Vec<(String, String)> {
+        if self.block_cache_rev.get() != self.revision {
+            let mut cache = Vec::with_capacity(self.messages.len());
+            for m in &self.messages {
+                cache.push(if m.content.contains("```") {
+                    Self::code_blocks(&m.content)
+                } else {
+                    Vec::new()
+                });
+            }
+            self.block_cache.replace(cache);
+            self.block_cache_rev.set(self.revision);
+        }
+        self.block_cache.borrow().get(idx).cloned().unwrap_or_default()
+    }
+
     fn show_message(
         &self,
         ui: &mut egui::Ui,
         msg: &ChatMessage,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        blocks: &[(String, String)],
     ) {
         let is_user = msg.role == "user";
         // Light-theme aware: hardcoded dark fills + white text turn
@@ -640,11 +671,6 @@ impl ChatPanel {
             "System"
         } else {
             "Assistant"
-        };
-        let blocks = if msg.content.contains("```") {
-            Self::code_blocks(&msg.content)
-        } else {
-            Vec::new()
         };
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
@@ -1008,6 +1034,35 @@ mod panel_tests {
         assert_eq!(q.last_reply_secs, Some(3.0));
         assert!(q.input.is_empty());
         assert!(!q.is_streaming);
+    }
+
+    #[test]
+    fn block_cache_parses_once_per_edit() {
+        use crate::storage::ChatMessage;
+        let mut p = ChatPanel::new();
+        for n in 0..3 {
+            p.messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: format!("text\n```py\ncode{n}\n```\n"),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        p.revision = p.revision.saturating_add(1);
+        let b0 = p.cached_blocks(1);
+        assert_eq!(b0.len(), 1);
+        assert_eq!(b0[0].1, "code1");
+        // Second call hits the cache: same result, revision synced.
+        assert_eq!(p.cached_blocks(1), b0);
+        assert_eq!(p.block_cache_rev.get(), p.revision);
+        // New edit invalidates: fresh content appears after one rebuild.
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "plain".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        p.revision = p.revision.saturating_add(1);
+        assert!(p.cached_blocks(3).is_empty());
+        assert_eq!(p.cached_blocks(0)[0].1, "code0");
     }
 
     #[test]
