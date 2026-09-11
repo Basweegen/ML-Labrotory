@@ -46,6 +46,7 @@ pub enum AppMessage {
     EditorChunk(usize, String),
     Audit(String, String),
     Broadcast(String),
+    Relay(String),
     CmdRun { cmd: String, cwd: String },
     CmdLine(u64, String),
     CmdStop,
@@ -123,6 +124,16 @@ fn compose_system_prompt(persona: &str, memory: &str, slot: &ModelSlot) -> Strin
 }
 
 /// One runnable model slot: a model assignment + a role + its own chat history.
+/// A sequential collaboration: the task passes slot to slot in `order`,
+/// each model seeing the previous answers. One inference at a time, so a
+/// local box never contends with itself.
+struct RelayState {
+    task: String,
+    order: Vec<usize>,
+    pos: usize,
+    prior: Vec<(usize, String)>,
+}
+
 pub struct ModelSlot {
     pub id: usize,
     pub model: Option<String>,
@@ -220,6 +231,7 @@ pub struct AiDashboardApp {
     cli_client: Option<OllamaCli>,
     voice: Option<VoiceEngine>,
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
+    relay: Option<RelayState>,
     cmd_child: Option<tokio::process::Child>,
     cmd_id: u64,
     last_ollama_url: String,
@@ -275,6 +287,7 @@ impl AiDashboardApp {
             cli_client,
             voice: None,
             inflight: HashMap::new(),
+            relay: None,
             cmd_child: None,
             cmd_id: 0,
             last_ollama_url: settings.ollama_url.clone(),
@@ -751,6 +764,171 @@ impl AiDashboardApp {
             });
     }
 
+    // ---------- relay collaboration ----------
+
+    /// Prompt for relay step `step` (0-based): original task plus every
+    /// previous answer, each capped so context can't blow up.
+    fn relay_prompt(task: &str, prior: &[(usize, String)], step: usize, total: usize) -> String {
+        let mut s = format!(
+            "[Relay {}/{}] Original task:\n{}\n",
+            step + 1,
+            total,
+            task
+        );
+        for (idx, answer) in prior {
+            let cut: String = answer.chars().take(3000).collect();
+            s.push_str(&format!(
+                "\n--- Previous answer from slot {} ---\n{}\n",
+                idx + 1,
+                cut
+            ));
+        }
+        s.push_str(
+            "\nBuild on the previous answer(s): improve, correct, or extend them. \
+             If they are already good, say so briefly and add what's missing.",
+        );
+        s
+    }
+
+    /// Start a relay: task flows through every idle slot with a model.
+    fn start_relay(&mut self, prompt: String) {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        // Secret-guard the raw task once upfront (framing is added below).
+        let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+        if let Some(note) = self
+            .slots
+            .get_mut(f0)
+            .and_then(|s| s.chat.broadcast_check(&prompt).err())
+        {
+            if let Some(slot) = self.slots.get_mut(f0) {
+                slot.chat.push_system_note(note);
+            }
+            self.status = "Relay blocked: possible secret - resend to override".to_string();
+            self.audit("relay.blocked", "secret guard".to_string());
+            return;
+        }
+        let order: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].model.is_some() && !self.slots[i].chat.is_streaming())
+            .collect();
+        if order.len() < 2 {
+            self.status = "Relay needs 2+ idle slots with a model".to_string();
+            return;
+        }
+        for i in 0..self.slots.len() {
+            self.abort_slot(i);
+        }
+        let first = order[0];
+        let step0 = Self::relay_prompt(&prompt, &[], 0, order.len());
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(first) {
+            if let Err(note) = slot.chat.broadcast_check(&step0) {
+                slot.chat.push_system_note(note);
+                false
+            } else {
+                let rp = compose_system_prompt(&persona, &memory, slot);
+                let model = slot.model.clone();
+                slot.chat.send_prompt(
+                    step0, &models, &model, &rp, first, &api, &self.tx, &self.rt,
+                )
+            }
+        } else {
+            false
+        };
+        if sent {
+            self.relay = Some(RelayState {
+                task: prompt.clone(),
+                order: order.clone(),
+                pos: 0,
+                prior: Vec::new(),
+            });
+            self.status = format!("Relay 1/{}: slot {} working\u{2026}", order.len(), first + 1);
+            self.audit("relay.start", format!("{} steps", order.len()));
+        } else {
+            self.status = format!("Relay failed to start on slot {}", first + 1);
+        }
+    }
+
+    /// Advance the chain when the expected slot finishes. Anything else
+    /// (wrong slot, failure, full inbox) ends the relay with a reason.
+    fn advance_relay(&mut self, finished_idx: usize, ok: bool) {
+        let Some(st) = self.relay.take() else { return };
+        if st.order.get(st.pos) != Some(&finished_idx) {
+            self.relay = Some(st);
+            return;
+        }
+        if !ok {
+            self.status = format!("Relay stopped: slot {} failed", finished_idx + 1);
+            self.audit("relay.failed", format!("slot {}", finished_idx + 1));
+            return;
+        }
+        let reply: String = self
+            .slots
+            .get(finished_idx)
+            .and_then(|s| {
+                s.chat
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant")
+            })
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let mut prior = st.prior;
+        prior.push((finished_idx, reply));
+        let next_pos = st.pos + 1;
+        if next_pos >= st.order.len() {
+            self.status = format!("Relay done: {} slots built on it", st.order.len());
+            self.audit("relay.done", format!("{} steps", st.order.len()));
+            return;
+        }
+        let next_idx = st.order[next_pos];
+        let task = st.task.clone();
+        let order = st.order.clone();
+        let prompt = Self::relay_prompt(&task, &prior, next_pos, order.len());
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(next_idx) {
+            if let Err(note) = slot.chat.broadcast_check(&prompt) {
+                slot.chat.push_system_note(note);
+                self.status = "Relay stopped: a step tripped the secret guard".to_string();
+                self.audit("relay.blocked", "secret guard".to_string());
+                return;
+            }
+            let rp = compose_system_prompt(&persona, &memory, slot);
+            let model = slot.model.clone();
+            slot.chat.send_prompt(
+                prompt, &models, &model, &rp, next_idx, &api, &self.tx, &self.rt,
+            )
+        } else {
+            false
+        };
+        if sent {
+            self.relay = Some(RelayState { task, order: order.clone(), pos: next_pos, prior });
+            self.status = format!(
+                "Relay {}/{}: slot {} working\u{2026}",
+                next_pos + 1,
+                order.len(),
+                next_idx + 1
+            );
+        } else {
+            self.status = format!("Relay stopped: slot {} unavailable", next_idx + 1);
+            self.audit("relay.stalled", format!("slot {}", next_idx + 1));
+        }
+    }
+
+    /// Snapshot of the live relay for the progress strip (pos, order).
+    fn relay_status(&self) -> Option<(usize, Vec<usize>)> {
+        self.relay.as_ref().map(|st| (st.pos, st.order.clone()))
+    }
+
     // ---------- model loading ----------
 
     fn refresh_models(&mut self) {
@@ -849,6 +1027,9 @@ impl AiDashboardApp {
                         self.audit("broadcast.sent", format!("{} slots", sent));
                     }
                 }
+                AppMessage::Relay(prompt) => {
+                    self.start_relay(prompt);
+                }
                 AppMessage::OllamaVersion(v) => {
                     self.ollama_version = Some(v);
                 }
@@ -861,6 +1042,7 @@ impl AiDashboardApp {
                     // Retire the handle even when stale: a stopped or
                     // superseded request must not leave a finished task behind.
                     self.inflight.remove(&idx);
+                    let mut relay_event: Option<(usize, bool)> = None;
                     if self.slots.get(idx).map(|s| s.chat.stream_seq()) != Some(seq) {
                         continue; // stale: stopped or superseded by a newer send
                     }
@@ -906,6 +1088,7 @@ impl AiDashboardApp {
                             role_idx,
                             &model_name,
                         );
+                        relay_event = Some((idx, ok));
                         if self.settings.voice_enabled {
                             if let Some(eng) = self.voice.clone() {
                                 if let Some(last) = self.slots[idx]
@@ -923,6 +1106,9 @@ impl AiDashboardApp {
                                 }
                             }
                         }
+                    }
+                    if let Some((r_idx, r_ok)) = relay_event {
+                        self.advance_relay(r_idx, r_ok);
                     }
                 }
                 AppMessage::EditorChunk(id, piece) => {
@@ -1064,6 +1250,9 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopStream(idx) => {
+                    if self.relay.take().is_some() {
+                        self.audit("relay.cancelled", format!("slot {}", idx + 1));
+                    }
                     self.abort_slot(idx);
                     if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.stop_stream();
@@ -1154,6 +1343,9 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopAll => {
+                    if self.relay.take().is_some() {
+                        self.audit("relay.cancelled", "stop all".to_string());
+                    }
                     if let Some(mut c) = self.cmd_child.take() {
                         let _ = c.start_kill();
                         let id = self.cmd_id;
@@ -1460,6 +1652,32 @@ impl AiDashboardApp {
         let mut pending_role: Option<(usize, ModelRole)> = None;
         let mut pending_custom: Option<(usize, String)> = None;
         let mut add_pressed = false;
+
+        // Relay progress strip: live step position + slot order + cancel.
+        if let Some((pos, order)) = self.relay_status() {
+            let chain: Vec<String> = order.iter().map(|i| format!("S{}", i + 1)).collect();
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "\u{25B6} Relay {}/{}: {}",
+                        pos + 1,
+                        order.len(),
+                        chain.join(" \u{2192} ")
+                    ))
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0xbb, 0x88, 0xff)),
+                );
+                if ui
+                    .small_button("Cancel")
+                    .on_hover_text("Stop the relay (stops all slots)")
+                    .clicked()
+                {
+                    let _ = self.tx.send(AppMessage::StopAll);
+                }
+            });
+            ui.add_space(4.0);
+        }
 
         ui.horizontal(|ui| {
             ui.add_space(4.0);

@@ -372,6 +372,19 @@ impl ChatPanel {
                     }
                 }
                 ui.add_space(4.0);
+                let relay_btn = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Relay \u{25B8}").size(13.0))
+                            .fill(egui::Color32::from_rgb(0x44, 0x22, 0x66))
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .on_hover_text("Pass this input through every slot in order - each model builds on the last");
+                if relay_btn.clicked() {
+                    if let Some(prompt) = self.take_broadcast() {
+                        let _ = tx.send(crate::ui::app::AppMessage::Relay(prompt));
+                    }
+                }
+                ui.add_space(4.0);
                 let can_retry = !self.is_streaming
                     && selected_model.is_some()
                     && api_client.is_some()
