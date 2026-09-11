@@ -772,6 +772,13 @@ impl AiDashboardApp {
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                                     );
+                                    if ui
+                                        .small_button("Copy answer")
+                                        .on_hover_text("Copy this slot's full reply to the clipboard")
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(last.content.clone());
+                                    }
                                 });
                         }
                     }
