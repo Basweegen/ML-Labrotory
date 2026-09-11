@@ -18,6 +18,7 @@ use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
 use crate::ui::workspace::WorkspacePanel;
+use crate::ui::train::TrainPanel;
 use crate::workspace::{spawn_shell, Workspace};
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
@@ -190,6 +191,7 @@ enum Tab {
     Workspace,
     History,
     Neural,
+    Train,
     Compare,
     Settings,
 }
@@ -203,6 +205,7 @@ impl Tab {
             Tab::Workspace => "Files",
             Tab::History => "History",
             Tab::Neural => "Neural",
+            Tab::Train => "Train",
             Tab::Compare => "Compare",
             Tab::Settings => "Settings",
         }
@@ -216,6 +219,7 @@ impl Tab {
             Tab::Workspace => "🗂",
             Tab::History => "📜",
             Tab::Neural => "🧠",
+            Tab::Train => "🎓",
             Tab::Compare => "⚖",
             Tab::Settings => "⚙",
         }
@@ -229,6 +233,7 @@ impl Tab {
             Tab::Workspace,
             Tab::History,
             Tab::Neural,
+            Tab::Train,
             Tab::Compare,
             Tab::Settings,
         ]
@@ -266,6 +271,7 @@ pub struct AiDashboardApp {
     models_panel: ModelsPanel,
     history: HistoryPanel,
     workspace_panel: WorkspacePanel,
+    train_panel: TrainPanel,
     settings_panel: SettingsPanel,
     settings: AppSettings,
     storage: Option<Storage>,
@@ -322,6 +328,7 @@ impl AiDashboardApp {
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
             workspace_panel: WorkspacePanel::new(),
+            train_panel: TrainPanel::new(),
             settings_panel: SettingsPanel::new(),
             settings,
             storage,
@@ -2402,6 +2409,33 @@ impl eframe::App for AiDashboardApp {
                 Tab::History => {
                     if let Some(st) = self.storage.as_ref() {
                         self.history.show(ui, st, &self.tx);
+                    } else {
+                        ui.label("Storage unavailable.");
+                    }
+                }
+                Tab::Train => {
+                    if self.storage.is_some() {
+                        let storage = self.storage.take();
+                        if let Some(st) = storage.as_ref() {
+                            self.train_panel.show(
+                                ui,
+                                &mut self.network,
+                                &mut self.neural_panel,
+                                st,
+                                &self.tx,
+                            );
+                        }
+                        self.storage = storage;
+                        if self.train_panel.take_reset() {
+                            self.reset_network();
+                        }
+                        if self.train_panel.take_dirty() {
+                            let path = Self::network_path().to_string_lossy().to_string();
+                            if self.network.save(&path).is_err() {
+                                self.status =
+                                    "Train settings changed (net save failed)".to_string();
+                            }
+                        }
                     } else {
                         ui.label("Storage unavailable.");
                     }
