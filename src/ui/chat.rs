@@ -613,6 +613,9 @@ impl ChatPanel {
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
+                    // Readability: bubbles never stretch full-width on wide
+                    // windows; long lines wrap inside the cap instead.
+                    ui.set_max_width(620.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(msg.timestamp.format("%H:%M").to_string())
