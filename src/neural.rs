@@ -59,6 +59,7 @@ pub struct ModelProfileNetwork {
     pub weights: Vec<SerializableArray2>,
     pub biases: Vec<SerializableArray1>,
     pub learning_rate: f32,
+    pub epsilon: f32,
     pub experience_buffer: Vec<Experience>,
     pub performance_history: Vec<f32>,
 }
@@ -106,6 +107,7 @@ impl ModelProfileNetwork {
             weights,
             biases,
             learning_rate: 0.01,
+            epsilon: 0.1,
             experience_buffer: Vec::new(),
             performance_history: Vec::new(),
         }
@@ -124,85 +126,86 @@ impl ModelProfileNetwork {
         self.biases = biases.into_iter().map(|b| b.into()).collect();
     }
 
-    pub fn forward(&self, input: &Array1<f32>) -> Array1<f32> {
+    /// Shared forward pass: softmax output plus per-layer pre-activations
+    /// (z) and post-activations (a) for backprop. posts[0] is the sanitized
+    /// input; posts[l+1] is layer l's output (ReLU for hidden, logits last).
+    fn forward_cache(
+        &self,
+        input: &Array1<f32>,
+    ) -> (Array1<f32>, Vec<Array1<f32>>, Vec<Array1<f32>>) {
         let weights = self.weights_as_arrays();
         let biases = self.biases_as_arrays();
-        if weights.is_empty() || self.output_dim == 0 {
-            return Array1::zeros(self.output_dim.max(1));
-        }
-        // Sanitize input: wrong dim or non-finite -> zeros (prevents dot panic / NaN spread)
+        let uniform =
+            Array1::from_elem(self.output_dim.max(1), 1.0 / self.output_dim.max(1) as f32);
         let mut x = if input.len() != self.input_dim {
             Array1::zeros(self.input_dim)
         } else {
             input.mapv(|v| if v.is_finite() { v.clamp(-1e3, 1e3) } else { 0.0 })
         };
-
+        let mut pres = Vec::with_capacity(weights.len());
+        let mut posts = Vec::with_capacity(weights.len() + 1);
+        posts.push(x.clone());
         for i in 0..weights.len() {
             // Shape guard: weight rows must match bias len, cols must match x len
             if weights[i].ncols() != x.len() || weights[i].nrows() != biases[i].len() {
-                return Array1::from_elem(self.output_dim.max(1), 1.0 / self.output_dim.max(1) as f32);
+                return (uniform, pres, posts);
             }
-            x = weights[i].dot(&x) + &biases[i];
-            x.mapv_inplace(|v| if v.is_finite() { v } else { 0.0 });
-            if i < weights.len() - 1 {
-                x.mapv_inplace(|v| v.max(0.0));
-            }
+            let z = weights[i].dot(&x) + &biases[i];
+            let z = z.mapv(|v| if v.is_finite() { v } else { 0.0 });
+            pres.push(z.clone());
+            x = if i < weights.len() - 1 {
+                z.mapv(|v| v.max(0.0))
+            } else {
+                z
+            };
+            posts.push(x.clone());
         }
-
         if x.is_empty() {
-            return Array1::from_elem(self.output_dim.max(1), 1.0 / self.output_dim.max(1) as f32);
+            return (uniform, pres, posts);
         }
-        let max_val = x.fold(f32::NEG_INFINITY, |a, &b| {
-            if b.is_finite() { a.max(b) } else { a }
-        });
-        let max_val = if max_val.is_finite() { max_val } else { 0.0 };
-        let exp_x = x.mapv(|v| (v.clamp(-50.0, 50.0) - max_val).exp());
-        let sum = exp_x.sum();
-        if !sum.is_finite() || sum <= 1e-12 {
-            return Array1::from_elem(x.len(), 1.0 / x.len() as f32);
-        }
-        exp_x / sum
+        (Self::softmax(&x), pres, posts)
     }
 
-    /// Forward pass that also returns per-layer activations (for correct gradient updates).
-    fn forward_with_activations(&self, input: &Array1<f32>) -> (Array1<f32>, Vec<Array1<f32>>) {
-        let weights = self.weights_as_arrays();
-        let biases = self.biases_as_arrays();
-        let mut x = if input.len() != self.input_dim {
-            Array1::zeros(self.input_dim)
+    fn softmax(logits: &Array1<f32>) -> Array1<f32> {
+        let max_val =
+            logits.fold(f32::NEG_INFINITY, |a, &b| if b.is_finite() { a.max(b) } else { a });
+        let max_val = if max_val.is_finite() { max_val } else { 0.0 };
+        let exp_x = logits.mapv(|v| (v.clamp(-50.0, 50.0) - max_val).exp());
+        let sum = exp_x.sum();
+        if !sum.is_finite() || sum <= 1e-12 {
+            Array1::from_elem(logits.len(), 1.0 / logits.len().max(1) as f32)
         } else {
-            input.mapv(|v| if v.is_finite() { v.clamp(-1e3, 1e3) } else { 0.0 })
-        };
-        let mut acts = vec![x.clone()];
-        for i in 0..weights.len() {
-            if weights[i].ncols() != x.len() || weights[i].nrows() != biases[i].len() {
-                break;
-            }
-            x = weights[i].dot(&x) + &biases[i];
-            x.mapv_inplace(|v| if v.is_finite() { v } else { 0.0 });
-            if i < weights.len() - 1 {
-                x.mapv_inplace(|v| v.max(0.0));
-            }
-            acts.push(x.clone());
+            exp_x / sum
         }
-        // softmax on final
-        let out = if x.is_empty() {
-            Array1::zeros(self.output_dim.max(1))
-        } else {
-            let m = x.fold(f32::NEG_INFINITY, |a, &b| if b.is_finite() { a.max(b) } else { a });
-            let m = if m.is_finite() { m } else { 0.0 };
-            let e = x.mapv(|v| (v.clamp(-50.0, 50.0) - m).exp());
-            let s = e.sum();
-            if !s.is_finite() || s <= 1e-12 {
-                Array1::from_elem(x.len(), 1.0 / x.len() as f32)
-            } else {
-                e / s
-            }
-        };
-        (out, acts)
+    }
+
+    pub fn forward(&self, input: &Array1<f32>) -> Array1<f32> {
+        let weights = self.weights_as_arrays();
+        if weights.is_empty() || self.output_dim == 0 {
+            return Array1::zeros(self.output_dim.max(1));
+        }
+        self.forward_cache(input).0
+    }
+
+    /// Map a raw reward (-0.5 fail .. ~1.5 fast success) onto a target
+    /// probability in [0,1] so it lives on the softmax output's scale.
+    fn reward_target(reward: f32) -> f32 {
+        ((reward + 0.5) / 2.0).clamp(0.0, 1.0)
     }
 
     pub fn select_model_profile(&self, context: &Array1<f32>) -> usize {
+        if self.output_dim == 0 {
+            return 0;
+        }
+        let eps = if self.epsilon.is_finite() {
+            self.epsilon.clamp(0.0, 0.5)
+        } else {
+            0.1
+        };
+        let mut rng = rand::thread_rng();
+        if rng.gen_range(0.0..1.0) < eps {
+            return rng.gen_range(0..self.output_dim);
+        }
         let output = self.forward(context);
         output.iter()
             .enumerate()
@@ -226,6 +229,9 @@ impl ModelProfileNetwork {
         }
     }
 
+    /// Full backprop through every layer (ReLU hidden, softmax output,
+    /// exact MSE-through-softmax gradient). Previously only the output
+    /// layer learned and hidden layers stayed frozen at their init.
     pub fn train_step(&mut self) -> Result<f32> {
         // Small-batch friendly: sample with replacement so training starts
         // after a handful of turns instead of waiting for 32.
@@ -241,52 +247,101 @@ impl ModelProfileNetwork {
                 self.experience_buffer[i].clone()
             })
             .collect();
-        
+
         let mut weights = self.weights_as_arrays();
         let mut biases = self.biases_as_arrays();
         let mut total_loss = 0.0;
-        
+        let lr = if self.learning_rate.is_finite() {
+            self.learning_rate.clamp(1e-6, 0.1)
+        } else {
+            0.01
+        };
+        let out_dim = self.output_dim.max(1);
+
         for exp in &batch {
             let state: Array1<f32> = exp.state.clone().into();
-            let (prediction, acts) = self.forward_with_activations(&state);
-            if prediction.len() != self.output_dim || acts.len() != weights.len() + 1 {
+            let (prediction, pres, posts) = self.forward_cache(&state);
+            if prediction.len() != self.output_dim
+                || pres.len() != weights.len()
+                || posts.len() != weights.len() + 1
+            {
                 continue; // corrupt entry / shape mismatch -> skip, don't poison weights
             }
             let action = exp.action.min(self.output_dim.saturating_sub(1));
             let mut target = prediction.clone();
-            target[action] = exp.reward.clamp(-10.0, 10.0);
+            target[action] = Self::reward_target(exp.reward);
 
             let diff = &prediction - &target;
             let loss: f32 = diff.mapv(|v| if v.is_finite() { v * v } else { 0.0 }).sum();
             total_loss += if loss.is_finite() { loss } else { 0.0 };
 
-            // Gradient of MSE wrt logits-softmax output (approx): 2*(pred - target)/n
-            let n = self.output_dim.max(1) as f32;
-            let grad = diff.mapv(|v| {
-                if v.is_finite() { (2.0 * v / n).clamp(-1.0, 1.0) } else { 0.0 }
+            // Exact MSE-through-softmax gradient wrt logits:
+            // dL/dz_i = sum_j 2(p_j - t_j)/n * p_j * (d_ij - p_i)
+            let d = diff.mapv(|v| {
+                if v.is_finite() {
+                    2.0 * v / out_dim as f32
+                } else {
+                    0.0
+                }
             });
-            let lr = if self.learning_rate.is_finite() { self.learning_rate.clamp(1e-6, 0.1) } else { 0.01 };
+            let mut delta = Array1::zeros(prediction.len());
+            for i in 0..prediction.len() {
+                let mut s = 0.0;
+                for j in 0..prediction.len() {
+                    let jac = prediction[j] * (if i == j { 1.0 } else { 0.0 } - prediction[i]);
+                    s += d[j] * jac;
+                }
+                delta[i] = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+            }
 
-            // Correct: last-layer input is the last hidden activation, not raw state
-            let last_idx = weights.len() - 1;
-            let hidden = &acts[acts.len() - 2];
-            let (rows, cols) = weights[last_idx].dim();
-            for i in 0..rows.min(self.output_dim).min(grad.len()) {
-                for j in 0..cols.min(hidden.len()) {
-                    let h = if hidden[j].is_finite() { hidden[j].clamp(-1.0, 1.0) } else { 0.0 };
-                    let delta = lr * grad[i] * h;
-                    if delta.is_finite() {
-                        weights[last_idx][[i, j]] -= delta;
+            // Backpropagate through every layer (ReLU mask on hidden).
+            for l in (0..weights.len()).rev() {
+                let input = posts[l].clone();
+                let (rows, cols) = weights[l].dim();
+                let rows = rows.min(delta.len());
+                let cols = cols.min(input.len());
+                // Delta for the layer below, from the CURRENT weights.
+                let mut prev = Array1::zeros(input.len());
+                if l > 0 {
+                    for j in 0..cols {
+                        let mut s = 0.0;
+                        for i in 0..rows {
+                            let w = weights[l][[i, j]];
+                            s += if w.is_finite() { w * delta[i] } else { 0.0 };
+                        }
+                        let relu = if pres[l - 1].get(j).copied().unwrap_or(0.0) > 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        prev[j] = if s.is_finite() { (s * relu).clamp(-1.0, 1.0) } else { 0.0 };
                     }
                 }
-                if i < biases[last_idx].len() && grad[i].is_finite() {
-                    biases[last_idx][i] -= lr * grad[i];
+                // Gradient step on this layer's weights/biases.
+                for i in 0..rows {
+                    for j in 0..cols {
+                        let h = if input[j].is_finite() {
+                            input[j].clamp(-1.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let step = lr * delta[i] * h;
+                        if step.is_finite() {
+                            weights[l][[i, j]] -= step;
+                        }
+                    }
+                    if i < biases[l].len() && delta[i].is_finite() {
+                        biases[l][i] -= lr * delta[i];
+                    }
+                }
+                if l > 0 {
+                    delta = prev;
                 }
             }
         }
-        
+
         self.update_weights(weights, biases);
-        
+
         Ok(total_loss / batch.len() as f32)
     }
 
@@ -350,6 +405,11 @@ impl ModelProfileNetwork {
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             self.learning_rate = 0.01;
+        }
+        if !self.epsilon.is_finite() {
+            self.epsilon = 0.1;
+        } else {
+            self.epsilon = self.epsilon.clamp(0.0, 0.5);
         }
     }
 }
@@ -547,5 +607,42 @@ mod tests {
         assert!(net.experience_buffer.iter().all(|e| e.reward == 0.0));
         let loss = net.train_step().unwrap();
         assert!(loss.is_finite() && loss >= 0.0);
+    }
+
+    #[test]
+    fn backprop_reduces_loss_on_fixed_mapping() {
+        // Deterministic: every experience is identical, so every sampled
+        // batch is identical and the loss trajectory has no RNG dependence.
+        let mut net = ModelProfileNetwork::new(4, vec![8, 8], 3);
+        net.epsilon = 0.0;
+        assert_eq!(net.train_step().unwrap(), 0.0);
+        for _ in 0..8 {
+            net.add_experience(Experience {
+                state: Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]).into(),
+                action: 0,
+                reward: 1.5,
+                next_state: Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]).into(),
+                done: true,
+            });
+        }
+        let first = net.train_step().unwrap();
+        assert!(first.is_finite() && first > 0.0);
+        let mut last = first;
+        for _ in 0..30 {
+            last = net.train_step().unwrap();
+            assert!(last.is_finite() && last >= 0.0);
+        }
+        assert!(last < first, "loss did not decrease: {first} -> {last}");
+        // Greedy pick for the trained state is the rewarded action.
+        let state = Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(net.select_model_profile(&state), 0);
+    }
+
+    #[test]
+    fn reward_target_lives_on_softmax_scale() {
+        assert_eq!(ModelProfileNetwork::reward_target(1.5), 1.0);
+        assert_eq!(ModelProfileNetwork::reward_target(-0.5), 0.0);
+        let mid = ModelProfileNetwork::reward_target(0.5);
+        assert!((mid - 0.5).abs() < 1e-6);
     }
 }
