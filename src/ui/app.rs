@@ -1002,6 +1002,26 @@ impl AiDashboardApp {
         }
     }
 
+    /// One-click relay lineup: first three slots become Planner, Coder,
+    /// Critic so Relay runs a plan-code-review pipeline. Needs 3+ slots.
+    fn apply_relay_template(&mut self) {
+        use ModelRole::*;
+        if self.slots.len() < 3 {
+            self.status = "Template needs 3+ slots (add slots with + Add model)".to_string();
+            return;
+        }
+        let roles = [Planner, Coder, Critic];
+        for (i, r) in roles.into_iter().enumerate() {
+            if let Some(slot) = self.slots.get_mut(i) {
+                slot.role = r;
+                slot.custom_role.clear();
+            }
+        }
+        self.focused_slot = 0;
+        self.status = "Template applied: slot 1 plans, 2 codes, 3 reviews - press Relay".to_string();
+        self.audit("relay.template", "planner/coder/critic".to_string());
+    }
+
     /// Snapshot of the live relay for the progress strip (pos, order).
     fn relay_status(&self) -> Option<(usize, Vec<usize>)> {
         self.relay.as_ref().map(|st| (st.pos, st.order.clone()))
@@ -1792,6 +1812,14 @@ impl AiDashboardApp {
                 .clicked()
             {
                 let _ = self.tx.send(AppMessage::Synthesize);
+            }
+            ui.add_space(8.0);
+            if ui
+                .small_button("Plan\u{2192}Code\u{2192}Critic")
+                .on_hover_text("Set slots 1-3 to Planner, Coder, Critic for relay pipelines")
+                .clicked()
+            {
+                self.apply_relay_template();
             }
             ui.add_space(8.0);
             if self.clear_chats_armed {
