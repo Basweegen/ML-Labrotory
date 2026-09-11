@@ -587,12 +587,46 @@ impl ChatPanel {
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
     ) {
         let is_user = msg.role == "user";
-        let (bg_color, align) = if is_user {
-            (egui::Color32::from_rgb(0x00, 0x44, 0x88), egui::Align::RIGHT)
+        // Light-theme aware: hardcoded dark fills + white text turn
+        // unreadable on a light background, so pick per visuals.
+        let dark = ui.visuals().dark_mode;
+        let (bg_color, align, body) = if is_user {
+            (
+                egui::Color32::from_rgb(0x00, 0x44, 0x88),
+                egui::Align::RIGHT,
+                egui::Color32::WHITE,
+            )
         } else if msg.role == "system" {
-            (egui::Color32::from_rgb(0x44, 0x33, 0x00), egui::Align::LEFT)
+            (
+                if dark {
+                    egui::Color32::from_rgb(0x44, 0x33, 0x00)
+                } else {
+                    egui::Color32::from_rgb(0xf5, 0xe6, 0xc0)
+                },
+                egui::Align::LEFT,
+                if dark {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(0x11, 0x11, 0x11)
+                },
+            )
+        } else if dark {
+            (
+                egui::Color32::from_rgb(0x2d, 0x2d, 0x2d),
+                egui::Align::LEFT,
+                egui::Color32::WHITE,
+            )
         } else {
-            (egui::Color32::from_rgb(0x2d, 0x2d, 0x2d), egui::Align::LEFT)
+            (
+                egui::Color32::from_rgb(0xea, 0xea, 0xea),
+                egui::Align::LEFT,
+                egui::Color32::from_rgb(0x11, 0x11, 0x11),
+            )
+        };
+        let meta = if dark {
+            egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)
+        } else {
+            egui::Color32::from_rgb(0x55, 0x55, 0x55)
         };
         let who = if is_user {
             "You"
@@ -620,7 +654,7 @@ impl ChatPanel {
                         ui.label(
                             egui::RichText::new(msg.timestamp.format("%H:%M").to_string())
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                                .color(meta),
                         );
                         ui.label(
                             egui::RichText::new(who)
@@ -632,7 +666,7 @@ impl ChatPanel {
                         ui.label(
                             egui::RichText::new(&msg.content)
                                 .size(13.0)
-                                .color(egui::Color32::WHITE),
+                                .color(body),
                         );
                     } else {
                         let mut rest = msg.content.as_str();
@@ -643,7 +677,7 @@ impl ChatPanel {
                                 ui.label(
                                     egui::RichText::new(before)
                                         .size(13.0)
-                                        .color(egui::Color32::WHITE),
+                                        .color(body),
                                 );
                             }
                             if bi < blocks.len() {
@@ -674,7 +708,7 @@ impl ChatPanel {
                             ui.label(
                                 egui::RichText::new(tail)
                                     .size(13.0)
-                                    .color(egui::Color32::WHITE),
+                                    .color(body),
                             );
                         }
                     }
