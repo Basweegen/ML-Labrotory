@@ -108,6 +108,12 @@ impl ChatPanel {
         self.revision
     }
 
+    /// Latency numbers for the Compare scoreboard: last reply secs,
+    /// lifetime total, reply count (avg = total / count).
+    pub fn latency_stats(&self) -> (Option<f32>, f32, u32) {
+        (self.last_reply_secs, self.reply_secs_total, self.reply_count)
+    }
+
     /// System notice bubble (guard blocks, etc.).
     pub fn push_system_note(&mut self, content: String) {
         self.push_capped(ChatMessage {

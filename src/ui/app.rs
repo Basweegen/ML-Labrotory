@@ -703,6 +703,38 @@ impl AiDashboardApp {
                 .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
         );
         ui.add_space(8.0);
+        egui::Grid::new("scoreboard")
+            .num_columns(5)
+            .spacing([16.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Slot");
+                ui.strong("Model");
+                ui.strong("Replies");
+                ui.strong("Last");
+                ui.strong("Avg");
+                ui.end_row();
+                for (i, slot) in self.slots.iter().enumerate() {
+                    let (last, total, count) = slot.chat.latency_stats();
+                    let avg = if count > 0 {
+                        format!("{:.1}s", total / count as f32)
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    ui.label(format!("{}", i + 1));
+                    ui.label(short_name(
+                        &slot.model.clone().unwrap_or("(empty)".to_string()),
+                        22,
+                    ));
+                    ui.label(format!("{count}"));
+                    ui.label(last.map(|s| format!("{s:.1}s")).unwrap_or("\u{2014}".to_string()));
+                    ui.label(avg);
+                    ui.end_row();
+                }
+            });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
         let answered: Vec<(usize, &ModelSlot)> = self
             .slots
             .iter()
