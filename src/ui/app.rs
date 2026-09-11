@@ -18,6 +18,7 @@ use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
 use crate::ui::workspace::WorkspacePanel;
+use crate::workspace::{spawn_shell, Workspace};
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
 use crate::ui::settings::SettingsPanel;
@@ -45,6 +46,9 @@ pub enum AppMessage {
     EditorChunk(usize, String),
     Audit(String, String),
     Broadcast(String),
+    CmdRun { cmd: String, cwd: String },
+    CmdLine(u64, String),
+    CmdStop,
     PullProgress(String),
     SpeakText(String),
     StopSpeak,
@@ -216,6 +220,8 @@ pub struct AiDashboardApp {
     cli_client: Option<OllamaCli>,
     voice: Option<VoiceEngine>,
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
+    cmd_child: Option<tokio::process::Child>,
+    cmd_id: u64,
     last_ollama_url: String,
     last_allow_remote: bool,
     linked: bool,
@@ -269,6 +275,8 @@ impl AiDashboardApp {
             cli_client,
             voice: None,
             inflight: HashMap::new(),
+            cmd_child: None,
+            cmd_id: 0,
             last_ollama_url: settings.ollama_url.clone(),
             last_allow_remote: settings.allow_remote,
             linked: false,
@@ -509,6 +517,7 @@ impl AiDashboardApp {
     fn animating(&self) -> bool {
         self.models_loading
             || self.models_panel.is_busy()
+            || self.cmd_child.is_some()
             || self.slots.iter().any(|s| s.chat.is_streaming())
     }
 
@@ -1062,7 +1071,95 @@ impl AiDashboardApp {
                     self.status = format!("Slot {} stopped", idx + 1);
                     self.audit("chat.stop", format!("slot {}", idx + 1));
                 }
+                AppMessage::CmdRun { cmd, cwd } => {
+                    let cmd = cmd.trim().to_string();
+                    if cmd.is_empty() || cmd.len() > crate::workspace::MAX_CMD_CHARS {
+                        self.status = "Command rejected (empty or too long)".to_string();
+                    } else if self.cmd_child.is_some() {
+                        self.status = "A command is already running - Stop it first".to_string();
+                    } else {
+                        let root = self.settings.workspace_root.clone();
+                        let dir = Workspace::new(&root).and_then(|ws| ws.resolve(&cwd));
+                        match dir {
+                            Err(e) => self.status = format!("Run failed: {e:#}"),
+                            Ok(dir) => match spawn_shell(&cmd, &dir) {
+                                Err(e) => self.status = format!("Run failed: {e:#}"),
+                                Ok(mut child) => {
+                                    let stdout = child.stdout.take();
+                                    let stderr = child.stderr.take();
+                                    self.cmd_id += 1;
+                                    let id = self.cmd_id;
+                                    if let Some(pipe) = stdout {
+                                        let tx = self.tx.clone();
+                                        self.rt.spawn(async move {
+                                            use tokio::io::AsyncBufReadExt;
+                                            let mut r =
+                                                tokio::io::BufReader::new(pipe).lines();
+                                            while let Ok(Some(mut line)) =
+                                                r.next_line().await
+                                            {
+                                                if line.len() > 500 {
+                                                    line.truncate(500);
+                                                    line.push('\u{2026}');
+                                                }
+                                                if tx.send(AppMessage::CmdLine(id, line)).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if let Some(pipe) = stderr {
+                                        let tx = self.tx.clone();
+                                        self.rt.spawn(async move {
+                                            use tokio::io::AsyncBufReadExt;
+                                            let mut r =
+                                                tokio::io::BufReader::new(pipe).lines();
+                                            while let Ok(Some(mut line)) =
+                                                r.next_line().await
+                                            {
+                                                if line.len() > 500 {
+                                                    line.truncate(500);
+                                                    line.push('\u{2026}');
+                                                }
+                                                let text = format!("! {line}");
+                                                if tx.send(AppMessage::CmdLine(id, text)).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    self.cmd_child = Some(child);
+                                    self.workspace_panel.note_cmd_started(id, &cmd);
+                                    let short: String = cmd.chars().take(200).collect();
+                                    self.audit(
+                                        "workspace.run",
+                                        format!("{short} @ {}", cwd),
+                                    );
+                                    self.status = format!("Running: {short}");
+                                }
+                            },
+                        }
+                    }
+                }
+                AppMessage::CmdLine(id, line) => {
+                    self.workspace_panel.push_cmd_line(id, line);
+                }
+                AppMessage::CmdStop => {
+                    if let Some(mut c) = self.cmd_child.take() {
+                        let _ = c.start_kill();
+                        // Kept until try_wait reaps it below, then finished.
+                        self.cmd_child = Some(c);
+                        self.status = "Stopping command\u{2026}".to_string();
+                        self.audit("workspace.stop", String::new());
+                    }
+                }
                 AppMessage::StopAll => {
+                    if let Some(mut c) = self.cmd_child.take() {
+                        let _ = c.start_kill();
+                        let id = self.cmd_id;
+                        self.workspace_panel
+                            .finish_cmd(id, "[stopped]".to_string());
+                    }
                     for i in 0..self.slots.len() {
                         self.abort_slot(i);
                         if let Some(slot) = self.slots.get_mut(i) {
@@ -1799,6 +1896,32 @@ impl eframe::App for AiDashboardApp {
             if Instant::now() >= due {
                 self.retry_due = None;
                 self.refresh_models();
+            }
+        }
+
+        // Reap a finished workspace command (Stop kills; try_wait reaps).
+        let reap = if let Some(child) = self.cmd_child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => Some(Ok(status.code().unwrap_or(-1))),
+                Ok(None) => None,
+                Err(e) => Some(Err(e.to_string())),
+            }
+        } else {
+            None
+        };
+        if let Some(res) = reap {
+            self.cmd_child = None;
+            let id = self.cmd_id;
+            match res {
+                Ok(code) => {
+                    self.workspace_panel
+                        .finish_cmd(id, format!("[exit {code}]"));
+                    self.status = format!("Command exited ({code})");
+                }
+                Err(e) => {
+                    self.workspace_panel
+                        .finish_cmd(id, format!("[wait failed: {e}]"));
+                }
             }
         }
 

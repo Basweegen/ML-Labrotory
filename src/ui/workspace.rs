@@ -21,6 +21,10 @@ pub struct WorkspacePanel {
     rename_to: String,
     delete_armed: Option<String>,
     status: String,
+    cmd_input: String,
+    cmd_lines: Vec<String>,
+    cmd_running: bool,
+    cmd_id: u64,
 }
 
 impl WorkspacePanel {
@@ -37,7 +41,39 @@ impl WorkspacePanel {
             rename_to: String::new(),
             delete_armed: None,
             status: String::new(),
+            cmd_input: String::new(),
+            cmd_lines: Vec::new(),
+            cmd_running: false,
+            cmd_id: 0,
         }
+    }
+
+    /// A command started (app owns the child; lines stream in).
+    pub fn note_cmd_started(&mut self, id: u64, cmd: &str) {
+        self.cmd_id = id;
+        self.cmd_running = true;
+        self.cmd_lines.clear();
+        self.cmd_lines.push(format!("$ {cmd}"));
+    }
+
+    pub fn push_cmd_line(&mut self, id: u64, line: String) {
+        if id != self.cmd_id {
+            return;
+        }
+        self.cmd_lines.push(line);
+        const CAP: usize = 500;
+        if self.cmd_lines.len() > CAP {
+            let overflow = self.cmd_lines.len() - CAP;
+            self.cmd_lines.drain(0..overflow);
+        }
+    }
+
+    pub fn finish_cmd(&mut self, id: u64, note: String) {
+        if id != self.cmd_id {
+            return;
+        }
+        self.cmd_running = false;
+        self.cmd_lines.push(note);
     }
 
     fn audit(&self, tx: &mpsc::Sender<AppMessage>, kind: &str, detail: String) {
@@ -355,6 +391,67 @@ impl WorkspacePanel {
             });
             ui.add_space(4.0);
         }
+
+        // ---- run command in the current folder ----
+        ui.separator();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Run in").size(13.0));
+            let where_ = if self.cur.is_empty() {
+                "root".to_string()
+            } else {
+                self.cur.clone()
+            };
+            ui.label(egui::RichText::new(where_).size(13.0).monospace());
+        });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.cmd_input)
+                    .desired_width(300.0)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("cargo test   \u{00B7}   python3 main.py   \u{00B7}   ls -la"),
+            );
+            let run_btn = ui.add_enabled(
+                !self.cmd_input.trim().is_empty() && !self.cmd_running,
+                egui::Button::new(egui::RichText::new("Run").size(13.0))
+                    .fill(egui::Color32::from_rgb(0x00, 0x66, 0x44))
+                    .corner_radius(egui::CornerRadius::same(6)),
+            );
+            if run_btn
+                .on_hover_text("Run a shell command in this folder (output streams below)")
+                .clicked()
+            {
+                let _ = tx.send(AppMessage::CmdRun {
+                    cmd: self.cmd_input.trim().to_string(),
+                    cwd: self.cur.clone(),
+                });
+            }
+            if self.cmd_running {
+                ui.spinner();
+                if ui.small_button("Stop").clicked() {
+                    let _ = tx.send(AppMessage::CmdStop);
+                }
+            }
+        });
+        if !self.cmd_lines.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("ws_cmd_out")
+                .max_height(160.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &self.cmd_lines {
+                        let (txt, col) = if let Some(rest) = line.strip_prefix("! ") {
+                            (rest, egui::Color32::from_rgb(0xcc, 0x88, 0x66))
+                        } else if line.starts_with("$ ") || line.starts_with("[") {
+                            (line.as_str(), egui::Color32::from_rgb(0x88, 0xcc, 0x88))
+                        } else {
+                            (line.as_str(), egui::Color32::from_rgb(0xcc, 0xcc, 0xcc))
+                        };
+                        ui.label(egui::RichText::new(txt).size(11.0).monospace().color(col));
+                    }
+                });
+        }
+        ui.add_space(4.0);
 
         if !self.status.is_empty() {
             ui.label(

@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 
 /// Cap on files opened into the UI buffer (chars). Bigger files refuse
 /// with a clear error instead of freezing the frame.
@@ -38,9 +39,10 @@ impl Workspace {
         &self.root
     }
 
-    /// Join a workspace-relative path onto the root. `..` clamps at the
-    /// root (never escapes), absolute paths and prefixes are rejected.
-    fn join(&self, rel: &str) -> Result<PathBuf> {
+    /// Resolve a workspace-relative path onto the root. `..` clamps at
+    /// the root (never escapes); absolute paths and symlink exits out of
+    /// the root are rejected.
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         let mut p = self.root.clone();
         for comp in Path::new(rel).components() {
             match comp {
@@ -84,7 +86,7 @@ impl Workspace {
 
     /// Entries of a workspace-relative dir, dirs first then files, by name.
     pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
-        let dir = self.join(rel)?;
+        let dir = self.resolve(rel)?;
         anyhow::ensure!(dir.is_dir(), "not a directory");
         let mut out = Vec::new();
         for ent in std::fs::read_dir(&dir).with_context(|| format!("listing {}", dir.display()))? {
@@ -102,7 +104,7 @@ impl Workspace {
     }
 
     pub fn read(&self, rel: &str) -> Result<String> {
-        let p = self.join(rel)?;
+        let p = self.resolve(rel)?;
         let bytes = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
         let s = String::from_utf8_lossy(&bytes).into_owned();
         anyhow::ensure!(
@@ -116,7 +118,7 @@ impl Workspace {
 
     /// Write (or overwrite) a file, creating parent dirs as needed.
     pub fn write(&self, rel: &str, content: &str) -> Result<()> {
-        let p = self.join(rel)?;
+        let p = self.resolve(rel)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating dirs for {}", p.display()))?;
@@ -126,14 +128,14 @@ impl Workspace {
     }
 
     pub fn create_dir(&self, rel: &str) -> Result<()> {
-        let p = self.join(rel)?;
+        let p = self.resolve(rel)?;
         std::fs::create_dir_all(&p).with_context(|| format!("creating dir {}", p.display()))?;
         Ok(())
     }
 
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let a = self.join(from)?;
-        let b = self.join(to)?;
+        let a = self.resolve(from)?;
+        let b = self.resolve(to)?;
         if let Some(parent) = b.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -144,7 +146,7 @@ impl Workspace {
 
     /// Delete a file or a whole directory tree.
     pub fn delete(&self, rel: &str) -> Result<()> {
-        let p = self.join(rel)?;
+        let p = self.resolve(rel)?;
         anyhow::ensure!(p != self.root, "refusing to delete the workspace root");
         if p.is_dir() {
             std::fs::remove_dir_all(&p).with_context(|| format!("removing dir {}", p.display()))?;
@@ -155,6 +157,29 @@ impl Workspace {
         }
         Ok(())
     }
+}
+
+/// Cap on a single shell command (chars). The UI enforces the same.
+pub const MAX_CMD_CHARS: usize = 4000;
+
+/// Spawn `sh -c <cmd>` with cwd confined to the workspace. The caller owns
+/// the Child (kill on Stop) and drains both pipes; the app polls
+/// `try_wait` each frame for the exit code.
+pub fn spawn_shell(cmd: &str, cwd: &Path) -> Result<tokio::process::Child> {
+    anyhow::ensure!(!cmd.trim().is_empty(), "empty command");
+    anyhow::ensure!(
+        cmd.len() <= MAX_CMD_CHARS,
+        "command too long (cap {MAX_CMD_CHARS})"
+    );
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning command in {}", cwd.display()))?;
+    Ok(child)
 }
 
 /// Join two workspace-relative paths for the UI breadcrumb.
@@ -201,6 +226,28 @@ mod tests {
         assert!(ws.read("/etc/hostname").is_err());
         assert!(ws.delete("").is_err());
         assert!(root.exists());
+    }
+
+    #[test]
+    fn resolve_clamps_and_rejects() {
+        let ws = Workspace::new(tmp_root("res")).unwrap();
+        let a = ws.resolve("a/../../b").unwrap();
+        assert!(a.starts_with(ws.root()));
+        assert!(a.ends_with("b"));
+        assert!(ws.resolve("/etc/hostname").is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_shell_validates() {
+        let root = tmp_root("sh");
+        assert!(spawn_shell("", &root).is_err());
+        let too_long = "x".repeat(MAX_CMD_CHARS + 1);
+        assert!(spawn_shell(&too_long, &root).is_err());
+        // A real run: echo exits 0 with its line on stdout.
+        let mut child = spawn_shell("echo hi", &root).unwrap();
+        let out = child.wait_with_output().await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
     }
 
     #[test]
