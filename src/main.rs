@@ -2,6 +2,7 @@ mod ollama;
 mod storage;
 mod ui;
 mod voice;
+mod workspace;
 mod neural;
 mod resources;
 mod security;

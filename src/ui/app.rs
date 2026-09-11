@@ -17,6 +17,7 @@ use crate::storage::{AppSettings, ChatSession, SlotConfig, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
+use crate::ui::workspace::WorkspacePanel;
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
 use crate::ui::settings::SettingsPanel;
@@ -159,6 +160,7 @@ enum Tab {
     Chat,
     Models,
     Editor,
+    Workspace,
     History,
     Neural,
     Compare,
@@ -171,6 +173,7 @@ impl Tab {
             Tab::Chat => "Chat",
             Tab::Models => "Models",
             Tab::Editor => "Editor",
+            Tab::Workspace => "Files",
             Tab::History => "History",
             Tab::Neural => "Neural",
             Tab::Compare => "Compare",
@@ -183,6 +186,7 @@ impl Tab {
             Tab::Chat => "💬",
             Tab::Models => "🤖",
             Tab::Editor => "📝",
+            Tab::Workspace => "🗂",
             Tab::History => "📜",
             Tab::Neural => "🧠",
             Tab::Compare => "⚖",
@@ -195,6 +199,7 @@ impl Tab {
             Tab::Chat,
             Tab::Models,
             Tab::Editor,
+            Tab::Workspace,
             Tab::History,
             Tab::Neural,
             Tab::Compare,
@@ -230,6 +235,7 @@ pub struct AiDashboardApp {
     editor: EditorPanel,
     models_panel: ModelsPanel,
     history: HistoryPanel,
+    workspace_panel: WorkspacePanel,
     settings_panel: SettingsPanel,
     settings: AppSettings,
     storage: Option<Storage>,
@@ -282,6 +288,7 @@ impl AiDashboardApp {
             editor: EditorPanel::new(),
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
+            workspace_panel: WorkspacePanel::new(),
             settings_panel: SettingsPanel::new(),
             settings,
             storage,
@@ -1880,6 +1887,17 @@ impl eframe::App for AiDashboardApp {
                         &self.tx,
                         &self.rt,
                     );
+                }
+                Tab::Workspace => {
+                    if self.storage.is_some() {
+                        let storage = self.storage.take();
+                        if let Some(st) = storage.as_ref() {
+                            self.workspace_panel.show(ui, &mut self.settings, st, &self.tx);
+                        }
+                        self.storage = storage;
+                    } else {
+                        ui.label("Storage unavailable.");
+                    }
                 }
                 Tab::History => {
                     if let Some(st) = self.storage.as_ref() {

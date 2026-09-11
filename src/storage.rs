@@ -84,6 +84,10 @@ pub struct AppSettings {
     /// Slot layout restored on launch (model + role per slot).
     #[serde(default)]
     pub slot_layout: Vec<SlotConfig>,
+    /// Project root for the Files tab. Empty = unset. All file ops are
+    /// confined under this dir (no `..` escapes, no absolute paths).
+    #[serde(default)]
+    pub workspace_root: String,
 }
 
 fn default_history_depth() -> u32 {
@@ -112,6 +116,7 @@ impl Default for AppSettings {
             history_depth: default_history_depth(),
             slot_layout: Vec::new(),
             allow_remote: false,
+            workspace_root: String::new(),
         }
     }
 }
