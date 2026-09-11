@@ -6,8 +6,9 @@
 use eframe::egui;
 use std::sync::mpsc;
 
-use crate::neural::ModelProfileNetwork;
-use crate::storage::Storage;
+use crate::neural::{Experience, ModelProfileNetwork};
+use crate::storage::{ChatSession, Storage};
+use ndarray::Array1;
 use crate::ui::app::AppMessage;
 use crate::ui::neural_viz::NeuralVizPanel;
 
@@ -39,7 +40,7 @@ impl TrainPanel {
         ui: &mut egui::Ui,
         network: &mut ModelProfileNetwork,
         neural_panel: &mut NeuralVizPanel,
-        _storage: &Storage,
+        storage: &Storage,
         _tx: &mpsc::Sender<AppMessage>,
     ) {
         ui.horizontal(|ui| {
@@ -185,6 +186,14 @@ impl TrainPanel {
                 self.dirty = true;
             }
             if ui
+                .small_button("Learn from history")
+                .on_hover_text("Replay saved chats as weak training signal (replies exist = success)")
+                .clicked()
+            {
+                self.status = learn_from_history(network, neural_panel, storage);
+                self.dirty = true;
+            }
+            if ui
                 .small_button("Reset network")
                 .on_hover_text("Discard all training and start fresh")
                 .clicked()
@@ -213,5 +222,131 @@ fn role_name(idx: u8) -> &'static str {
         4 => "Planner",
         5 => "Writer",
         _ => "Custom",
+    }
+}
+
+/// Replay saved sessions as weak training signal: a stored assistant reply
+/// counts as a 0.75 success with neutral latency. Role/model context is
+/// approximated (General role, slot 0); live turns remain the strong signal.
+/// Pure builder below is unit-tested; I/O + training live in the caller.
+fn learn_from_history(
+    network: &mut ModelProfileNetwork,
+    neural_panel: &mut NeuralVizPanel,
+    storage: &Storage,
+) -> String {
+    let mut sessions = match storage.load_sessions() {
+        Ok(s) => s,
+        Err(e) => return format!("History unreadable: {e:#}"),
+    };
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.truncate(200);
+    let mut used = 0;
+    for s in &sessions {
+        if let Some(exp) = experience_from_session(s) {
+            let action = {
+                let state: Array1<f32> = exp.state.clone().into();
+                network.select_model_profile(&state)
+            };
+            let mut exp = exp;
+            exp.action = action;
+            network.add_experience(exp);
+            network.update_performance(0.75);
+            used += 1;
+        }
+    }
+    if used < 4 {
+        return format!("Only {used} usable past chats (need 4 with replies)");
+    }
+    let mut first = None;
+    let mut last = 0.0;
+    let mut ran = 0;
+    for _ in 0..20 {
+        match network.train_step() {
+            Ok(loss) if loss.is_finite() && loss > 0.0 => {
+                if first.is_none() {
+                    first = Some(loss);
+                }
+                last = loss;
+                ran += 1;
+                neural_panel.add_training_loss(loss);
+                neural_panel.last_loss = Some(loss);
+            }
+            _ => {}
+        }
+    }
+    format!(
+        "Learned from {used} past chats (weak signal): {ran} batches, loss {:.4} \u{2192} {:.4}",
+        first.unwrap_or(last),
+        last
+    )
+}
+
+/// Weak-signal experience from one saved session. None when no assistant
+/// reply exists (nothing to learn).
+fn experience_from_session(s: &ChatSession) -> Option<Experience> {
+    let user = s.messages.iter().rev().find(|m| m.role == "user")?;
+    let asst = s.messages.iter().rev().find(|m| m.role == "assistant")?;
+    let hash = s
+        .model
+        .bytes()
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let ctx = Array1::from_vec(vec![
+        (user.content.len() as f32 / 50_000.0).min(1.0),
+        (s.messages.len() as f32 / 20.0).min(1.0),
+        1.0,
+        30.0 / 120.0,
+        (asst.content.len() as f32 / 50_000.0).min(1.0),
+        0.0,
+        0.0,
+        ((hash % 100) as f32) / 100.0,
+    ]);
+    Some(Experience {
+        state: ctx.clone().into(),
+        action: 0,
+        reward: 0.75,
+        next_state: ctx.into(),
+        done: true,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn session_with_reply() -> ChatSession {
+        use crate::storage::ChatMessage;
+        ChatSession {
+            id: Uuid::new_v4(),
+            name: "t".to_string(),
+            model: "m".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "hi".to_string(),
+                    timestamp: Utc::now(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "hello".to_string(),
+                    timestamp: Utc::now(),
+                },
+            ],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn replay_needs_a_reply() {
+        let mut s = session_with_reply();
+        let exp = experience_from_session(&s).unwrap();
+        assert_eq!(exp.reward, 0.75);
+        let state: Array1<f32> = exp.state.clone().into();
+        assert_eq!(state.len(), 8);
+        assert!(state.iter().all(|v| v.is_finite()));
+        s.messages.pop();
+        assert!(experience_from_session(&s).is_none());
     }
 }
