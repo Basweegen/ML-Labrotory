@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,11 @@ impl Storage {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("ai-dashboard");
         std::fs::create_dir_all(&data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
+        }
         Self::open_path(&data_dir.join("storage"))
     }
 
@@ -139,6 +145,11 @@ impl Storage {
     pub fn open_path(db_path: &std::path::Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let db = sled::open(db_path)?;
         let sessions_tree = db.open_tree("sessions")?;

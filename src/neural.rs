@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::Result;
 use ndarray::{Array1, Array2};
 use rand::Rng;
@@ -309,7 +310,14 @@ impl ModelProfileNetwork {
 
     pub fn save(&self, path: &str) -> Result<()> {
         let data = bincode::serialize(self)?;
-        std::fs::write(path, data)?;
+        let tmp_path = format!("{}.tmp", path);
+        std::fs::write(&tmp_path, &data)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 

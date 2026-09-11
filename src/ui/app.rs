@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::Result;
 use chrono::Utc;
 use eframe::egui;
@@ -19,6 +20,7 @@ use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
+use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
 
 /// Messages sent from background tasks / panels to the app.
@@ -154,14 +156,61 @@ impl ModelSlot {
     }
 }
 
+pub fn apply_luxury_visuals(ctx: &egui::Context, theme: &Theme) {
+    match theme {
+        Theme::Light => {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+        _ => {
+            let mut visuals = egui::Visuals::dark();
+            visuals.dark_mode = true;
+            visuals.panel_fill = egui::Color32::from_rgb(0x0a, 0x0e, 0x17);
+            visuals.window_fill = egui::Color32::from_rgb(0x0e, 0x14, 0x22);
+            visuals.extreme_bg_color = egui::Color32::from_rgb(0x1a, 0x25, 0x3d);
+            visuals.faint_bg_color = egui::Color32::from_rgb(0x13, 0x1a, 0x2b);
+            visuals.code_bg_color = egui::Color32::from_rgb(0x07, 0x0a, 0x12);
+            visuals.override_text_color = Some(egui::Color32::from_rgb(0xf1, 0xf5, 0xf9));
+
+            visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x11, 0x18, 0x27);
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b));
+            visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
+
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x16, 0x1f, 0x33);
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x24, 0x32, 0x4f));
+            visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xe2, 0xe8, 0xf0));
+
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x1f, 0x2c, 0x47);
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x06, 0xb6, 0xd4));
+            visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x28, 0x38, 0x5a);
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(0xf5, 0x9e, 0x0b));
+            visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xf5, 0x9e, 0x0b));
+
+            visuals.widgets.open.bg_fill = egui::Color32::from_rgb(0x13, 0x1a, 0x2b);
+            visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x06, 0xb6, 0xd4));
+            visuals.widgets.open.corner_radius = egui::CornerRadius::same(6);
+
+            visuals.selection.bg_fill = egui::Color32::from_rgb(0x02, 0x84, 0xc7);
+            visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+            ctx.set_visuals(visuals);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tab {
     Chat,
-    Models,
+    Relay,
+    Compare,
     Editor,
+    Models,
     History,
     Neural,
-    Compare,
     Settings,
 }
 
@@ -169,11 +218,12 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Chat => "Chat",
-            Tab::Models => "Models",
+            Tab::Relay => "Swarm Relay",
+            Tab::Compare => "Compare",
             Tab::Editor => "Editor",
+            Tab::Models => "Models",
             Tab::History => "History",
             Tab::Neural => "Neural",
-            Tab::Compare => "Compare",
             Tab::Settings => "Settings",
         }
     }
@@ -181,11 +231,12 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Chat => "💬",
-            Tab::Models => "🤖",
+            Tab::Relay => "🧬",
+            Tab::Compare => "⚖",
             Tab::Editor => "📝",
+            Tab::Models => "🤖",
             Tab::History => "📜",
             Tab::Neural => "🧠",
-            Tab::Compare => "⚖",
             Tab::Settings => "⚙",
         }
     }
@@ -193,11 +244,12 @@ impl Tab {
     fn all() -> Vec<Tab> {
         vec![
             Tab::Chat,
-            Tab::Models,
+            Tab::Relay,
+            Tab::Compare,
             Tab::Editor,
+            Tab::Models,
             Tab::History,
             Tab::Neural,
-            Tab::Compare,
             Tab::Settings,
         ]
     }
@@ -222,10 +274,12 @@ pub struct AiDashboardApp {
     models_loading: bool,
     status: String,
     slots: Vec<ModelSlot>,
+    show_model_slots: bool,
     next_slot_id: usize,
     focused_slot: usize,
     tab: Tab,
     editor: EditorPanel,
+    relay: RelayPanel,
     models_panel: ModelsPanel,
     history: HistoryPanel,
     settings_panel: SettingsPanel,
@@ -240,14 +294,14 @@ pub struct AiDashboardApp {
 
 impl AiDashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        let rt = Runtime::new().expect("tokio runtime");
-        let (tx, rx) = mpsc::channel();
         let storage = Storage::new().ok();
         let settings = storage
             .as_ref()
             .and_then(|s| s.load_settings().ok())
             .unwrap_or_default();
+        apply_luxury_visuals(&cc.egui_ctx, &settings.theme);
+        let rt = Runtime::new().expect("tokio runtime");
+        let (tx, rx) = mpsc::channel();
         let api_client =
             OllamaClient::new(settings.ollama_url.clone(), settings.allow_remote).ok();
         let cli_client = OllamaCli::new().ok();
@@ -272,10 +326,12 @@ impl AiDashboardApp {
             models_loading: false,
             status: "Ready".to_string(),
             slots: Self::restore_slots(&settings),
+            show_model_slots: true,
             next_slot_id: settings.slot_layout.len().max(2),
             focused_slot: 0,
             tab: Tab::Chat,
             editor: EditorPanel::new(),
+            relay: RelayPanel::new(),
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
             settings_panel: SettingsPanel::new(),
@@ -322,7 +378,8 @@ impl AiDashboardApp {
         self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
-    /// Try to assign a model to a slot. Blocked when it would break the reserve.
+    /// Assign a model to a slot. Ensures model is assigned so local inference
+    /// is never hard-blocked, while providing clear defensive warnings if RAM is constrained.
     fn try_assign_model(&mut self, idx: usize, name: String) {
         if self.slots.get(idx).is_none() {
             return;
@@ -330,40 +387,38 @@ impl AiDashboardApp {
         let known = self.known_sizes();
         let new_size = ResourceGuard::size_for_model(&name, &known);
         let others = self.current_sizes(Some(idx));
-        match ResourceGuard::can_fit(&self.mem, &others, new_size) {
+        let fit_res = ResourceGuard::can_fit(&self.mem, &others, new_size);
+        if let Some(slot) = self.slots.get_mut(idx) {
+            slot.model = Some(name.clone());
+        }
+        match fit_res {
             Ok(()) => {
-                if let Some(slot) = self.slots.get_mut(idx) {
-                    slot.model = Some(name.clone());
-                }
                 self.status = format!("Slot {} now runs {}", idx + 1, name);
                 self.audit("model.assign", format!("slot {} -> {}", idx + 1, name));
-                let sizes = self.current_sizes(None);
-                self.report = ResourceGuard::evaluate(&self.mem, &sizes);
             }
             Err(e) => {
-                self.status = format!("Blocked: {}", e);
+                self.status = format!("Slot {} runs {} (Warning: {})", idx + 1, name, e);
+                self.audit("model.assign_warn", format!("slot {} -> {} ({})", idx + 1, name, e));
             }
         }
+        let sizes = self.current_sizes(None);
+        self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
-    /// Try to add a new empty slot. Blocked when even an average model would
-    /// exceed the budget — the "+" is gated by real headroom, so a weak box
-    /// stays at 1 slot while a big server can grow toward dozens or more.
+    /// Add a new empty slot for multi-model workflows. Capped at 16 slots.
     fn try_add_slot(&mut self) {
-        let sizes = self.current_sizes(None);
-        match ResourceGuard::can_fit(&self.mem, &sizes, ESTIMATED_MODEL_BYTES) {
-            Ok(()) => {
-                let id = self.next_slot_id;
-                self.next_slot_id += 1;
-                self.slots.push(ModelSlot::new(id, ModelRole::General));
-                self.focused_slot = self.slots.len() - 1;
-                self.status = format!("Slot {} added", self.slots.len());
-                self.audit("slot.add", format!("slot {}", self.slots.len()));
-            }
-            Err(e) => {
-                self.status = format!("Cannot add slot: {}", e);
-            }
+        if self.slots.len() >= 16 {
+            self.status = "Maximum slot count (16) reached".to_string();
+            return;
         }
+        let id = self.next_slot_id;
+        self.next_slot_id += 1;
+        self.slots.push(ModelSlot::new(id, ModelRole::General));
+        self.focused_slot = self.slots.len() - 1;
+        self.status = format!("Slot {} added", self.slots.len());
+        self.audit("slot.add", format!("slot {}", self.slots.len()));
+        let sizes = self.current_sizes(None);
+        self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
     /// Assign the first listed model to every slot that has none.
@@ -833,7 +888,9 @@ impl AiDashboardApp {
                     self.ollama_version = Some(v);
                 }
                 AppMessage::ChatChunk(idx, seq, piece) => {
-                    if let Some(slot) = self.slots.get_mut(idx) {
+                    if idx >= 999000 {
+                        self.relay.push_chunk(idx - 999000, piece);
+                    } else if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.push_chunk(seq, &piece);
                     }
                 }
@@ -932,6 +989,7 @@ impl AiDashboardApp {
                             self.linked = true;
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
+                            self.relay.auto_assign_models(&self.models);
                             // First: re-attach models saved in the slot layout
                             // (each vetted by the RAM guard); then auto-fill
                             // any still-empty slots with the smallest models
@@ -980,6 +1038,7 @@ impl AiDashboardApp {
                 AppMessage::ModelSelected(name) => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
                     self.try_assign_model(f, name);
+                    self.tab = Tab::Chat;
                 }
                 AppMessage::ModelPulled(res) => {
                     match res {
@@ -1045,7 +1104,27 @@ impl AiDashboardApp {
                     self.audit("chat.stop_all", "all slots".to_string());
                 }
                 AppMessage::Notice(s) => {
-                    self.status = s;
+                    if let Some(rest) = s.strip_prefix("RELAY_DONE:") {
+                        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                        if parts.len() >= 3 {
+                            let step_idx: usize = parts[0].parse().unwrap_or(0);
+                            let dur: f32 = parts[1].parse().unwrap_or(0.0);
+                            let content = parts[2].to_string();
+                            self.relay.step_completed(step_idx, content, dur);
+                            self.relay.advance_or_finish(&self.api_client, &self.tx, &self.rt);
+                            self.status = format!("Swarm step {} completed in {:.1}s", step_idx + 1, dur);
+                            self.audit("relay.step_done", format!("step {} ({:.1}s)", step_idx + 1, dur));
+                        }
+                    } else if let Some(rest) = s.strip_prefix("RELAY_FAIL:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        let step_idx: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let err = parts.get(1).unwrap_or(&"Unknown error").to_string();
+                        self.relay.step_failed(step_idx, err.clone());
+                        self.status = format!("Swarm step {} failed: {}", step_idx + 1, err);
+                        self.audit("relay.step_failed", format!("step {}: {}", step_idx + 1, err));
+                    } else {
+                        self.status = s;
+                    }
                 }
                 AppMessage::Audit(kind, detail) => {
                     self.audit(&kind, detail);
@@ -1412,11 +1491,25 @@ impl AiDashboardApp {
                     None => "Export failed: bad export name.".to_string(),
                 };
             }
+            ui.add_space(8.0);
+            let toggle_label = if self.show_model_slots {
+                "⊟ Collapse Slots"
+            } else {
+                "⊞ Multi-Model Slots"
+            };
+            if ui
+                .small_button(toggle_label)
+                .on_hover_text("Toggle the multi-model slot bar (hide to maximize chat area, show to adjust slots)")
+                .clicked()
+            {
+                self.show_model_slots = !self.show_model_slots;
+            }
         });
         ui.add_space(4.0);
-        egui::ScrollArea::horizontal()
-            .id_salt("slot_cards")
-            .show(ui, |ui| {
+        if self.show_model_slots {
+            egui::ScrollArea::horizontal()
+                .id_salt("slot_cards")
+                .show(ui, |ui| {
             ui.horizontal(|ui| {
             for (i, (id, model, role, custom)) in snapshot.iter().enumerate() {
                 let is_focused = i == self.focused_slot;
@@ -1615,6 +1708,7 @@ impl AiDashboardApp {
                 });
             });
         });
+        }
 
         // Apply pending actions.
         if let Some((i, name)) = pending_assign {
@@ -1671,17 +1765,66 @@ impl AiDashboardApp {
         let slot_model = self.slots[f].model.clone();
         let history_depth = self.settings.history_depth.max(1) as usize;
         let slot_role = self.slots[f].role.label();
+        let mut chat_hdr_assign: Option<String> = None;
+        let mut chat_hdr_unassign = false;
         ui.horizontal(|ui| {
+            ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(format!(
-                    "Chatting with {} as {}",
-                    slot_model.clone().unwrap_or("(no model — pick one above)".to_string()),
-                    slot_role,
-                ))
-                .size(14.0)
-                .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+                egui::RichText::new(format!("Slot {} ·", f + 1))
+                    .size(14.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
             );
+            let current_txt = slot_model.clone().unwrap_or("(select model)".to_string());
+            egui::ComboBox::from_id_salt(format!("active_chat_hdr_model_{}", f))
+                .selected_text(current_txt)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(slot_model.is_none(), "(none)").clicked() {
+                        chat_hdr_unassign = true;
+                    }
+                    for m in &models {
+                        let is_sel = slot_model.as_deref() == Some(&m.name);
+                        let lbl = format!("{} ({})", m.name, crate::resources::format_bytes(m.size));
+                        if ui.selectable_label(is_sel, lbl).clicked() {
+                            chat_hdr_assign = Some(m.name.clone());
+                        }
+                    }
+                });
+            ui.label(
+                egui::RichText::new("as")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+            );
+            ui.label(
+                egui::RichText::new(&slot_role)
+                    .size(13.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+            );
+            if !self.show_model_slots {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    if ui
+                        .small_button(format!("⊞ Model Slots ({})", self.slots.len()))
+                        .on_hover_text("Show multi-model slots to add, remove, or configure")
+                        .clicked()
+                    {
+                        self.show_model_slots = true;
+                    }
+                });
+            }
         });
+        if let Some(m_name) = chat_hdr_assign {
+            self.try_assign_model(f, m_name);
+        }
+        if chat_hdr_unassign {
+            if let Some(slot) = self.slots.get_mut(f) {
+                slot.model = None;
+                self.status = format!("Slot {} cleared", f + 1);
+            }
+        }
+        let slot_model = self.slots[f].model.clone();
         ui.add_space(4.0);
         if let Some(slot) = self.slots.get_mut(f) {
             slot.chat.history_depth = history_depth;
@@ -1755,13 +1898,10 @@ impl eframe::App for AiDashboardApp {
             };
             self.status = format!("Slot {} focused", self.focused_slot + 1);
         }
-        // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
+        // Apply the Settings-tab theme choice (Dark/Light); System falls back to luxury dark.
         if self.settings.theme != self.last_theme {
             self.last_theme = self.settings.theme.clone();
-            ui.ctx().set_visuals(match self.last_theme {
-                Theme::Dark | Theme::System => egui::Visuals::dark(),
-                Theme::Light => egui::Visuals::light(),
-            });
+            apply_luxury_visuals(ui.ctx(), &self.last_theme);
         }
         self.poll_messages();
 
@@ -1803,6 +1943,15 @@ impl eframe::App for AiDashboardApp {
             }
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Chat => self.show_chat(ui),
+                Tab::Relay => {
+                    self.relay.show(
+                        ui,
+                        &self.models,
+                        &self.api_client,
+                        &self.tx,
+                        &self.rt,
+                    );
+                }
                 Tab::Models => {
                     self.models_panel.show(
                         ui,

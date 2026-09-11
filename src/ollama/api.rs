@@ -1,50 +1,57 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use futures::StreamExt;
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub modified_at: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub digest: String,
+    #[serde(default)]
     pub details: Option<ModelDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDetails {
-    // Tolerant parsing: older/newer Ollama servers may omit fields; a single
-    // missing field must not fail the entire model list (empty list disables
+    // Tolerant parsing: older/newer Ollama servers may omit fields or return null;
+    // a single missing or null field must not fail the entire model list (empty list disables
     // slot assignment and the Send button).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub parent_model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub format: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub family: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub families: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub parameter_size: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub quantization_level: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ModelsResponse {
-    pub models: Vec<Model>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -197,8 +204,19 @@ impl OllamaClient {
         if !resp.status().is_success() {
             return Err(OllamaError::Api(format!("Status: {}", resp.status())).into());
         }
-        let data: ModelsResponse = resp.json().await?;
-        Ok(data.models)
+        let body: serde_json::Value = resp.json().await?;
+        let mut models = Vec::new();
+        if let Some(items) = body.get("models").and_then(|m| m.as_array()) {
+            for item in items {
+                match serde_json::from_value::<Model>(item.clone()) {
+                    Ok(model) => models.push(model),
+                    Err(e) => {
+                        eprintln!("[ML Laboratory] Warning: skipping unparseable model: {e}");
+                    }
+                }
+            }
+        }
+        Ok(models)
     }
 
     /// Server version string (`/api/version` -> {"version": "0.1.2"}).
@@ -329,5 +347,27 @@ mod tests {
         assert!(OllamaClient::new("http://192.168.1.5:11434", true).is_ok());
         assert!(OllamaClient::new("http://ollama.lan:11434", true).is_ok());
         assert!(OllamaClient::new("ftp://x/", true).is_err());
+    }
+
+    #[test]
+    fn parse_model_with_null_families() {
+        let raw = r#"{
+            "name": "blackgrg26/WORMGPT-14:latest",
+            "modified_at": "2026-07-26T01:26:29.795731271-07:00",
+            "size": 37282,
+            "digest": "f9809643910c",
+            "details": {
+                "parent_model": "",
+                "format": "",
+                "family": "",
+                "families": null,
+                "parameter_size": "",
+                "quantization_level": ""
+            }
+        }"#;
+        let m: Result<Model, _> = serde_json::from_str(raw);
+        assert!(m.is_ok(), "Failed to parse model with null families: {:?}", m.err());
+        let details = m.unwrap().details.unwrap();
+        assert!(details.families.is_empty());
     }
 }

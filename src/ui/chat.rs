@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
@@ -781,6 +782,17 @@ impl ChatPanel {
             while !prompt.is_char_boundary(end) { end -= 1; }
             prompt[..end].to_string()
         } else { prompt };
+        // Keep continuity: capture prior conversation turns (excluding the
+        // newly initiated prompt, which is appended to the payload below).
+        let history: Vec<(String, String)> = self
+            .messages
+            .iter()
+            .rev()
+            .take(self.history_depth.max(1))
+            .rev()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+
         let user_msg = ChatMessage {
             role: "user".to_string(),
             content: prompt.clone(),
@@ -791,16 +803,6 @@ impl ChatPanel {
         let model_name = model_name.clone();
         let client = client.clone();
         let tx = tx.clone();
-
-        // Keep continuity: resend recent turns so the model sees persona +
-        // memory (in role_prompt) AND the conversation so far.
-        let history: Vec<(String, String)> = self
-            .messages
-            .iter()
-            .rev()
-            .take(self.history_depth.max(1))
-            .rev()
-            .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
         self.stream_buf.clear();
         self.stream_seq = self.stream_seq.saturating_add(1);
@@ -966,5 +968,31 @@ mod panel_tests {
             });
         }
         assert_eq!(p.last_user_prompt().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn history_continuity_excludes_new_user_prompt() {
+        let mut p = ChatPanel::new();
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "turn 1".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        p.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: "reply 1".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        let history: Vec<(String, String)> = p
+            .messages
+            .iter()
+            .rev()
+            .take(p.history_depth.max(1))
+            .rev()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].1, "turn 1");
+        assert_eq!(history[1].1, "reply 1");
     }
 }

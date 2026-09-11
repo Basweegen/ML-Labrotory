@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use crate::ollama::api::{OllamaClient, Model};
 use crate::ollama::cli::OllamaCli;
@@ -226,7 +227,7 @@ impl ModelsPanel {
                                         .corner_radius(egui::CornerRadius::same(6))
                                         .frame(false)
                                 );
-                                if select_btn.on_hover_text("Set as active model").clicked() {
+                                if select_btn.on_hover_text("Set as active model and switch to Chat").clicked() {
                                     let _ = tx.send(crate::ui::app::AppMessage::ModelSelected(model.name.clone()));
                                 }
                                 let delete_btn = ui.add(

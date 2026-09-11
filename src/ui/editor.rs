@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use egui_code_editor::{CodeEditor, Syntax};
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient};

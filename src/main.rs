@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 mod ollama;
 mod storage;
 mod ui;
