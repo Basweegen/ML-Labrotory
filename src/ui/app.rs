@@ -111,6 +111,17 @@ impl ModelRole {
     }
 }
 
+/// Shorten a model/label string for fixed-width UI spots (combo boxes,
+/// tab lists, card headers). Char-boundary safe; marks truncation.
+pub fn short_name(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars || max_chars <= 1 {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars - 1).collect();
+    format!("{cut}\u{2026}")
+}
+
 /// Shared identity + memory + slot role, sent as the system prompt.
 fn compose_system_prompt(persona: &str, memory: &str, slot: &ModelSlot) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -729,9 +740,12 @@ impl AiDashboardApp {
                                         egui::RichText::new(format!(
                                             "Slot {} \u{00B7} {} [{}]",
                                             i + 1,
-                                            slot.model
-                                                .clone()
-                                                .unwrap_or("(empty)".to_string()),
+                                            short_name(
+                                                &slot.model
+                                                    .clone()
+                                                    .unwrap_or("(empty)".to_string()),
+                                                26,
+                                            ),
                                             slot.role.label()
                                         ))
                                         .size(13.0)
@@ -1686,7 +1700,7 @@ impl AiDashboardApp {
                 .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
         );
         for (i, slot) in self.slots.iter().enumerate() {
-            let name = slot.model.clone().unwrap_or("(empty)".to_string());
+            let name = short_name(&slot.model.clone().unwrap_or("(empty)".to_string()), 24);
             ui.label(
                 egui::RichText::new(format!("{}. {} [{}]", i + 1, name, slot.role.label()))
                     .size(12.0),
@@ -1890,7 +1904,7 @@ impl AiDashboardApp {
                         // Model picker
                         let current = model.clone().unwrap_or("(none)".to_string());
                         egui::ComboBox::from_id_salt(format!("slot_model_{}", id))
-                            .selected_text(current)
+                            .selected_text(short_name(&current, 28))
                             .width(210.0)
                             .show_ui(ui, |ui| {
                                 if ui
@@ -2093,7 +2107,10 @@ impl AiDashboardApp {
             ui.label(
                 egui::RichText::new(format!(
                     "Chatting with {} as {}",
-                    slot_model.clone().unwrap_or("(no model — pick one above)".to_string()),
+                    short_name(
+                        &slot_model.clone().unwrap_or("(no model — pick one above)".to_string()),
+                        40,
+                    ),
                     slot_role,
                 ))
                 .size(14.0)
@@ -2365,5 +2382,18 @@ impl eframe::App for AiDashboardApp {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(tick));
         let ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = if self.frame_ms <= 0.0 { ms } else { self.frame_ms * 0.9 + ms * 0.1 };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_name_truncates_cleanly() {
+        assert_eq!(short_name("abc", 5), "abc");
+        assert_eq!(short_name("abcdef", 5), "abcd\u{2026}");
+        assert_eq!(short_name("héllo🍰world", 6), "héllo\u{2026}");
+        assert_eq!(short_name("ab", 1), "ab");
     }
 }
