@@ -47,6 +47,7 @@ pub enum AppMessage {
     Audit(String, String),
     Broadcast(String),
     Relay(String),
+    Synthesize,
     CmdRun { cmd: String, cwd: String },
     CmdLine(u64, String),
     CmdStop,
@@ -924,6 +925,69 @@ impl AiDashboardApp {
         }
     }
 
+    /// One extra pass: merge every slot's latest answer into the focused
+    /// slot. The focused model reads its peers and writes the best combined
+    /// answer as a new turn in its own history.
+    fn synthesize_answers(&mut self) {
+        let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+        let mut parts: Vec<(usize, String, String)> = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(last) = slot
+                .chat
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+            {
+                parts.push((
+                    i,
+                    slot.model.clone().unwrap_or_else(|| "(empty)".to_string()),
+                    last.content.clone(),
+                ));
+            }
+        }
+        if parts.len() < 2 {
+            self.status = "Synthesize needs answers in 2+ slots (Ask all first)".to_string();
+            return;
+        }
+        let mut prompt = String::from(
+            "Merge these answers from fellow models into one best answer. \
+             Keep what's correct from each, resolve contradictions in favor of \
+             the stronger reasoning, and stay concise:\n",
+        );
+        for (i, model, text) in &parts {
+            let cut: String = text.chars().take(2500).collect();
+            prompt.push_str(&format!("\n--- Slot {} ({}) ---\n{}\n", i + 1, model, cut));
+        }
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(f) {
+            if slot.chat.is_streaming() {
+                self.status = format!("Slot {} is still working - wait, then Synthesize", f + 1);
+                return;
+            }
+            if let Err(note) = slot.chat.broadcast_check(&prompt) {
+                slot.chat.push_system_note(note);
+                self.status = "Synthesize blocked: possible secret - resend to override".to_string();
+                self.audit("synthesize.blocked", "secret guard".to_string());
+                return;
+            }
+            let rp = compose_system_prompt(&persona, &memory, slot);
+            let model = slot.model.clone();
+            slot.chat.send_prompt(prompt, &models, &model, &rp, f, &api, &self.tx, &self.rt)
+        } else {
+            false
+        };
+        if sent {
+            self.status = format!("Synthesizing {} answers into slot {}", parts.len(), f + 1);
+            self.audit("synthesize.sent", format!("{} answers -> slot {}", parts.len(), f + 1));
+        } else {
+            self.status = format!("Slot {} has no model or link - can't synthesize", f + 1);
+        }
+    }
+
     /// Snapshot of the live relay for the progress strip (pos, order).
     fn relay_status(&self) -> Option<(usize, Vec<usize>)> {
         self.relay.as_ref().map(|st| (st.pos, st.order.clone()))
@@ -1029,6 +1093,9 @@ impl AiDashboardApp {
                 }
                 AppMessage::Relay(prompt) => {
                     self.start_relay(prompt);
+                }
+                AppMessage::Synthesize => {
+                    self.synthesize_answers();
                 }
                 AppMessage::OllamaVersion(v) => {
                     self.ollama_version = Some(v);
@@ -1703,6 +1770,14 @@ impl AiDashboardApp {
                 .clicked()
             {
                 self.fill_empty_slots();
+            }
+            ui.add_space(8.0);
+            if ui
+                .small_button("Synthesize")
+                .on_hover_text("Merge every slot's latest answer into the focused slot")
+                .clicked()
+            {
+                let _ = self.tx.send(AppMessage::Synthesize);
             }
             ui.add_space(8.0);
             if self.clear_chats_armed {
