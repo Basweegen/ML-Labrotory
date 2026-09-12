@@ -1951,17 +1951,21 @@ impl AiDashboardApp {
                             .as_ref()
                             .is_some_and(|m| !known.contains_key(m));
                         ui.horizontal(|ui| {
-                            {
+                            if self.settings.show_avatar {
                                 let c = &self.slots[i].chat;
-                                let ago = c
-                                    .messages()
-                                    .last()
+                                let now = chrono::Utc::now();
+                                let last = c.messages().last();
+                                let since_last =
+                                    last.map(|m| (now - m.timestamp).num_seconds());
+                                let since_asst = last
                                     .filter(|m| m.role == "assistant")
-                                    .map(|m| (chrono::Utc::now() - m.timestamp).num_seconds());
+                                    .map(|m| (now - m.timestamp).num_seconds());
                                 let mood = crate::ui::avatar::mood_for(
                                     c.is_streaming(),
                                     c.stream_len(),
-                                    ago,
+                                    last.map(|m| m.role.as_str()),
+                                    since_last,
+                                    since_asst,
                                 );
                                 crate::ui::avatar::show_face(ui, 24.0, mood);
                             }
@@ -2195,22 +2199,33 @@ impl AiDashboardApp {
         let slot_role = self.slots[f].role.label();
         let (face_mood, face_hint) = {
             let c = &self.slots[f].chat;
-            let ago = c
-                .messages()
-                .last()
+            let now = chrono::Utc::now();
+            let last = c.messages().last();
+            let since_last = last.map(|m| (now - m.timestamp).num_seconds());
+            let since_asst = last
                 .filter(|m| m.role == "assistant")
-                .map(|m| (chrono::Utc::now() - m.timestamp).num_seconds());
-            let mood = crate::ui::avatar::mood_for(c.is_streaming(), c.stream_len(), ago);
+                .map(|m| (now - m.timestamp).num_seconds());
+            let mood = crate::ui::avatar::mood_for(
+                c.is_streaming(),
+                c.stream_len(),
+                last.map(|m| m.role.as_str()),
+                since_last,
+                since_asst,
+            );
             let hint = match mood {
                 crate::ui::avatar::FaceMood::Talking => "talking…",
                 crate::ui::avatar::FaceMood::Thinking => "thinking…",
                 crate::ui::avatar::FaceMood::Happy => "happy!",
+                crate::ui::avatar::FaceMood::Sad => "uh oh…",
+                crate::ui::avatar::FaceMood::Sleepy => "zzz…",
                 crate::ui::avatar::FaceMood::Idle => "idle",
             };
             (mood, hint)
         };
         ui.horizontal(|ui| {
-            crate::ui::avatar::show_face(ui, 56.0, face_mood);
+            if self.settings.show_avatar {
+                crate::ui::avatar::show_face(ui, 56.0, face_mood);
+            }
             ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(format!(

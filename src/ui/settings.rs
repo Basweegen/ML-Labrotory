@@ -45,6 +45,12 @@ impl SettingsPanel {
                 });
         });
 
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut settings.show_avatar, "Show assistant face (reactive avatar)");
+        });
+        ui.label(egui::RichText::new("Stack-chan style face above chat + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(12.0);

@@ -88,6 +88,13 @@ pub struct AppSettings {
     /// confined under this dir (no `..` escapes, no absolute paths).
     #[serde(default)]
     pub workspace_root: String,
+    /// Stack-chan face above chat + minis on slot cards. Default on.
+    #[serde(default = "default_true")]
+    pub show_avatar: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_history_depth() -> u32 {
@@ -117,6 +124,7 @@ impl Default for AppSettings {
             slot_layout: Vec::new(),
             allow_remote: false,
             workspace_root: String::new(),
+            show_avatar: true,
         }
     }
 }

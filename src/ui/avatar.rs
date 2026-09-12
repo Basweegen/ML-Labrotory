@@ -12,20 +12,41 @@ pub enum FaceMood {
     Thinking,
     Talking,
     Happy,
+    Sad,
+    Sleepy,
 }
 
 /// Pick a mood from cheap chat state. Callers already have these values;
 /// no ChatPanel import here so slot cards and the focused header share it.
-pub fn mood_for(streaming: bool, stream_len: usize, secs_since_assistant: Option<i64>) -> FaceMood {
+///
+/// - streaming with no text yet = Thinking, with text = Talking
+/// - fresh system note (blocks, errors) = Sad
+/// - fresh assistant reply = Happy
+/// - nothing for 5+ min = Sleepy
+pub fn mood_for(
+    streaming: bool,
+    stream_len: usize,
+    last_role: Option<&str>,
+    secs_since_last: Option<i64>,
+    secs_since_assistant: Option<i64>,
+) -> FaceMood {
     if streaming && stream_len == 0 {
-        FaceMood::Thinking
-    } else if streaming {
-        FaceMood::Talking
-    } else if secs_since_assistant.map(|s| s >= 0 && s < 8).unwrap_or(false) {
-        FaceMood::Happy
-    } else {
-        FaceMood::Idle
+        return FaceMood::Thinking;
     }
+    if streaming {
+        return FaceMood::Talking;
+    }
+    let fresh = |s: Option<i64>| s.map(|v| v >= 0 && v < 8).unwrap_or(false);
+    if last_role == Some("system") && fresh(secs_since_last) {
+        return FaceMood::Sad;
+    }
+    if fresh(secs_since_assistant) {
+        return FaceMood::Happy;
+    }
+    if secs_since_last.map(|v| v > 300).unwrap_or(false) {
+        return FaceMood::Sleepy;
+    }
+    FaceMood::Idle
 }
 
 /// Draw the face in a `size x size` square. Animates via ctx time:
@@ -42,6 +63,8 @@ pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
         FaceMood::Thinking => egui::Color32::from_rgb(0xBB, 0x88, 0xFF),
         FaceMood::Talking => egui::Color32::from_rgb(0x00, 0xCC, 0x88),
         FaceMood::Happy => egui::Color32::from_rgb(0xFF, 0xCC, 0x33),
+        FaceMood::Sad => egui::Color32::from_rgb(0xFF, 0x66, 0x66),
+        FaceMood::Sleepy => egui::Color32::from_rgb(0x88, 0x88, 0xAA),
     };
     p.rect(
         rect,
@@ -64,9 +87,10 @@ pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
         look = egui::vec2(look.x.clamp(-max, max), look.y.clamp(-max, max));
     }
 
-    // Blink: shut every ~3.4s for 0.12s (not while happy — happy has ^^ eyes).
+    // Blink: shut every ~3.4s for 0.12s (happy has ^^ eyes, sleepy stays shut).
     let phase = t % 3.4;
-    let blinking = mood != FaceMood::Happy && phase < 0.12;
+    let blinking =
+        mood == FaceMood::Sleepy || (mood != FaceMood::Happy && phase < 0.12);
 
     let ink = egui::Color32::from_rgb(0x1A, 0x1A, 0x22);
     let cx = rect.center().x;
@@ -166,6 +190,35 @@ pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
                 ],
                 mstroke,
             ));
+        }
+        FaceMood::Sad => {
+            // Frown.
+            let w = size * 0.07;
+            p.add(egui::Shape::line(
+                vec![
+                    egui::pos2(mc.x - w, mc.y + w * 0.45),
+                    egui::pos2(mc.x, mc.y - w * 0.15),
+                    egui::pos2(mc.x + w, mc.y + w * 0.45),
+                ],
+                mstroke,
+            ));
+        }
+        FaceMood::Sleepy => {
+            // Tiny flat mouth + "z".
+            let w = size * 0.05;
+            p.line_segment(
+                [egui::pos2(mc.x - w, mc.y), egui::pos2(mc.x + w, mc.y)],
+                mstroke,
+            );
+            if size >= 44.0 {
+                p.text(
+                    egui::pos2(rect.right() - size * 0.10, rect.top() + size * 0.16),
+                    egui::Align2::CENTER_CENTER,
+                    "z",
+                    egui::FontId::proportional(size * 0.22),
+                    egui::Color32::from_rgb(0x88, 0x88, 0xAA),
+                );
+            }
         }
     }
 
