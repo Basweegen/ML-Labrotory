@@ -1440,12 +1440,40 @@ impl AiDashboardApp {
                         let parts: Vec<&str> = rest.splitn(2, ':').collect();
                         let node_id: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
                         let err = parts.get(1).unwrap_or(&"Unknown error").to_string();
-                        self.relay.dag_node_failed(node_id, err.clone());
+                        let will_retry = self.relay.dag_node_failed(node_id, err.clone(), &self.models);
                         if let Some(st) = self.storage.as_ref() {
                             let _ = st.save_swarm_dag(&self.relay.dag);
                         }
-                        self.status = format!("Swarm DAG node {} failed: {}", node_id, err);
-                        self.audit("swarm.dag_node_failed", format!("node {}: {}", node_id, err));
+                        if will_retry {
+                            self.status = format!("Swarm DAG node {} failed (recovering via auto-retry): {}", node_id, err);
+                            self.audit("swarm.dag_node_retry", format!("node {}: {}", node_id, err));
+                            // Automatically re-dispatch ready retry nodes
+                            self.relay.dispatch_ready_dag_nodes(
+                                &self.api_client,
+                                &self.tx,
+                                &self.rt,
+                                self.settings.num_threads,
+                            );
+                        } else {
+                            self.status = format!("Swarm DAG node {} failed (max retries exceeded): {}", node_id, err);
+                            self.audit("swarm.dag_node_failed", format!("node {}: {}", node_id, err));
+                        }
+                    } else if let Some(rest) = s.strip_prefix("DAG_RETRY:") {
+                        if let Ok(node_id) = rest.parse::<usize>() {
+                            self.relay.dag.reset_node_for_retry(node_id, None);
+                            self.relay.dag.is_running = true;
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.save_swarm_dag(&self.relay.dag);
+                            }
+                            self.relay.dispatch_ready_dag_nodes(
+                                &self.api_client,
+                                &self.tx,
+                                &self.rt,
+                                self.settings.num_threads,
+                            );
+                            self.status = format!("Manually retrying Swarm DAG node {}", node_id);
+                            self.audit("swarm.dag_node_manual_retry", format!("node {}", node_id));
+                        }
                     } else {
                         self.status = s;
                     }

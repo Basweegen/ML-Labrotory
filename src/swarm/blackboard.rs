@@ -10,6 +10,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Maximum number of stigmergic artifacts retained in memory vault before eviction
+pub const MAX_BLACKBOARD_ARTIFACTS: usize = 128;
+/// Maximum character length per artifact payload (32KB boundary) to prevent heap exhaustion
+pub const MAX_ARTIFACT_CHARS: usize = 32_768;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlackboardArtifact {
     pub id: String,
@@ -35,6 +40,17 @@ impl BlackboardArtifact {
         initial_pheromone: f32,
         tags: Vec<String>,
     ) -> Self {
+        let raw_content = content.into();
+        let bounded_content = if raw_content.len() > MAX_ARTIFACT_CHARS {
+            let mut end = MAX_ARTIFACT_CHARS;
+            while end > 0 && !raw_content.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}... [bounded to 32KB]", &raw_content[..end])
+        } else {
+            raw_content
+        };
+
         Self {
             id: Uuid::new_v4().to_string(),
             author_node_id,
@@ -42,7 +58,7 @@ impl BlackboardArtifact {
             author_role,
             domain: domain.into(),
             title: title.into(),
-            content: content.into(),
+            content: bounded_content,
             pheromone_score: initial_pheromone.clamp(0.1, 20.0),
             tags,
             created_at_rfc3339: Utc::now().to_rfc3339(),
@@ -70,9 +86,33 @@ impl StigmergicBlackboard {
         }
     }
 
-    /// Deposit a new artifact into the stigmergic blackboard
+    /// Deposit a new artifact into the stigmergic blackboard.
+    /// If capacity exceeds `MAX_BLACKBOARD_ARTIFACTS`, auto-evicts the artifact
+    /// with the lowest pheromone score and shrinks capacity to reclaim heap memory.
     pub fn deposit(&mut self, artifact: BlackboardArtifact) {
+        if self.artifacts.len() >= MAX_BLACKBOARD_ARTIFACTS {
+            let mut lowest_idx = 0;
+            let mut lowest_score = f32::MAX;
+            for (i, art) in self.artifacts.iter().enumerate() {
+                if art.pheromone_score < lowest_score {
+                    lowest_score = art.pheromone_score;
+                    lowest_idx = i;
+                }
+            }
+            self.artifacts.remove(lowest_idx);
+            self.artifacts.shrink_to_fit();
+        }
         self.artifacts.push(artifact);
+    }
+
+    /// Prune stale artifacts with pheromone scores below `min_pheromone`.
+    /// Reclaims heap memory via `shrink_to_fit()`.
+    /// Returns the number of pruned artifacts.
+    pub fn prune_stale_artifacts(&mut self, min_pheromone: f32) -> usize {
+        let initial_count = self.artifacts.len();
+        self.artifacts.retain(|a| a.pheromone_score >= min_pheromone);
+        self.artifacts.shrink_to_fit();
+        initial_count.saturating_sub(self.artifacts.len())
     }
 
     /// Reinforce an artifact's pheromone score upon verification, audit pass, or user satisfaction
@@ -290,5 +330,78 @@ mod tests {
         assert!(ctx.contains("UPSTREAM DEPENDENCY OUTPUTS"));
         assert!(ctx.contains("Architecture: use AtomicPtr and CAS"));
         assert!(ctx.contains("YOUR SPECIALIZED ROLE DIRECTIVE"));
+    }
+
+    #[test]
+    fn test_blackboard_capacity_bounds_and_eviction() {
+        let mut bb = StigmergicBlackboard::new();
+
+        // 1. Test 32KB payload boundary bounding
+        let huge_text = "A".repeat(40_000);
+        let art = BlackboardArtifact::new(
+            0,
+            "Architect",
+            ModelRole::Planner,
+            "architecture",
+            "Huge Payload",
+            huge_text,
+            2.0,
+            vec![],
+        );
+        assert!(art.content.len() <= MAX_ARTIFACT_CHARS + 30);
+        assert!(art.content.contains("[bounded to 32KB]"));
+        bb.deposit(art);
+
+        // 2. Fill blackboard to max capacity (128 items)
+        for i in 1..MAX_BLACKBOARD_ARTIFACTS {
+            let score = if i == 5 { 0.2 } else { 1.5 + (i as f32 * 0.01) };
+            let art = BlackboardArtifact::new(
+                i,
+                format!("Agent {}", i),
+                ModelRole::Coder,
+                "backend",
+                format!("Artifact {}", i),
+                format!("Code payload {}", i),
+                score,
+                vec![],
+            );
+            bb.deposit(art);
+        }
+        assert_eq!(bb.artifacts.len(), MAX_BLACKBOARD_ARTIFACTS);
+
+        // Item 5 has the lowest score (0.2). Depositing 129th artifact should evict item 5.
+        assert!(bb.artifacts.iter().any(|a| a.title == "Artifact 5"));
+        let art_new = BlackboardArtifact::new(
+            999,
+            "New Agent",
+            ModelRole::General,
+            "synthesis",
+            "Artifact New",
+            "Final content",
+            5.0,
+            vec![],
+        );
+        bb.deposit(art_new);
+
+        assert_eq!(bb.artifacts.len(), MAX_BLACKBOARD_ARTIFACTS);
+        assert!(!bb.artifacts.iter().any(|a| a.title == "Artifact 5"), "Lowest score artifact must be evicted");
+        assert!(bb.artifacts.iter().any(|a| a.title == "Artifact New"));
+
+        // 3. Test pruning stale artifacts below threshold
+        // Evaporate artifacts down, then add a stale one
+        let stale = BlackboardArtifact::new(
+            1000,
+            "Stale Agent",
+            ModelRole::Critic,
+            "security",
+            "Old finding",
+            "details",
+            0.5,
+            vec![],
+        );
+        bb.deposit(stale);
+        let pruned = bb.prune_stale_artifacts(1.0);
+        assert!(pruned >= 1);
+        assert!(bb.artifacts.iter().all(|a| a.pheromone_score >= 1.0));
     }
 }

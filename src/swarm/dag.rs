@@ -17,17 +17,21 @@ pub enum NodeStatus {
     Ready,
     Running,
     Completed(f32), // duration in seconds
+    Recovered { attempts: u32, duration: f32 },
     Failed(String),
     Skipped,
 }
 
 impl NodeStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, NodeStatus::Completed(_) | NodeStatus::Failed(_) | NodeStatus::Skipped)
+        matches!(
+            self,
+            NodeStatus::Completed(_) | NodeStatus::Recovered { .. } | NodeStatus::Failed(_) | NodeStatus::Skipped
+        )
     }
 
     pub fn is_completed(&self) -> bool {
-        matches!(self, NodeStatus::Completed(_))
+        matches!(self, NodeStatus::Completed(_) | NodeStatus::Recovered { .. })
     }
 
     pub fn is_failed(&self) -> bool {
@@ -44,6 +48,9 @@ impl NodeStatus {
             NodeStatus::Ready => "⚡ Ready".to_string(),
             NodeStatus::Running => "▶ Running".to_string(),
             NodeStatus::Completed(dur) => format!("✔ Completed ({:.1}s)", dur),
+            NodeStatus::Recovered { attempts, duration } => {
+                format!("✔ Recovered (try #{}, {:.1}s)", attempts, duration)
+            }
             NodeStatus::Failed(err) => format!("✖ Failed: {}", err),
             NodeStatus::Skipped => "⏭ Skipped".to_string(),
         }
@@ -64,6 +71,10 @@ pub struct SwarmTaskNode {
     pub collapsed: bool,
     pub domain: String,
     pub tags: Vec<String>,
+    pub retries: u32,
+    pub max_retries: u32,
+    pub fallback_model: Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl SwarmTaskNode {
@@ -88,11 +99,20 @@ impl SwarmTaskNode {
             collapsed: false,
             domain: domain.into(),
             tags: Vec::new(),
+            retries: 0,
+            max_retries: 2,
+            fallback_model: None,
+            last_error: None,
         }
     }
 
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
+        self
+    }
+
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 }
@@ -342,19 +362,93 @@ impl SwarmDag {
         if let Some(n) = self.find_node_mut(id) {
             n.output = output;
             n.duration = Some(duration);
-            n.status = NodeStatus::Completed(duration);
+            if n.retries > 0 {
+                n.status = NodeStatus::Recovered {
+                    attempts: n.retries + 1,
+                    duration,
+                };
+            } else {
+                n.status = NodeStatus::Completed(duration);
+            }
             n.collapsed = true;
         }
         self.update_finished_state();
     }
 
+    /// Check if a node can attempt automatic retry
+    pub fn can_retry(&self, id: NodeId) -> bool {
+        if let Some(n) = self.find_node(id) {
+            n.retries < n.max_retries
+        } else {
+            false
+        }
+    }
+
+    /// Records an execution failure. If node has retries remaining, increments retry count,
+    /// sets status to `Ready`, records `last_error`, and returns `true` (indicating retry).
+    /// Otherwise, marks node `Failed`, cascades skip downstream, updates finished state,
+    /// and returns `false`.
+    pub fn record_failure(&mut self, id: NodeId, err: String) -> bool {
+        let will_retry = if let Some(n) = self.find_node_mut(id) {
+            n.retries += 1;
+            n.last_error = Some(err.clone());
+            let retry_allowed = n.retries <= n.max_retries;
+            if retry_allowed {
+                n.status = NodeStatus::Ready;
+            } else {
+                n.status = NodeStatus::Failed(err.clone());
+            }
+            retry_allowed
+        } else {
+            return false;
+        };
+
+        if !will_retry {
+            self.cascade_skip(id);
+            self.update_finished_state();
+        }
+        will_retry
+    }
+
     pub fn mark_failed(&mut self, id: NodeId, err: String) {
         if let Some(n) = self.find_node_mut(id) {
+            n.last_error = Some(err.clone());
             n.status = NodeStatus::Failed(err);
         }
         // Cascade skip to dependent children
         self.cascade_skip(id);
         self.update_finished_state();
+    }
+
+    /// Reset a node for manual or automated retry.
+    /// Resets retry counter, last error, clears output, sets status to Ready,
+    /// and un-skips downstream nodes that were skipped due to this node.
+    pub fn reset_node_for_retry(&mut self, id: NodeId, model_override: Option<String>) {
+        if let Some(n) = self.find_node_mut(id) {
+            n.retries = 0;
+            n.last_error = None;
+            n.output.clear();
+            n.duration = None;
+            n.collapsed = false;
+            n.status = NodeStatus::Ready;
+            if let Some(m) = model_override {
+                n.model = Some(m);
+            }
+        }
+        self.unskip_downstream(id);
+    }
+
+    /// Recursively un-skips downstream nodes if their upstream failed dependency was recovered or reset.
+    pub fn unskip_downstream(&mut self, parent_id: NodeId) {
+        let mut to_check = vec![parent_id];
+        while let Some(pid) = to_check.pop() {
+            for n in &mut self.nodes {
+                if n.dependencies.contains(&pid) && matches!(n.status, NodeStatus::Skipped) {
+                    n.status = NodeStatus::Pending;
+                    to_check.push(n.id);
+                }
+            }
+        }
     }
 
     fn cascade_skip(&mut self, failed_id: NodeId) {
@@ -378,6 +472,8 @@ impl SwarmDag {
             n.output.clear();
             n.duration = None;
             n.collapsed = false;
+            n.retries = 0;
+            n.last_error = None;
         }
     }
 
@@ -821,5 +917,73 @@ mod tests {
             let ranks = dag.topological_ranks().expect("Ranks must be valid");
             assert!(!ranks.is_empty());
         }
+    }
+
+    #[test]
+    fn test_node_retry_and_recovery_cycle() {
+        let mut dag = SwarmDag::new(DagPreset::Diamond);
+        dag.get_ready_nodes(); // node 0 ready
+        dag.mark_completed(0, "Arch done".to_string(), 1.0);
+
+        let ready = dag.get_ready_nodes();
+        assert_eq!(ready, vec![1, 2, 3]);
+
+        // Fail node 1 (attempt 1) -> retries allowed (max_retries is 2)
+        assert!(dag.can_retry(1));
+        let will_retry_1 = dag.record_failure(1, "Connection reset by peer".to_string());
+        assert!(will_retry_1);
+        assert_eq!(dag.find_node(1).unwrap().retries, 1);
+        assert_eq!(dag.find_node(1).unwrap().status, NodeStatus::Ready);
+        assert!(!dag.find_node(4).unwrap().status.is_terminal(), "Child must not be skipped on retryable failure");
+
+        // Fail node 1 (attempt 2) -> still allows 2nd retry
+        let will_retry_2 = dag.record_failure(1, "Out of memory error".to_string());
+        assert!(will_retry_2);
+        assert_eq!(dag.find_node(1).unwrap().retries, 2);
+        assert_eq!(dag.find_node(1).unwrap().status, NodeStatus::Ready);
+
+        // Node 1 succeeds on retry -> marks status Recovered!
+        dag.mark_completed(1, "Backend recovered".to_string(), 3.2);
+        let n1 = dag.find_node(1).unwrap();
+        assert!(matches!(n1.status, NodeStatus::Recovered { attempts: 3, .. }));
+        assert!(n1.status.is_completed());
+
+        // Complete 2 and 3
+        dag.mark_completed(2, "Frontend ok".to_string(), 2.0);
+        dag.mark_completed(3, "Sec ok".to_string(), 1.8);
+
+        // Child node 4 now becomes ready!
+        let ready_final = dag.get_ready_nodes();
+        assert_eq!(ready_final, vec![4]);
+    }
+
+    #[test]
+    fn test_terminal_failure_and_manual_unskip() {
+        let mut dag = SwarmDag::new(DagPreset::Diamond);
+        dag.get_ready_nodes();
+        dag.mark_completed(0, "Arch done".to_string(), 1.0);
+
+        // Set max retries to 1 for node 1
+        dag.find_node_mut(1).unwrap().max_retries = 1;
+
+        // 1st failure: retries allowed
+        assert!(dag.record_failure(1, "Ollama timeout".to_string()));
+
+        // 2nd failure: exceeds max_retries -> terminal failure!
+        let will_retry = dag.record_failure(1, "Crash".to_string());
+        assert!(!will_retry);
+        assert!(dag.find_node(1).unwrap().status.is_failed());
+
+        // Child node 4 should now be skipped
+        assert_eq!(dag.find_node(4).unwrap().status, NodeStatus::Skipped);
+
+        // Manual operator unblock / retry:
+        dag.reset_node_for_retry(1, Some("qwen2.5-coder:7b".to_string()));
+        assert_eq!(dag.find_node(1).unwrap().status, NodeStatus::Ready);
+        assert_eq!(dag.find_node(1).unwrap().model.as_deref(), Some("qwen2.5-coder:7b"));
+        assert_eq!(dag.find_node(1).unwrap().retries, 0);
+
+        // Child node 4 is un-skipped back to Pending!
+        assert_eq!(dag.find_node(4).unwrap().status, NodeStatus::Pending);
     }
 }

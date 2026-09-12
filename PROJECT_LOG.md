@@ -705,5 +705,63 @@
   - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 20 as COMPLETE.
 
+---
+
+## 21. Phase 2 — Resilient Fault-Tolerant Swarm Execution, Quantum-Bounded Memory Pool & Adaptive Self-Healing Engine (2026-09-12)
+- **Pre-Implementation Vulnerability & Memory Scan:**
+  - **Memory Leak & Unbounded Heap Vulnerability:**
+    - Prior stigmergic blackboard had no ceiling on artifact count or payload character length, creating vulnerability to unbounded heap consumption during long swarm sessions.
+    - Node live streaming buffer (`dag_node_streams`) lacked upper limits, risking memory bloat during massive generation runs.
+    - Tokio tasks spawned via `rt.spawn` dropped their `JoinHandle`, preventing deterministic cancellation of in-flight TCP connections when an operator triggered `/swarm abort` or switched models, leaking sockets and GPU VRAM until completion.
+  - **Deadlock & Fragility on Node Failure:**
+    - In Phase 1, any temporary failure (e.g. Ollama busy, timeout, memory pressure) immediately marked the failed node as terminal and cascaded `Skipped` status to all downstream dependent nodes, deadlocking the entire DAG run.
+    - No automatic retry or model failover mechanisms existed.
+    - No manual recovery mechanism existed to retry a failed node without wiping and restarting the entire DAG from scratch.
+  - **CPU Thread Over-Subscription:**
+    - When multiple DAG nodes were ready simultaneously, each requested the full thread budget (`settings.num_threads`), causing thread contention and context-switching bottlenecks on multicore systems.
+- **Defensive Solutions Applied:**
+  1. **Quantum-Bounded Stigmergic Blackboard & Memory Bounds (`src/swarm/blackboard.rs`)**:
+     - Enforced `MAX_BLACKBOARD_ARTIFACTS = 128` and `MAX_ARTIFACT_CHARS = 32_768` (32KB boundary) with safe Unicode character slicing.
+     - Auto-eviction: when capacity reaches 128 items, the artifact with the lowest pheromone score is evicted, and `shrink_to_fit()` is invoked to reclaim heap pages immediately.
+     - Added `prune_stale_artifacts(min_pheromone)` API and added `[🧹 Prune Memory]` button in Relay toolbar.
+  2. **Zero-Leak Tokio Lifecycle & Live Stream Cap (`src/ui/relay.rs`)**:
+     - Integrated `dag_inflight_handles: HashMap<usize, tokio::task::JoinHandle<()>>` in `RelayPanel`.
+     - In `abort_dag()`: all active handles are explicitly aborted (`handle.abort()`), immediately terminating HTTP streams and freeing Ollama compute/VRAM.
+     - Implemented `MAX_STREAM_BUFFER_CHARS = 32_768` in `push_dag_chunk` with character-boundary sliding window.
+  3. **Adaptive CPU Thread Division & Governor (`src/ui/relay.rs`)**:
+     - Partitioned total thread budget across concurrently ready nodes: `threads_per_node = (total_threads / ready_ids.len() as u32).max(1)`.
+  4. **Self-Healing Fault Tolerance, Automatic Retry & Failover (`src/swarm/dag.rs`, `src/ui/relay.rs`, `src/ui/app.rs`)**:
+     - Extended `SwarmTaskNode` with `retries`, `max_retries: 2`, `fallback_model`, and `last_error`.
+     - Extended `NodeStatus` with `Recovered { attempts: u32, duration: f32 }`.
+     - Implemented `record_failure`: increments retry count and sets status to `Ready` without cascading skip if retries remain; rotates model to fallback model from available local models.
+     - Implemented `reset_node_for_retry` and `unskip_downstream` for manual one-click operator retry `[🔄 Retry Node]`.
+     - Handled `DAG_FAIL:` in `app.rs` with automatic re-dispatch on retry and audit logging (`swarm.dag_node_retry`).
+     - Added `DAG_RETRY:` message handler in `app.rs` for manual node retries.
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 108/108 unit and integration tests passing (`cargo test --bin ai-dashboard`).
+  - Added dedicated tests:
+    - `test_node_retry_and_recovery_cycle`
+    - `test_terminal_failure_and_manual_unskip`
+    - `test_blackboard_capacity_bounds_and_eviction`
+    - `test_dag_failure_retry_and_bounded_stream_memory`
+    - `test_adaptive_thread_governor_partitioning`
+  - Production release binary built and verified.
+  - Zero memory leaks, zero telemetry, local loopback, strict file permissions (`0o700`/`0o600`).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Add retry, fallback model, and error fields to `SwarmTaskNode`.
+  - [x] [COMPLETE] Add `NodeStatus::Recovered` variant and update completion queries.
+  - [x] [COMPLETE] Implement `record_failure`, `can_retry`, `reset_node_for_retry`, and `unskip_downstream` in `SwarmDag`.
+  - [x] [COMPLETE] Enforce `MAX_BLACKBOARD_ARTIFACTS` and `MAX_ARTIFACT_CHARS` with auto-eviction in `StigmergicBlackboard`.
+  - [x] [COMPLETE] Add `prune_stale_artifacts` and `[🧹 Prune Memory]` UI button.
+  - [x] [COMPLETE] Add `dag_inflight_handles` and task `.abort()` in `RelayPanel::abort_dag`.
+  - [x] [COMPLETE] Enforce `MAX_STREAM_BUFFER_CHARS` in `push_dag_chunk`.
+  - [x] [COMPLETE] Implement adaptive thread division in `dispatch_ready_dag_nodes`.
+  - [x] [COMPLETE] Add visual retry counter badge, error notes, and `[🔄 Retry Node]` action in `show_dag_node_card`.
+  - [x] [COMPLETE] Wire auto-redispatch and audit logs in `app.rs` for `DAG_FAIL` and `DAG_RETRY`.
+  - [x] [COMPLETE] Run test suite (108/108 passed).
+  - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Section 21 as COMPLETE.
+
+
 
 

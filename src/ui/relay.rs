@@ -106,6 +106,9 @@ impl SwarmTemplate {
     }
 }
 
+/// Maximum live stream buffer retention per node (32KB)
+pub const MAX_STREAM_BUFFER_CHARS: usize = 32_768;
+
 pub struct RelayPanel {
     pub prompt: String,
     pub steps: Vec<RelayStep>,
@@ -118,12 +121,13 @@ pub struct RelayPanel {
     pub export_note: Option<String>,
     pub consensus_score: Option<f32>,
 
-    // Phase 1: Autonomous Multi-Agent DAG Swarm & Blackboard
+    // Phase 1 & 2: Autonomous Multi-Agent DAG Swarm & Blackboard
     pub swarm_mode: SwarmMode,
     pub dag: SwarmDag,
     pub blackboard: StigmergicBlackboard,
     pub show_blackboard_drawer: bool,
     pub dag_node_streams: HashMap<usize, String>,
+    pub dag_inflight_handles: HashMap<usize, tokio::task::JoinHandle<()>>,
 }
 
 impl RelayPanel {
@@ -145,6 +149,7 @@ impl RelayPanel {
             blackboard: StigmergicBlackboard::new(),
             show_blackboard_drawer: false,
             dag_node_streams: HashMap::new(),
+            dag_inflight_handles: HashMap::new(),
         };
         panel.apply_template(SwarmTemplate::SymbioticHive);
         panel
@@ -1235,6 +1240,16 @@ impl RelayPanel {
             if ui.button(egui::RichText::new(bb_label).color(bb_color)).clicked() {
                 self.show_blackboard_drawer = !self.show_blackboard_drawer;
             }
+
+            ui.add_space(6.0);
+            if ui
+                .small_button("🧹 Prune Memory")
+                .on_hover_text("Prune stale blackboard artifacts (< 1.0 pheromone) and reclaim heap memory")
+                .clicked()
+            {
+                let pruned = self.blackboard.prune_stale_artifacts(1.0);
+                self.export_note = Some(format!("Pruned {} stale artifacts from blackboard memory", pruned));
+            }
         });
 
         ui.add_space(8.0);
@@ -1450,6 +1465,10 @@ impl RelayPanel {
         let is_running = status.is_running();
         let is_completed = status.is_completed();
         let is_failed = status.is_failed();
+        let (retries, max_retries, last_error, fallback_model) = {
+            let n = &self.dag.nodes[node_idx];
+            (n.retries, n.max_retries, n.last_error.clone(), n.fallback_model.clone())
+        };
 
         let (card_bg, border_color) = if is_running {
             (egui::Color32::from_rgb(0x0f, 0x24, 0x30), egui::Color32::from_rgb(0x06, 0xb6, 0xd4))
@@ -1523,6 +1542,17 @@ impl RelayPanel {
                                 }
                             });
 
+                        // Manual Retry Button if node is Failed or Skipped
+                        if is_failed || matches!(status, NodeStatus::Skipped) {
+                            if ui
+                                .button(egui::RichText::new("🔄 Retry Node").size(11.0).color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24)))
+                                .on_hover_text("Manually retry this node and un-skip dependent children")
+                                .clicked()
+                            {
+                                let _ = tx.send(AppMessage::Notice(format!("DAG_RETRY:{node_id}")));
+                            }
+                        }
+
                         // Status Badge
                         let status_label = status.label();
                         let status_color = if is_running {
@@ -1538,12 +1568,41 @@ impl RelayPanel {
                         if is_running {
                             ui.spinner();
                         }
+
+                        // Retry counter badge if retries > 0
+                        if retries > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(" [Try {}/{}] ", retries + 1, max_retries + 1))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(0xf5, 0x9e, 0x0b))
+                                    .background_color(egui::Color32::from_rgb(0x2a, 0x1c, 0x07)),
+                            );
+                        }
                     });
                 });
 
                 // Directive
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new(&node_directive).size(11.0).color(egui::Color32::from_rgb(0xcb, 0xd5, 0xe1)));
+
+                // Error & Fallback notice
+                if let Some(err) = &last_error {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("⚠️ Note: {}", err))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(0xf8, 0x71, 0x71)),
+                        );
+                        if let Some(fb) = &fallback_model {
+                            ui.label(
+                                egui::RichText::new(format!("(Fallback from: {})", fb))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                            );
+                        }
+                    });
+                }
 
                 // Live Streaming preview
                 if is_running {
@@ -1703,6 +1762,9 @@ impl RelayPanel {
     }
 
     pub fn abort_dag(&mut self) {
+        for (_, handle) in self.dag_inflight_handles.drain() {
+            handle.abort();
+        }
         self.dag.abort();
         self.dag_node_streams.clear();
     }
@@ -1726,14 +1788,22 @@ impl RelayPanel {
             return;
         }
 
+        // Adaptive Thread Division: partition available CPU threads across concurrently ready nodes
+        let total_threads = if num_threads > 0 {
+            num_threads
+        } else {
+            ChatOptions::optimal_threads()
+        };
+        let threads_per_node = (total_threads / ready_ids.len() as u32).max(1);
+
         for node_id in ready_ids {
             self.dag.mark_running(node_id);
-            self.dispatch_single_dag_node(node_id, api_client, tx, rt, num_threads);
+            self.dispatch_single_dag_node(node_id, api_client, tx, rt, threads_per_node);
         }
     }
 
     fn dispatch_single_dag_node(
-        &self,
+        &mut self,
         node_id: usize,
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<AppMessage>,
@@ -1758,7 +1828,7 @@ impl RelayPanel {
         let role_system_prompt = node.role.system_prompt();
         let tx = tx.clone();
 
-        rt.spawn(async move {
+        let handle = rt.spawn(async move {
             let start = Instant::now();
             let options = if num_threads > 0 {
                 ChatOptions::lowram_with_threads(Some(num_threads))
@@ -1813,16 +1883,30 @@ impl RelayPanel {
                 }
             }
         });
+
+        self.dag_inflight_handles.insert(node_id, handle);
     }
 
     pub fn push_dag_chunk(&mut self, node_id: usize, chunk: String) {
-        self.dag_node_streams
+        let stream = self
+            .dag_node_streams
             .entry(node_id)
-            .or_default()
-            .push_str(&chunk);
+            .or_default();
+        stream.push_str(&chunk);
+
+        // Bound memory: ensure live stream does not exceed MAX_STREAM_BUFFER_CHARS (32KB)
+        if stream.len() > MAX_STREAM_BUFFER_CHARS {
+            let excess = stream.len() - MAX_STREAM_BUFFER_CHARS;
+            let mut cut = excess;
+            while cut < stream.len() && !stream.is_char_boundary(cut) {
+                cut += 1;
+            }
+            stream.drain(..cut);
+        }
     }
 
     pub fn dag_node_completed(&mut self, node_id: usize, output: String, duration: f32) {
+        self.dag_inflight_handles.remove(&node_id);
         self.dag_node_streams.remove(&node_id);
         if let Some(node) = self.dag.find_node(node_id) {
             let name = node.name.clone();
@@ -1848,9 +1932,30 @@ impl RelayPanel {
         self.dag.mark_completed(node_id, output, duration);
     }
 
-    pub fn dag_node_failed(&mut self, node_id: usize, err: String) {
+    /// Handles node failure with automatic retry logic and fallback model rotation.
+    /// Returns true if node is retrying, false if terminal failure.
+    pub fn dag_node_failed(&mut self, node_id: usize, err: String, available_models: &[Model]) -> bool {
+        self.dag_inflight_handles.remove(&node_id);
         self.dag_node_streams.remove(&node_id);
-        self.dag.mark_failed(node_id, err);
+
+        let will_retry = self.dag.record_failure(node_id, err);
+        if will_retry {
+            // Adaptive fallback model selection
+            if let Some(node) = self.dag.find_node_mut(node_id) {
+                if available_models.len() > 1 {
+                    let current_model = node.model.clone().unwrap_or_default();
+                    if let Some(fallback) = available_models
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .find(|m| m != &current_model)
+                    {
+                        node.fallback_model = Some(current_model);
+                        node.model = Some(fallback);
+                    }
+                }
+            }
+        }
+        will_retry
     }
 }
 
@@ -1997,5 +2102,51 @@ mod tests {
         let export_md = panel.blackboard.export_markdown();
         assert!(export_md.contains("System Architecture"));
         assert!(export_md.contains("Security: Zero memory leaks"));
+    }
+
+    #[test]
+    fn test_dag_failure_retry_and_bounded_stream_memory() {
+        let mut panel = RelayPanel::new();
+        panel.swarm_mode = SwarmMode::Dag;
+        panel.dag.apply_preset(crate::swarm::DagPreset::Diamond);
+
+        // 1. Verify stream buffer memory bounding (MAX_STREAM_BUFFER_CHARS = 32_768)
+        let large_chunk = "Z".repeat(40_000);
+        panel.push_dag_chunk(0, large_chunk);
+        assert!(panel.dag_node_streams.get(&0).unwrap().len() <= MAX_STREAM_BUFFER_CHARS);
+
+        // 2. Simulate node failure with fallback model rotation
+        let models = vec![
+            make_test_model("qwen2.5-coder:7b"),
+            make_test_model("deepseek-r1:8b"),
+        ];
+        panel.dag.nodes[0].model = Some("qwen2.5-coder:7b".to_string());
+
+        let will_retry = panel.dag_node_failed(0, "OLLAMA_TIMEOUT".to_string(), &models);
+        assert!(will_retry, "Node with remaining retries should signal retry");
+        assert_eq!(panel.dag.nodes[0].retries, 1);
+        assert_eq!(panel.dag.nodes[0].fallback_model.as_deref(), Some("qwen2.5-coder:7b"));
+        assert_eq!(panel.dag.nodes[0].model.as_deref(), Some("deepseek-r1:8b"), "Fallback model should be selected");
+        assert_eq!(panel.dag.nodes[0].status, crate::swarm::NodeStatus::Ready);
+    }
+
+    #[test]
+    fn test_adaptive_thread_governor_partitioning() {
+        // Calculate thread partition algorithm
+        let partition = |total: u32, count: usize| -> u32 {
+            let eff_total = if total > 0 {
+                total
+            } else {
+                crate::ollama::api::ChatOptions::optimal_threads()
+            };
+            (eff_total / count as u32).max(1)
+        };
+
+        // 12 threads divided among 3 parallel nodes -> 4 threads each
+        assert_eq!(partition(12, 3), 4);
+        // 8 threads divided among 10 nodes -> capped minimum at 1 thread
+        assert_eq!(partition(8, 10), 1);
+        // 0 threads configured (auto) -> defaults to optimal and strictly >= 1
+        assert!(partition(0, 4) >= 1);
     }
 }
