@@ -38,7 +38,8 @@ if ! check_ollama; then
     
     # Check if ollama binary exists
     if command -v ollama >/dev/null 2>&1; then
-        echo "[ML Laboratory] Initiating Ollama background server..."
+        echo "[ML Laboratory] Initiating Ollama background server (Vulkan GPU enabled)..."
+        export OLLAMA_IGPU_ENABLE=1
         nohup ollama serve > /dev/null 2>&1 &
         
         # Wait up to 5 seconds for Ollama to accept connections

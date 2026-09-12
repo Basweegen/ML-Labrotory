@@ -20,6 +20,7 @@ pub struct EditorPanel {
     pub coder_model: Option<String>,
     pub coder_input: String,
     pub coder_messages: Vec<ChatMessage>,
+    pub coder_parsed_cache: Vec<Vec<crate::ui::chat::MessageSegment>>,
     pub coder_is_streaming: bool,
     pub coder_stream_buf: String,
     pub show_coder_chat: bool,
@@ -41,11 +42,18 @@ impl EditorPanel {
             coder_model: None,
             coder_input: String::new(),
             coder_messages: Vec::new(),
+            coder_parsed_cache: Vec::new(),
             coder_is_streaming: false,
             coder_stream_buf: String::new(),
             show_coder_chat: true,
             include_editor_context: true,
         }
+    }
+
+    pub fn push_coder_message(&mut self, msg: ChatMessage) {
+        let segs = crate::ui::chat::parse_segments(&msg.content);
+        self.coder_parsed_cache.push(segs);
+        self.coder_messages.push(msg);
     }
 
     pub fn show(
@@ -327,6 +335,7 @@ impl EditorPanel {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Clear").on_hover_text("Clear AI Coder conversation").clicked() {
                         self.coder_messages.clear();
+                        self.coder_parsed_cache.clear();
                         self.coder_stream_buf.clear();
                     }
                 });
@@ -390,9 +399,15 @@ impl EditorPanel {
                     }
 
                     for (m_idx, msg) in self.coder_messages.iter().enumerate() {
+                        let segs: &[crate::ui::chat::MessageSegment] = if m_idx < self.coder_parsed_cache.len() {
+                            &self.coder_parsed_cache[m_idx]
+                        } else {
+                            &[]
+                        };
                         Self::render_coder_message(
                             ui,
                             msg,
+                            segs,
                             m_idx,
                             &mut apply_code_request,
                             &mut append_code_request,
@@ -406,9 +421,11 @@ impl EditorPanel {
                             content: format!("{}▍", self.coder_stream_buf),
                             timestamp: chrono::Utc::now(),
                         };
+                        let stream_segs = crate::ui::chat::parse_segments(&tmp.content);
                         Self::render_coder_message(
                             ui,
                             &tmp,
+                            &stream_segs,
                             self.coder_messages.len(),
                             &mut apply_code_request,
                             &mut append_code_request,
@@ -502,6 +519,7 @@ impl EditorPanel {
     fn render_coder_message(
         ui: &mut egui::Ui,
         msg: &ChatMessage,
+        segments: &[crate::ui::chat::MessageSegment],
         m_idx: usize,
         apply_req: &mut Option<String>,
         append_req: &mut Option<String>,
@@ -535,9 +553,15 @@ impl EditorPanel {
                 });
 
                 ui.add_space(3.0);
-                let segments = crate::ui::chat::parse_segments(&msg.content);
+                let fallback_segs;
+                let actual_segs = if segments.is_empty() && !msg.content.is_empty() {
+                    fallback_segs = crate::ui::chat::parse_segments(&msg.content);
+                    &fallback_segs[..]
+                } else {
+                    segments
+                };
 
-                for (s_idx, seg) in segments.iter().enumerate() {
+                for (s_idx, seg) in actual_segs.iter().enumerate() {
                     match seg {
                         crate::ui::chat::MessageSegment::Text(t) => {
                             if !t.is_empty() {
@@ -670,7 +694,7 @@ impl EditorPanel {
     ) {
         let active_model = self.coder_model.clone().or_else(|| selected_model.clone());
         let Some(model_name) = active_model else {
-            self.coder_messages.push(ChatMessage {
+            self.push_coder_message(ChatMessage {
                 role: "system".to_string(),
                 content: "Select an AI model first using the dropdown above.".to_string(),
                 timestamp: chrono::Utc::now(),
@@ -678,7 +702,7 @@ impl EditorPanel {
             return;
         };
         let Some(client) = api_client else {
-            self.coder_messages.push(ChatMessage {
+            self.push_coder_message(ChatMessage {
                 role: "system".to_string(),
                 content: "Ollama is not connected on loopback 127.0.0.1:11434.".to_string(),
                 timestamp: chrono::Utc::now(),
@@ -696,7 +720,7 @@ impl EditorPanel {
                 .iter()
                 .map(|h| format!("{} ({})", h.kind, h.preview))
                 .collect();
-            self.coder_messages.push(ChatMessage {
+            self.push_coder_message(ChatMessage {
                 role: "system".to_string(),
                 content: format!(
                     "Blocked: possible secret ({}). Send again within 60s to override.",
@@ -711,7 +735,7 @@ impl EditorPanel {
             return;
         }
 
-        self.coder_messages.push(ChatMessage {
+        self.push_coder_message(ChatMessage {
             role: "user".to_string(),
             content: p.to_string(),
             timestamp: chrono::Utc::now(),
@@ -930,7 +954,7 @@ impl EditorPanel {
             Ok(resp) => {
                 let clean = crate::ui::chat::sanitize_text(&resp.message.content);
                 self.pending_suggestion = Some(clean.clone());
-                self.coder_messages.push(ChatMessage {
+                self.push_coder_message(ChatMessage {
                     role: "assistant".to_string(),
                     content: clean,
                     timestamp: chrono::Utc::now(),
@@ -939,7 +963,7 @@ impl EditorPanel {
             Err(e) => {
                 let err_msg = crate::ui::chat::sanitize_text(&format!("Error: {}", e));
                 self.pending_suggestion = Some(err_msg.clone());
-                self.coder_messages.push(ChatMessage {
+                self.push_coder_message(ChatMessage {
                     role: "system".to_string(),
                     content: err_msg,
                     timestamp: chrono::Utc::now(),
@@ -987,11 +1011,13 @@ mod tests {
     fn coder_chat_message_flow() {
         let mut e = EditorPanel::new();
         assert!(e.coder_messages.is_empty());
-        e.coder_messages.push(ChatMessage {
+        assert!(e.coder_parsed_cache.is_empty());
+        e.push_coder_message(ChatMessage {
             role: "user".to_string(),
             content: "Write hello".to_string(),
             timestamp: chrono::Utc::now(),
         });
+        assert_eq!(e.coder_parsed_cache.len(), 1);
         e.suggestion_id = 1;
         e.push_chunk(0, "```rust\nfn hello() {}\n```");
         assert_eq!(e.coder_stream_buf, "```rust\nfn hello() {}\n```");

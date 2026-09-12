@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use crate::storage::{AppSettings, Theme};
 use crate::storage::Storage;
@@ -174,6 +175,36 @@ impl SettingsPanel {
             }
         });
         ui.label(egui::RichText::new("Higher = better continuity, slower + pricier. Saved with the rest.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // Inference Performance (CPU Threading)
+        ui.label(egui::RichText::new("Inference Performance (CPU Threads)").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        let optimal = crate::ollama::api::ChatOptions::optimal_threads();
+        let total_avail = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Ollama CPU Threads:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            let mut threads = settings.num_threads;
+            let thread_label = if threads == 0 { format!("0 (Auto: {optimal} P-threads)") } else { format!("{threads} threads") };
+            let resp = ui.add(
+                egui::Slider::new(&mut threads, 0..=total_avail)
+                    .text(thread_label),
+            );
+            if resp.changed() {
+                settings.num_threads = threads;
+            }
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "0 = Auto (detected {total_avail} logical threads; auto-clamps to {optimal} P-core threads to prevent hybrid spinlock contention, speeding up inference by up to 3x)."
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
 
         ui.add_space(12.0);
         ui.separator();

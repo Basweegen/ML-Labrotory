@@ -85,6 +85,9 @@ pub struct AppSettings {
     /// Slot layout restored on launch (model + role per slot).
     #[serde(default)]
     pub slot_layout: Vec<SlotConfig>,
+    /// CPU threads used for Ollama inference. 0 = auto-detect optimal threads.
+    #[serde(default)]
+    pub num_threads: u32,
 }
 
 fn default_history_depth() -> u32 {
@@ -113,6 +116,7 @@ impl Default for AppSettings {
             history_depth: default_history_depth(),
             slot_layout: Vec::new(),
             allow_remote: false,
+            num_threads: 0,
         }
     }
 }
@@ -151,7 +155,10 @@ impl Storage {
                 let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let db = sled::open(db_path)?;
+        let db = sled::Config::new()
+            .path(db_path)
+            .cache_capacity(16 * 1024 * 1024) // 16 MiB page cache bounds memory consumption
+            .open()?;
         let sessions_tree = db.open_tree("sessions")?;
         let config_tree = db.open_tree("config")?;
         let audit_tree = db.open_tree("audit")?;

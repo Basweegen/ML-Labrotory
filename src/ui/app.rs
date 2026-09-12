@@ -676,16 +676,21 @@ impl AiDashboardApp {
 
     /// Persist slot model/role assignments when they change.
     fn sync_slot_layout(&mut self) {
-        let layout: Vec<SlotConfig> = self
-            .slots
-            .iter()
-            .map(|s| SlotConfig {
-                model: s.model.clone(),
-                role: s.role.label(),
-                custom_role: s.custom_role.clone(),
-            })
-            .collect();
-        if layout != self.settings.slot_layout {
+        let changed = self.slots.len() != self.settings.slot_layout.len()
+            || self.slots.iter().zip(self.settings.slot_layout.iter()).any(|(s, cfg)| {
+                s.model != cfg.model || s.role.label() != cfg.role || s.custom_role != cfg.custom_role
+            });
+
+        if changed {
+            let layout: Vec<SlotConfig> = self
+                .slots
+                .iter()
+                .map(|s| SlotConfig {
+                    model: s.model.clone(),
+                    role: s.role.label(),
+                    custom_role: s.custom_role.clone(),
+                })
+                .collect();
             self.settings.slot_layout = layout;
             if let Some(st) = self.storage.as_ref() {
                 let _ = st.save_settings(&self.settings);

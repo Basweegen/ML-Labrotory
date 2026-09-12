@@ -202,6 +202,7 @@ pub fn render_code_block(
 pub struct ChatPanel {
     input: String,
     messages: Vec<ChatMessage>,
+    parsed_cache: Vec<Vec<MessageSegment>>,
     is_streaming: bool,
     voice_enabled: bool,
     revision: u64,
@@ -220,6 +221,7 @@ impl ChatPanel {
         Self {
             input: String::new(),
             messages: Vec::new(),
+            parsed_cache: Vec::new(),
             is_streaming: false,
             voice_enabled: false,
             revision: 0,
@@ -247,6 +249,11 @@ impl ChatPanel {
         Self {
             input: String::new(),
             messages: self.messages.clone(),
+            parsed_cache: if self.parsed_cache.len() == self.messages.len() {
+                self.parsed_cache.clone()
+            } else {
+                self.messages.iter().map(|m| parse_segments(&m.content)).collect()
+            },
             is_streaming: false,
             voice_enabled: self.voice_enabled,
             revision: 0,
@@ -267,6 +274,8 @@ impl ChatPanel {
         self.reply_count = 0;
         self.messages.clear();
         self.messages.shrink_to_fit();
+        self.parsed_cache.clear();
+        self.parsed_cache.shrink_to_fit();
         self.input.clear();
         self.revision = self.revision.saturating_add(1);
     }
@@ -275,7 +284,14 @@ impl ChatPanel {
         if self.messages.len() >= Self::MAX_MESSAGES {
             let overflow = self.messages.len() - Self::MAX_MESSAGES + 1;
             self.messages.drain(0..overflow);
+            if self.parsed_cache.len() >= overflow {
+                self.parsed_cache.drain(0..overflow);
+            } else {
+                self.parsed_cache.clear();
+            }
         }
+        let segs = parse_segments(&msg.content);
+        self.parsed_cache.push(segs);
         self.messages.push(msg);
         self.revision = self.revision.saturating_add(1);
     }
@@ -370,6 +386,7 @@ impl ChatPanel {
     pub fn load_messages(&mut self, msgs: Vec<ChatMessage>) {
         let start = msgs.len().saturating_sub(Self::MAX_MESSAGES);
         self.messages = msgs[start..].to_vec();
+        self.parsed_cache = self.messages.iter().map(|m| parse_segments(&m.content)).collect();
         self.revision = self.revision.saturating_add(1);
     }
 
@@ -482,7 +499,12 @@ impl ChatPanel {
                 }
                 let start = total.saturating_sub(100);
                 for i in start..total {
-                    self.show_message(ui, &self.messages[i], tx);
+                    let segs: &[MessageSegment] = if i < self.parsed_cache.len() {
+                        &self.parsed_cache[i]
+                    } else {
+                        &[]
+                    };
+                    self.show_message(ui, &self.messages[i], segs, tx);
                 }
                 if !self.stream_buf.is_empty() {
                     let tmp = ChatMessage {
@@ -490,7 +512,8 @@ impl ChatPanel {
                         content: format!("{}▍", self.stream_buf),
                         timestamp: chrono::Utc::now(),
                     };
-                    self.show_message(ui, &tmp, tx);
+                    let stream_segs = parse_segments(&tmp.content);
+                    self.show_message(ui, &tmp, &stream_segs, tx);
                 }
                 if self.is_streaming && self.stream_buf.is_empty() {
                     ui.horizontal(|ui| {
@@ -742,31 +765,11 @@ impl ChatPanel {
         }
     }
 
-    /// Split ```fences into (lang, code) blocks.
-    fn code_blocks(content: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let mut rest = content;
-        while let Some(s) = rest.find("```") {
-            let after = &rest[s + 3..];
-            let (lang, code_start) = match after.find('\n') {
-                Some(i) => (after[..i].trim().to_string(), &after[i + 1..]),
-                None => (String::new(), after),
-            };
-            match code_start.find("```") {
-                Some(e) => {
-                    out.push((lang, code_start[..e].trim_matches('\n').to_string()));
-                    rest = &code_start[e + 3..];
-                }
-                None => break,
-            }
-        }
-        out
-    }
-
     fn show_message(
         &self,
         ui: &mut egui::Ui,
         msg: &ChatMessage,
+        segments: &[MessageSegment],
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
     ) {
         let is_user = msg.role == "user";
@@ -784,12 +787,20 @@ impl ChatPanel {
         } else {
             "Assistant"
         };
-        let segments = parse_segments(&msg.content);
-        let blocks = if msg.content.contains("```") {
-            Self::code_blocks(&msg.content)
+        let fallback_segs;
+        let actual_segs = if segments.is_empty() && !msg.content.is_empty() {
+            fallback_segs = parse_segments(&msg.content);
+            &fallback_segs[..]
         } else {
-            Vec::new()
+            segments
         };
+        let code_blocks: Vec<(&str, &str)> = actual_segs
+            .iter()
+            .filter_map(|s| match s {
+                MessageSegment::Code { lang, code } => Some((lang.as_str(), code.as_str())),
+                _ => None,
+            })
+            .collect();
 
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
@@ -811,7 +822,7 @@ impl ChatPanel {
                         );
                     });
 
-                    for (seg_idx, seg) in segments.iter().enumerate() {
+                    for (seg_idx, seg) in actual_segs.iter().enumerate() {
                         match seg {
                             MessageSegment::Text(t) => {
                                 if !t.is_empty() {
@@ -869,10 +880,10 @@ impl ChatPanel {
                                 );
                             }
                         }
-                        if !is_user && msg.role == "assistant" && !blocks.is_empty() {
+                        if !is_user && msg.role == "assistant" && !code_blocks.is_empty() {
                             if ui.small_button("Copy code").clicked() {
-                                if let Some((_, code)) = blocks.iter().max_by_key(|(_, c)| c.len()) {
-                                    ui.ctx().copy_text(code.clone());
+                                if let Some((_, code)) = code_blocks.iter().max_by_key(|(_, c)| c.len()) {
+                                    ui.ctx().copy_text((*code).to_string());
                                 }
                             }
                             if ui
@@ -881,11 +892,11 @@ impl ChatPanel {
                                 .clicked()
                             {
                                 if let Some((lang, code)) =
-                                    blocks.iter().max_by_key(|(_, c)| c.len())
+                                    code_blocks.iter().max_by_key(|(_, c)| c.len())
                                 {
                                     let _ = tx.send(crate::ui::app::AppMessage::ChatToEditor(
-                                        code.clone(),
-                                        lang.clone(),
+                                        (*code).to_string(),
+                                        (*lang).to_string(),
                                     ));
                                 }
                             }
