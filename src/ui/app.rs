@@ -1163,6 +1163,11 @@ impl AiDashboardApp {
                             self.status = format!("Imported Swarm output into Slot {}", target_slot + 1);
                             self.audit("relay.import_chat", format!("slot {}", target_slot + 1));
                         }
+                    } else if let Some(rest) = s.strip_prefix("EDITOR_IMPORT:") {
+                        self.editor.load_imported_code(rest);
+                        self.tab = Tab::Editor;
+                        self.status = "Imported Swarm code into Editor IDE".to_string();
+                        self.audit("relay.import_editor", "editor".to_string());
                     } else {
                         self.status = s;
                     }
@@ -2040,6 +2045,7 @@ impl eframe::App for AiDashboardApp {
                         &self.api_client,
                         &self.tx,
                         &self.rt,
+                        self.settings.num_threads,
                     );
                 }
                 Tab::History => {

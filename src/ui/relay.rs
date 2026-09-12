@@ -524,7 +524,7 @@ impl RelayPanel {
         // Swarm Execution Flow Cards
         let total_steps = self.steps.len();
         for i in 0..total_steps {
-            self.show_step_card(ui, i, available_models);
+            self.show_step_card(ui, i, available_models, tx);
             if i + 1 < total_steps {
                 ui.horizontal(|ui| {
                     ui.add_space(32.0);
@@ -549,7 +549,7 @@ impl RelayPanel {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("👑 Final Swarm Synthesis Output")
+                            egui::RichText::new("👑 Consensual Swarm Synthesis")
                                 .size(15.0)
                                 .strong()
                                 .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
@@ -564,6 +564,14 @@ impl RelayPanel {
                                 .clicked()
                             {
                                 let _ = tx.send(AppMessage::Notice(format!("CHAT_IMPORT:0:{}", self.final_synthesis)));
+                            }
+                            ui.add_space(4.0);
+                            if ui
+                                .button(egui::RichText::new("💻 Send to Editor").size(11.0).color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)))
+                                .on_hover_text("Send code from final synthesis into the IDE Editor tab")
+                                .clicked()
+                            {
+                                let _ = tx.send(AppMessage::Notice(format!("EDITOR_IMPORT:{}", self.final_synthesis)));
                             }
                         });
                     });
@@ -584,9 +592,9 @@ impl RelayPanel {
                             let tag = if score >= 0.90 {
                                 "✔ Verified & Hardened"
                             } else if score >= 0.70 {
-                                "⚠ Minor Divergence Resolved"
+                                "⚠ Minor Divergence"
                             } else {
-                                "✖ Critical Defects Identified"
+                                "❌ Critique Flags Detected"
                             };
                             ui.label(egui::RichText::new(tag).size(11.0).color(score_color));
                         });
@@ -602,7 +610,7 @@ impl RelayPanel {
         }
     }
 
-    fn show_step_card(&mut self, ui: &mut egui::Ui, idx: usize, available_models: &[Model]) {
+    fn show_step_card(&mut self, ui: &mut egui::Ui, idx: usize, available_models: &[Model], tx: &mpsc::Sender<AppMessage>) {
         let is_active = self.active_step == Some(idx);
         let step = &mut self.steps[idx];
 
@@ -678,6 +686,9 @@ impl RelayPanel {
                         }
                         if ui.small_button("Copy Step").clicked() {
                             ui.ctx().copy_text(step.output.clone());
+                        }
+                        if ui.small_button("💻 To Editor").on_hover_text("Send this step's output into the Editor tab").clicked() {
+                            let _ = tx.send(AppMessage::Notice(format!("EDITOR_IMPORT:{}", step.output)));
                         }
                     });
                     if !step.collapsed {

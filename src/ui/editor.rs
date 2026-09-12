@@ -56,6 +56,12 @@ impl EditorPanel {
         self.coder_messages.push(msg);
     }
 
+    /// Load code imported from Swarm Relay (extracting code blocks if present).
+    pub fn load_imported_code(&mut self, content: &str) {
+        self.code = extract_code_or_raw(content);
+        self.file_status = "Imported from Swarm Relay".to_string();
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -65,6 +71,7 @@ impl EditorPanel {
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        num_threads: u32,
     ) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -125,7 +132,7 @@ impl EditorPanel {
         if self.show_coder_chat {
             ui.columns(2, |cols| {
                 self.show_editor_pane(&mut cols[0], tx);
-                self.show_coder_chat_pane(&mut cols[1], models, selected_model, system_prompt, api_client, tx, rt);
+                self.show_coder_chat_pane(&mut cols[1], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
             });
         } else {
             self.show_editor_pane(ui, tx);
@@ -297,6 +304,7 @@ impl EditorPanel {
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        num_threads: u32,
     ) {
         let frame = egui::Frame::NONE
             .fill(egui::Color32::from_rgb(0x0f, 0x14, 0x22))
@@ -351,25 +359,25 @@ impl EditorPanel {
                 if ui.small_button("⚡ Optimize").on_hover_text("Ask AI to optimize current code").clicked() {
                     self.send_coder_message(
                         "Refactor and optimize the current editor code for maximum performance, clean idiomatic style, and security.",
-                        models, selected_model, system_prompt, api_client, tx, rt
+                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
                     );
                 }
                 if ui.small_button("🐛 Fix Bugs").on_hover_text("Ask AI to identify and fix bugs").clicked() {
                     self.send_coder_message(
                         "Analyze the current editor code for bugs, logic errors, or memory leaks, and provide the corrected code.",
-                        models, selected_model, system_prompt, api_client, tx, rt
+                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
                     );
                 }
                 if ui.small_button("🧪 Tests").on_hover_text("Ask AI to generate tests").clicked() {
                     self.send_coder_message(
                         "Generate comprehensive unit tests covering edge cases for this code.",
-                        models, selected_model, system_prompt, api_client, tx, rt
+                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
                     );
                 }
                 if ui.small_button("📖 Explain").on_hover_text("Ask AI to explain this code").clicked() {
                     self.send_coder_message(
                         "Explain the architecture, design patterns, and algorithmic flow of this code in detail.",
-                        models, selected_model, system_prompt, api_client, tx, rt
+                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
                     );
                 }
             });
@@ -488,7 +496,7 @@ impl EditorPanel {
 
                     if send_btn.clicked() {
                         let prompt = self.coder_input.clone();
-                        self.send_coder_message(&prompt, models, selected_model, system_prompt, api_client, tx, rt);
+                        self.send_coder_message(&prompt, models, selected_model, system_prompt, api_client, tx, rt, num_threads);
                     }
 
                     if self.coder_is_streaming {
@@ -511,7 +519,7 @@ impl EditorPanel {
                 && !self.coder_is_streaming;
             if send_triggered {
                 let prompt = self.coder_input.clone();
-                self.send_coder_message(&prompt, models, selected_model, system_prompt, api_client, tx, rt);
+                self.send_coder_message(&prompt, models, selected_model, system_prompt, api_client, tx, rt, num_threads);
             }
         });
     }
@@ -681,7 +689,22 @@ impl EditorPanel {
             _ => Syntax::rust(),
         }
     }
+}
 
+/// Extracts code from a markdown block if present, or returns trimmed content.
+pub fn extract_code_or_raw(content: &str) -> String {
+    if let Some(start) = content.find("```") {
+        let after_ticks = &content[start + 3..];
+        let code_start = after_ticks.find('\n').map(|i| i + 1).unwrap_or(0);
+        let code_body = &after_ticks[code_start..];
+        if let Some(end) = code_body.find("```") {
+            return code_body[..end].trim().to_string();
+        }
+    }
+    content.trim().to_string()
+}
+
+impl EditorPanel {
     fn send_coder_message(
         &mut self,
         prompt: &str,
@@ -691,6 +714,7 @@ impl EditorPanel {
         api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        num_threads: u32,
     ) {
         let active_model = self.coder_model.clone().or_else(|| selected_model.clone());
         let Some(model_name) = active_model else {
@@ -790,11 +814,19 @@ impl EditorPanel {
                 }
             }
 
+            let options = if num_threads > 0 {
+                ChatOptions::lowram_with_threads(Some(num_threads))
+            } else {
+                let mut opts = ChatOptions::lowram();
+                opts.num_thread = Some(ChatOptions::optimal_threads());
+                opts
+            };
+
             let req = ChatRequest {
                 model: model_name,
                 messages,
                 stream: true,
-                options: Some(ChatOptions::lowram()),
+                options: Some(options),
                 keep_alive: Some("10m".to_string()),
             };
 
@@ -1039,5 +1071,24 @@ mod tests {
         assert_eq!(e.coder_messages.len(), 2);
         assert_eq!(e.coder_messages[1].role, "assistant");
         assert!(e.coder_messages[1].content.contains("fn hello"));
+    }
+
+    #[test]
+    fn test_extract_code_or_raw() {
+        let markdown = "Here is the implementation:\n```rust\nfn calculate(x: i32) -> i32 {\n    x * 2\n}\n```\nHope that helps!";
+        let extracted = extract_code_or_raw(markdown);
+        assert_eq!(extracted, "fn calculate(x: i32) -> i32 {\n    x * 2\n}");
+
+        let raw_code = "fn raw() { let y = 10; }";
+        assert_eq!(extract_code_or_raw(raw_code), raw_code);
+    }
+
+    #[test]
+    fn test_load_imported_code() {
+        let mut e = EditorPanel::new();
+        let relay_output = "## Consensual Synthesis\n```python\ndef solve_quantum_circuit():\n    return 42\n```";
+        e.load_imported_code(relay_output);
+        assert_eq!(e.code, "def solve_quantum_circuit():\n    return 42");
+        assert_eq!(e.file_status, "Imported from Swarm Relay");
     }
 }

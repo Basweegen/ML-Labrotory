@@ -243,9 +243,11 @@
   - [x] [COMPLETE] Integrate `StorageVault` into `save_session`, `load_sessions`, `log_audit`, `load_audit`, `save_settings`, `load_settings`, `save_pins`, `load_pins`.
   - [x] [COMPLETE] Integrate `StorageVault` into `ModelProfileNetwork::save` and `load` in `src/neural.rs`.
   - [x] [COMPLETE] Enforce `Copyright 2026 Sean M. Stow. All rights reserved.` on every modified file.
-  - [x] [COMPLETE] Add unit tests for relay role matching, pipeline abort, consensus calculation, vault roundtrip, tamper detection, legacy fallback, Argon2id derivation, session encryption, and neural encryption.
-  - [x] [COMPLETE] Run test suite: 61/61 unit tests passing cleanly with 0 errors.
-  - [x] [COMPLETE] Compile optimized release binary (`target/release/ai-dashboard`).
+  - [x] [COMPLETE] Implement `Send to Editor` and `To Editor` actions on Swarm Relay synthesis and step cards in `src/ui/relay.rs`.
+  - [x] [COMPLETE] Implement `extract_code_or_raw` and `load_imported_code` in `src/ui/editor.rs` for automatic markdown block extraction.
+  - [x] [COMPLETE] Wire hybrid CPU thread optimization (`lowram_with_threads`) into IDE Coder chat and quick action buttons in `src/ui/editor.rs` and `src/ui/app.rs`.
+  - [x] [COMPLETE] Add unit tests for `test_extract_code_or_raw` and `test_load_imported_code` (63 unit tests passing cleanly).
+  - [x] [COMPLETE] Compile updated release binary with optimizations.
 
 
 
