@@ -546,3 +546,60 @@
   - [x] [COMPLETE] Run automated tests (81/81 passed).
   - [x] [COMPLETE] Compile optimized release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 17 as COMPLETE.
+
+---
+
+## 18. Multi-Tier Safety Guardrails, Cryptographic Legal Waiver & Bring-Your-Own-Tool (BYOT) Architecture (2026-09-12)
+- **Pre-Implementation Security Scan & Architectural Directives:**
+  - Addressed operational requirements for general developers, programmers, and authorized cybersecurity/SOC specialists without bundling offensive exploit tools into the codebase.
+  - Implemented an extensible, secure Bring-Your-Own-Tool (BYOT) framework allowing users to configure, register, and launch any custom CLI utility, Python script, or GUI editor locally.
+  - Implemented multi-tier guardrails with dynamic system prompt conditioning and command containment.
+  - Implemented legally shielding operational waiver modal requiring typed verification (`"I ACCEPT"`) and cryptographic audit logging to unlock unrestricted SOC execution.
+
+- **Defensive Engineering & Components Implemented:**
+  1. **Guardrails Engine (`src/guardrails.rs`):**
+     - Defined `GuardrailTier`: `Heavy (Sandboxed)`, `Medium (Balanced)`, `None (Unrestricted / SOC)`.
+     - Injected dynamic LLM system prompt directives (`system_prompt_directive`) enforcing defensive mitigations in `Heavy`, software engineering guidance in `Medium`, and raw passthrough in `None`.
+     - Validated command lines (`validate_command`) blocking catastrophic root commands (`rm -rf /`, `mkfs`, fork bombs) and unverified network pipes (`curl | sh`, `wget | bash`, `nc -e`, etc.) in Heavy mode.
+     - Implemented `LEGAL_DISCLAIMER_TEXT`, `REQUIRED_WAIVER_CONFIRMATION` (`"I ACCEPT"`), and `compute_waiver_hash()`.
+  2. **Bring-Your-Own-Tool (BYOT) Engine (`src/tools.rs`):**
+     - Defined `UserTool`, `ToolExecutionType` (`TerminalDock`, `Detached`), and `SensitivityLevel` (`Low`, `High`).
+     - Variable substitution (`format_command_line`) supporting `{file}`, `{workspace}`, and `{input}` placeholders.
+     - `ToolRegistry` with starter presets: `editor` (`gedit`), `code` (`code`), `hexdump` (`xxd`), `format` (`rustfmt`).
+     - Detached process spawner (`spawn_detached`) for GUI text editors and external visualizers.
+  3. **Post-Quantum Encrypted Persistence (`src/storage.rs`):**
+     - Added `guardrail_tier`, `unrestricted_waiver_accepted`, and `unrestricted_waiver_timestamp` to `AppSettings`.
+     - Implemented AES-256-GCM encrypted persistence for user tools via `save_tools` and `load_tools`.
+  4. **Unified Command Engine Extension (`src/commands.rs`):**
+     - Extended `SlashCommand` with `Tools(ToolsCommand)` and `Guardrail(GuardrailCommand)`.
+     - Supported `/tools`, `/tools list`, `/tools run <id> [args]`, `/tools add <id> <cmd> [args] [--detached] [--high]`, and `/tools rm <id>`.
+     - Supported `/guardrail [status | heavy | medium | none]` across terminal CLI and in-chat GUI.
+  5. **Visual Tools Management Panel (`src/ui/tools_panel.rs`):**
+     - Added `ToolsPanel` supporting interactive tool cards, quick search/filtering, add/edit tool modal, and execution trigger.
+     - Interactive Guardrails switcher banner with color-coded safety badges.
+     - Modal for Legal Waiver requiring typed confirmation (`"I ACCEPT"`) with cryptographic audit logging.
+     - High-sensitivity confirmation dialog preventing accidental execution of critical binaries.
+  6. **UI Integration & Header Warning Badge (`src/ui/app.rs`, `src/ui/chat.rs`, `src/ui/settings.rs`):**
+     - Registered `Tab::Tools` (`🛠 Tools`) in the application navigation tabs.
+     - Displayed persistent `[⚠ UNRESTRICTED - AUTHORIZED USE ONLY]` crimson warning badge in the top header bar when in Unrestricted mode.
+     - Added 1-click execution chips under assistant code blocks in chat (`Gedit`, `VS Code`, `Hexdump`, `⚡ Run in Terminal`).
+     - Added Guardrails configuration section in the Settings tab.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 91/91 unit and integration tests passing (`cargo test --bin ai-dashboard`).
+  - Production release binary built and verified: `target/release/ai-dashboard` compiled cleanly with 0 errors.
+  - Strictly adheres to user global rules: Sean M. Stow copyright on every file, zero telemetry, local loopback, post-quantum AES-256-GCM encryption.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement `src/guardrails.rs` with multi-tier safety and legal waiver logic.
+  - [x] [COMPLETE] Implement `src/tools.rs` with BYOT registry, variable substitution, and detached execution.
+  - [x] [COMPLETE] Update `src/storage.rs` with encrypted tools persistence and settings fields.
+  - [x] [COMPLETE] Extend `src/commands.rs` with `/tools` and `/guardrail` CLI and chat commands.
+  - [x] [COMPLETE] Implement `src/ui/tools_panel.rs` with visual cards, add/edit modal, and waiver modal.
+  - [x] [COMPLETE] Update `src/ui/app.rs` with `Tab::Tools`, top header badge, and tool message handling.
+  - [x] [COMPLETE] Update `src/ui/chat.rs` with 1-click tool chips and slash command dispatch.
+  - [x] [COMPLETE] Update `src/ui/settings.rs` with Guardrail tier controls.
+  - [x] [COMPLETE] Run automated tests (91/91 passed).
+  - [x] [COMPLETE] Compile optimized release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Section 18 as COMPLETE.
+

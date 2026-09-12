@@ -172,6 +172,19 @@ pub fn render_code_block(
             );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let is_shell = matches!(lang.trim().to_lowercase().as_str(), "bash" | "sh" | "shell" | "zsh");
+                if is_shell {
+                    let run_btn = ui.small_button(
+                        egui::RichText::new("⚡ Run")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x34, 0xd3, 0x99)),
+                    ).on_hover_text("Execute shell command directly in the IDE Terminal Dock");
+                    if run_btn.clicked() {
+                        let _ = tx.send(crate::ui::app::AppMessage::TerminalRun(code.to_string()));
+                    }
+                    ui.add_space(6.0);
+                }
+
                 let send_btn = ui.small_button(
                     egui::RichText::new("📝 Send to Editor")
                         .size(11.0)
@@ -213,6 +226,32 @@ pub fn render_code_block(
                     )
                 );
             });
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("🛠 Quick Tools:").size(10.0).color(egui::Color32::from_rgb(0x77, 0x88, 0x99)));
+            let edit_chip = ui.small_button(egui::RichText::new("Gedit").size(10.0));
+            if edit_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "editor".to_string(),
+                    args: None,
+                });
+            }
+            let code_chip = ui.small_button(egui::RichText::new("VS Code").size(10.0));
+            if code_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "code".to_string(),
+                    args: None,
+                });
+            }
+            let hex_chip = ui.small_button(egui::RichText::new("Hexdump").size(10.0));
+            if hex_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "hexdump".to_string(),
+                    args: None,
+                });
+            }
+        });
     });
     ui.add_space(4.0);
 }
@@ -1094,6 +1133,12 @@ impl ChatPanel {
                         }
                         crate::commands::SlashCommand::Project(proj) => {
                             let _ = tx.send(crate::ui::app::AppMessage::WorkspaceProject(proj));
+                        }
+                        crate::commands::SlashCommand::Tools(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ToolsCommand(slot_idx, sub));
+                        }
+                        crate::commands::SlashCommand::Guardrail(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::GuardrailCommand(slot_idx, sub));
                         }
                     }
                     return;

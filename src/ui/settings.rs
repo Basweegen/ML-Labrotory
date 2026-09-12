@@ -246,6 +246,61 @@ impl SettingsPanel {
         ui.separator();
         ui.add_space(12.0);
 
+        // Safety Guardrails section
+        ui.label(egui::RichText::new("Safety Guardrails & Operational Scope").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Guardrail Tier:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(16.0);
+
+            let (r, g, b) = settings.guardrail_tier.badge_rgb();
+            egui::ComboBox::from_id_salt("guardrail_tier_selector")
+                .selected_text(
+                    egui::RichText::new(settings.guardrail_tier.label())
+                        .color(egui::Color32::from_rgb(r, g, b))
+                )
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.guardrail_tier, crate::guardrails::GuardrailTier::Heavy, "Heavy (Sandboxed)");
+                    ui.selectable_value(&mut settings.guardrail_tier, crate::guardrails::GuardrailTier::Medium, "Medium (Balanced)");
+                    if settings.unrestricted_waiver_accepted {
+                        ui.selectable_value(&mut settings.guardrail_tier, crate::guardrails::GuardrailTier::None, "None (Unrestricted / SOC)");
+                    }
+                });
+        });
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(settings.guardrail_tier.description())
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+
+        if settings.guardrail_tier == crate::guardrails::GuardrailTier::None {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "⚖ Legal Waiver Acknowledged: {}",
+                    settings.unrestricted_waiver_timestamp.map(|t| t.to_rfc3339()).unwrap_or_else(|| "Yes".to_string())
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0xee, 0x66, 0x66)),
+            );
+        } else if !settings.unrestricted_waiver_accepted {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Note: Switching to Unrestricted mode requires reviewing and typing 'I ACCEPT' in the Tools tab.")
+                    .size(11.0)
+                    .italics()
+                    .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+            );
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
         ui.label(
             egui::RichText::new(format!(
                 "ML Lab v{} \u{00B7} AGPL-3.0-or-later; commercial licenses: see README",

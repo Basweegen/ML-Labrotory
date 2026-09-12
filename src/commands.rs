@@ -22,6 +22,28 @@ pub enum ProjectCommand {
     Test,
 }
 
+/// User-registered external tools subcommands (BYOT)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolsCommand {
+    List,
+    Run { id: String, args: Option<String> },
+    Add {
+        id: String,
+        command: String,
+        args_template: String,
+        detached: bool,
+        high_sensitivity: bool,
+    },
+    Rm(String),
+}
+
+/// Guardrail management subcommands
+#[derive(Debug, Clone, PartialEq)]
+pub enum GuardrailCommand {
+    Status,
+    Set(crate::guardrails::GuardrailTier),
+}
+
 /// Supported slash commands
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlashCommand {
@@ -41,6 +63,8 @@ pub enum SlashCommand {
     Mv { src: String, dst: String },
     Ls(Option<String>),
     Project(ProjectCommand),
+    Tools(ToolsCommand),
+    Guardrail(GuardrailCommand),
 }
 
 /// Action to apply to app state or chat slot
@@ -54,6 +78,8 @@ pub enum CommandAction {
     SetThreads(u32),
     ExecuteTerminal(String),
     WorkspaceRefresh,
+    SwitchGuardrail(crate::guardrails::GuardrailTier),
+    RunTool { id: String, args: Option<String> },
 }
 
 /// Formatted output of command execution
@@ -241,6 +267,71 @@ impl SlashCommand {
                     other => Err(format!("Unknown project subcommand '{}'. Usage: /project [scaffold <type> <name> | build | test | run]", other)),
                 }
             }
+            "tools" | "tool" => {
+                let sub = parts.next().unwrap_or("list").to_ascii_lowercase();
+                match sub.as_str() {
+                    "list" | "ls" => Ok(Some(SlashCommand::Tools(ToolsCommand::List))),
+                    "run" | "exec" => {
+                        let id = match parts.next() {
+                            Some(i) => i.to_string(),
+                            None => return Err("Usage: /tools run <id> [args]".to_string()),
+                        };
+                        let rest = parts.collect::<Vec<&str>>().join(" ");
+                        let args = if rest.is_empty() { None } else { Some(rest) };
+                        Ok(Some(SlashCommand::Tools(ToolsCommand::Run { id, args })))
+                    }
+                    "rm" | "del" | "remove" => {
+                        let id = match parts.next() {
+                            Some(i) => i.to_string(),
+                            None => return Err("Usage: /tools rm <id>".to_string()),
+                        };
+                        Ok(Some(SlashCommand::Tools(ToolsCommand::Rm(id))))
+                    }
+                    "add" | "create" => {
+                        let id = match parts.next() {
+                            Some(i) => i.to_string(),
+                            None => return Err("Usage: /tools add <id> <command> [args_template] [--detached] [--high]".to_string()),
+                        };
+                        let cmd_part = match parts.next() {
+                            Some(c) => c.to_string(),
+                            None => return Err("Usage: /tools add <id> <command> [args_template] [--detached] [--high]".to_string()),
+                        };
+                        let mut detached = false;
+                        let mut high_sensitivity = false;
+                        let mut remaining = Vec::new();
+                        for p in parts {
+                            match p {
+                                "--detached" | "-d" | "--gui" => detached = true,
+                                "--high" | "-h" | "--confirm" => high_sensitivity = true,
+                                other => remaining.push(other),
+                            }
+                        }
+                        let args_template = if remaining.is_empty() {
+                            "{file}".to_string()
+                        } else {
+                            remaining.join(" ")
+                        };
+                        Ok(Some(SlashCommand::Tools(ToolsCommand::Add {
+                            id,
+                            command: cmd_part,
+                            args_template,
+                            detached,
+                            high_sensitivity,
+                        })))
+                    }
+                    unknown => Err(format!("Unknown tools subcommand '{}'. Usage: /tools [list | run <id> [args] | add <id> <cmd> [args] [--detached] [--high] | rm <id>]", unknown)),
+                }
+            }
+            "guardrail" | "guardrails" | "gr" => {
+                let sub = parts.next().unwrap_or("status").to_ascii_lowercase();
+                match sub.as_str() {
+                    "status" | "info" | "show" => Ok(Some(SlashCommand::Guardrail(GuardrailCommand::Status))),
+                    "heavy" | "sandbox" | "sandboxed" => Ok(Some(SlashCommand::Guardrail(GuardrailCommand::Set(crate::guardrails::GuardrailTier::Heavy)))),
+                    "medium" | "balanced" | "dev" => Ok(Some(SlashCommand::Guardrail(GuardrailCommand::Set(crate::guardrails::GuardrailTier::Medium)))),
+                    "none" | "unrestricted" | "soc" => Ok(Some(SlashCommand::Guardrail(GuardrailCommand::Set(crate::guardrails::GuardrailTier::None)))),
+                    unknown => Err(format!("Unknown guardrail tier '{}'. Usage: /guardrail [status | heavy | medium | none]", unknown)),
+                }
+            }
             unknown => Err(format!("Unknown command '/{}'. Type /help for available commands.", unknown)),
         }
     }
@@ -284,7 +375,9 @@ impl SlashCommand {
          • `/rm <path>` — Delete a file or folder in destination folder.\n\
          • `/mv <src> <dst>` — Move or rename file/folder in destination folder.\n\
          • `/ls [path]` — List files and subfolders in destination folder.\n\
-         • `/project scaffold <type> <name>` — Scaffold full-fledged application."
+         • `/project scaffold <type> <name>` — Scaffold full-fledged application.\n\
+         • `/tools [list|run|add|rm]` — Bring-Your-Own-Tool manager for custom CLI & GUI apps.\n\
+         • `/guardrail [status|heavy|medium|none]` — Safety guardrails & authorized SOC execution tier."
     }
 }
 
@@ -576,6 +669,115 @@ pub async fn run_headless_cli(cmd: SlashCommand) -> Result<()> {
                 println!("{}", res.format_display());
             }
         },
+        SlashCommand::Tools(sub) => match sub {
+            ToolsCommand::List => {
+                println!("=== External Tools Registry (BYOT) ===");
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let registry = storage.load_tools()?;
+                if registry.tools.is_empty() {
+                    println!("No tools registered. Use '/tools add <id> <cmd>' or configure via GUI.");
+                } else {
+                    for t in &registry.tools {
+                        println!(
+                            "• {:<12} [{:<3}] [{:<4}] Min Guardrail: {:<12}",
+                            t.id,
+                            t.execution_type.short_badge(),
+                            if t.sensitivity == crate::tools::SensitivityLevel::High { "CONF" } else { "1CLK" },
+                            t.min_guardrail.short_label(),
+                        );
+                        println!("  Command: {} {}", t.command, t.args_template);
+                        println!("  {}", t.description);
+                    }
+                }
+            }
+            ToolsCommand::Run { id, args } => {
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let registry = storage.load_tools()?;
+                let tool = match registry.get(&id) {
+                    Some(t) => t.clone(),
+                    None => {
+                        println!("Tool '{}' not found. Run '/tools list' to view registered tools.", id);
+                        return Ok(());
+                    }
+                };
+                let settings = storage.load_settings().unwrap_or_default();
+                let cwd = std::env::current_dir()?;
+                let cmd_line = tool.format_command_line(None, Some(cwd.to_str().unwrap_or(".")), args.as_deref());
+
+                // Validate against active guardrails
+                if let Err(violation) = settings.guardrail_tier.validate_command(&cmd_line, Some(&cwd)) {
+                    println!("❌ {}", violation);
+                    return Ok(());
+                }
+
+                println!("Launching tool '{}' ({})...", tool.name, tool.execution_type.label());
+                match tool.execution_type {
+                    crate::tools::ToolExecutionType::Detached => {
+                        match registry.spawn_detached(&id, None, Some(cwd.to_str().unwrap_or(".")), args.as_deref()) {
+                            Ok(pid) => println!("Tool process spawned in background (PID: {}).", pid),
+                            Err(e) => println!("Failed to spawn detached tool: {}", e),
+                        }
+                    }
+                    crate::tools::ToolExecutionType::TerminalDock => {
+                        let res = crate::workspace::CommandRunner::execute(&cmd_line, &cwd).await?;
+                        println!("{}", res.format_display());
+                    }
+                }
+            }
+            ToolsCommand::Add { id, command, args_template, detached, high_sensitivity } => {
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let mut registry = storage.load_tools()?;
+                let tool = crate::tools::UserTool {
+                    id: id.clone(),
+                    name: id.clone(),
+                    command,
+                    args_template,
+                    execution_type: if detached { crate::tools::ToolExecutionType::Detached } else { crate::tools::ToolExecutionType::TerminalDock },
+                    sensitivity: if high_sensitivity { crate::tools::SensitivityLevel::High } else { crate::tools::SensitivityLevel::Low },
+                    min_guardrail: crate::guardrails::GuardrailTier::Heavy,
+                    description: "User registered tool".to_string(),
+                };
+                registry.add_or_update(tool);
+                storage.save_tools(&registry)?;
+                println!("Tool '{}' registered successfully and encrypted into vault.", id);
+            }
+            ToolsCommand::Rm(id) => {
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let mut registry = storage.load_tools()?;
+                if registry.remove(&id) {
+                    storage.save_tools(&registry)?;
+                    println!("Tool '{}' removed from registry.", id);
+                } else {
+                    println!("Tool '{}' not found in registry.", id);
+                }
+            }
+        },
+        SlashCommand::Guardrail(sub) => match sub {
+            GuardrailCommand::Status => {
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let settings = storage.load_settings().unwrap_or_default();
+                println!("=== Active Guardrails Safety Tier ===");
+                println!("• Tier: {}", settings.guardrail_tier.label());
+                println!("• Description: {}", settings.guardrail_tier.description());
+                println!("• Unrestricted Waiver Accepted: {}", if settings.unrestricted_waiver_accepted { "YES" } else { "NO" });
+                if let Some(ts) = settings.unrestricted_waiver_timestamp {
+                    println!("• Waiver Acknowledged At: {}", ts);
+                }
+            }
+            GuardrailCommand::Set(tier) => {
+                let Some(storage) = open_storage_cli()? else { return Ok(()); };
+                let mut settings = storage.load_settings().unwrap_or_default();
+                if tier == crate::guardrails::GuardrailTier::None && !settings.unrestricted_waiver_accepted {
+                    println!("⚠ UNRESTRICTED GUARDRAILS REQUIREMENT");
+                    println!("{}", crate::guardrails::LEGAL_DISCLAIMER_TEXT);
+                    println!("\nTo enable Unrestricted mode, please review and accept the legal waiver in the ML Laboratory GUI (Tools / Settings tab) or type '{}' when prompted in the GUI.", crate::guardrails::REQUIRED_WAIVER_CONFIRMATION);
+                    return Ok(());
+                }
+                settings.guardrail_tier = tier;
+                storage.save_settings(&settings)?;
+                println!("Guardrail tier switched to: {}", tier.label());
+            }
+        },
     }
     Ok(())
 }
@@ -699,6 +901,51 @@ mod tests {
         assert_eq!(
             SlashCommand::parse("/project build").unwrap(),
             Some(SlashCommand::Project(ProjectCommand::Build))
+        );
+    }
+
+    #[test]
+    fn parse_tools_and_guardrail_commands() {
+        assert_eq!(
+            SlashCommand::parse("/tools").unwrap(),
+            Some(SlashCommand::Tools(ToolsCommand::List))
+        );
+        assert_eq!(
+            SlashCommand::parse("/tools list").unwrap(),
+            Some(SlashCommand::Tools(ToolsCommand::List))
+        );
+        assert_eq!(
+            SlashCommand::parse("/tools run editor src/main.rs").unwrap(),
+            Some(SlashCommand::Tools(ToolsCommand::Run {
+                id: "editor".to_string(),
+                args: Some("src/main.rs".to_string()),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/tools add nvim nvim {file} --detached --high").unwrap(),
+            Some(SlashCommand::Tools(ToolsCommand::Add {
+                id: "nvim".to_string(),
+                command: "nvim".to_string(),
+                args_template: "{file}".to_string(),
+                detached: true,
+                high_sensitivity: true,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/tools rm nvim").unwrap(),
+            Some(SlashCommand::Tools(ToolsCommand::Rm("nvim".to_string())))
+        );
+        assert_eq!(
+            SlashCommand::parse("/guardrail").unwrap(),
+            Some(SlashCommand::Guardrail(GuardrailCommand::Status))
+        );
+        assert_eq!(
+            SlashCommand::parse("/guardrail heavy").unwrap(),
+            Some(SlashCommand::Guardrail(GuardrailCommand::Set(crate::guardrails::GuardrailTier::Heavy)))
+        );
+        assert_eq!(
+            SlashCommand::parse("/guardrail none").unwrap(),
+            Some(SlashCommand::Guardrail(GuardrailCommand::Set(crate::guardrails::GuardrailTier::None)))
         );
     }
 }

@@ -8,3 +8,4 @@ pub mod neural_viz;
 pub mod relay;
 pub mod settings;
 pub mod skills;
+pub mod tools_panel;

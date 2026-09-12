@@ -23,6 +23,7 @@ use crate::ui::neural_viz::NeuralVizPanel;
 use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
 use crate::ui::skills::SkillsPanel;
+use crate::ui::tools_panel::ToolsPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
@@ -69,6 +70,11 @@ pub enum AppMessage {
     WorkspaceMv { src: String, dst: String },
     WorkspaceLs(Option<String>),
     WorkspaceProject(crate::commands::ProjectCommand),
+    ToolsCommand(usize, crate::commands::ToolsCommand),
+    GuardrailCommand(usize, crate::commands::GuardrailCommand),
+    RunTool { id: String, args: Option<String> },
+    #[allow(dead_code)]
+    SetGuardrailTier(crate::guardrails::GuardrailTier),
     #[allow(dead_code)]
     DeployApp { template: crate::workspace::AppTemplateType, name: String },
     #[allow(dead_code)]
@@ -126,9 +132,18 @@ impl ModelRole {
     }
 }
 
-/// Shared identity + memory + slot role, sent as the system prompt.
-fn compose_system_prompt(persona: &str, memory: &str, slot: &ModelSlot) -> String {
+/// Shared identity + memory + slot role + guardrail directive, sent as the system prompt.
+fn compose_system_prompt(
+    persona: &str,
+    memory: &str,
+    slot: &ModelSlot,
+    guardrail_tier: crate::guardrails::GuardrailTier,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
+    let directive = guardrail_tier.system_prompt_directive();
+    if !directive.trim().is_empty() {
+        parts.push(directive.trim().to_string());
+    }
     if !persona.trim().is_empty() {
         parts.push(persona.trim().to_string());
     }
@@ -232,6 +247,7 @@ enum Tab {
     History,
     Neural,
     Skills,
+    Tools,
     Settings,
 }
 
@@ -246,6 +262,7 @@ impl Tab {
             Tab::History => "History",
             Tab::Neural => "Neural",
             Tab::Skills => "Skills",
+            Tab::Tools => "Tools",
             Tab::Settings => "Settings",
         }
     }
@@ -260,6 +277,7 @@ impl Tab {
             Tab::History => "📜",
             Tab::Neural => "🧠",
             Tab::Skills => "⚡",
+            Tab::Tools => "🛠",
             Tab::Settings => "⚙",
         }
     }
@@ -274,6 +292,7 @@ impl Tab {
             Tab::History,
             Tab::Neural,
             Tab::Skills,
+            Tab::Tools,
             Tab::Settings,
         ]
     }
@@ -309,6 +328,7 @@ pub struct AiDashboardApp {
     models_panel: ModelsPanel,
     history: HistoryPanel,
     skills_panel: SkillsPanel,
+    tools_panel: ToolsPanel,
     settings_panel: SettingsPanel,
     settings: AppSettings,
     storage: Option<Storage>,
@@ -364,6 +384,7 @@ impl AiDashboardApp {
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
             skills_panel: SkillsPanel::new(),
+            tools_panel: ToolsPanel::new(),
             settings_panel: SettingsPanel::new(),
             settings,
             storage,
@@ -948,6 +969,14 @@ impl AiDashboardApp {
                                 crate::commands::SlashCommand::Project(proj) => {
                                     let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceProject(proj));
                                 }
+                                crate::commands::SlashCommand::Tools(sub) => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::ToolsCommand(f0, sub));
+                                }
+                                crate::commands::SlashCommand::Guardrail(sub) => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::GuardrailCommand(f0, sub));
+                                }
                             }
                             continue;
                         }
@@ -976,7 +1005,7 @@ impl AiDashboardApp {
                         let model = self.slots[idx].model.clone();
                         let role_prompt = {
                             let s = &self.slots[idx];
-                            compose_system_prompt(&persona, &memory, s)
+                            compose_system_prompt(&persona, &memory, s, self.settings.guardrail_tier)
                         };
                         if let Some(slot) = self.slots.get_mut(idx) {
                             slot.chat.num_threads = self.settings.num_threads;
@@ -1540,6 +1569,159 @@ impl AiDashboardApp {
                         }
                     }
                 }
+                AppMessage::ToolsCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::ToolsCommand::List => {
+                            let mut msg = String::from("### 🛠 **External Tools Registry (BYOT)**\n\n");
+                            for t in &self.tools_panel.registry.tools {
+                                let (sens, _) = match t.sensitivity {
+                                    crate::tools::SensitivityLevel::Low => ("1-Click Run", ()),
+                                    crate::tools::SensitivityLevel::High => ("Confirm Req", ()),
+                                };
+                                msg.push_str(&format!(
+                                    "• **`{}`** `[{}]` `[{}]` Min: `{}`\n  `{} {}`\n  _{}_\n\n",
+                                    t.id,
+                                    t.execution_type.short_badge(),
+                                    sens,
+                                    t.min_guardrail.short_label(),
+                                    t.command,
+                                    t.args_template,
+                                    t.description
+                                ));
+                            }
+                            msg.push_str("To run: `/tools run <id> [args]` or switch to the **🛠 Tools** tab.");
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                        crate::commands::ToolsCommand::Run { id, args } => {
+                            let _ = self.tx.send(AppMessage::RunTool { id, args });
+                        }
+                        crate::commands::ToolsCommand::Add { id, command, args_template, detached, high_sensitivity } => {
+                            let tool = crate::tools::UserTool {
+                                id: id.clone(),
+                                name: id.clone(),
+                                command,
+                                args_template,
+                                execution_type: if detached { crate::tools::ToolExecutionType::Detached } else { crate::tools::ToolExecutionType::TerminalDock },
+                                sensitivity: if high_sensitivity { crate::tools::SensitivityLevel::High } else { crate::tools::SensitivityLevel::Low },
+                                min_guardrail: crate::guardrails::GuardrailTier::Heavy,
+                                description: "User established tool".to_string(),
+                            };
+                            self.tools_panel.registry.add_or_update(tool);
+                            self.tools_panel.save(&self.storage);
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&format!("🛠 **Tool `{}` registered and encrypted into vault.**", id));
+                            }
+                        }
+                        crate::commands::ToolsCommand::Rm(id) => {
+                            if self.tools_panel.registry.remove(&id) {
+                                self.tools_panel.save(&self.storage);
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(&format!("🛠 **Tool `{}` removed from registry.**", id));
+                                }
+                            } else if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&format!("⚠ Tool `{}` not found in registry.", id));
+                            }
+                        }
+                    }
+                }
+                AppMessage::GuardrailCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::GuardrailCommand::Status => {
+                            let msg = format!(
+                                "### 🛡 **Active Safety Guardrails**\n\n\
+                                 • **Tier:** `{}`\n\
+                                 • **Description:** {}\n\
+                                 • **Unrestricted Waiver Accepted:** `{}`\n\n\
+                                 Use `/guardrail [heavy | medium | none]` or the **🛠 Tools** tab to modify.",
+                                self.settings.guardrail_tier.label(),
+                                self.settings.guardrail_tier.description(),
+                                if self.settings.unrestricted_waiver_accepted { "YES" } else { "NO" }
+                            );
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                        crate::commands::GuardrailCommand::Set(tier) => {
+                            if tier == crate::guardrails::GuardrailTier::None && !self.settings.unrestricted_waiver_accepted {
+                                self.tab = Tab::Tools;
+                                self.tools_panel.show_waiver_modal = true;
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(
+                                        "⚠ **Unrestricted Guardrails require typed waiver acceptance.**\n\
+                                         Opening legal authorization modal in the **🛠 Tools** tab."
+                                    );
+                                }
+                            } else {
+                                self.settings.guardrail_tier = tier;
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.save_settings(&self.settings);
+                                }
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(&format!("🛡 **Safety guardrail tier set to `{}`.**", tier.label()));
+                                }
+                                self.status = format!("Guardrails set to {}", tier.short_label());
+                            }
+                        }
+                    }
+                }
+                AppMessage::RunTool { id, args } => {
+                    let tool_opt = self.tools_panel.registry.get(&id).cloned();
+                    let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(tool) = tool_opt {
+                        let ws_root = self.editor.workspace.root_path.to_str();
+                        let active_file = if self.editor.file_path.is_empty() { None } else { Some(self.editor.file_path.as_str()) };
+                        let cmd_line = tool.format_command_line(active_file, ws_root, args.as_deref());
+
+                        // Validate against active guardrails
+                        let ws_path = Some(self.editor.workspace.root_path.as_path());
+                        if let Err(violation) = self.settings.guardrail_tier.validate_command(&cmd_line, ws_path) {
+                            if let Some(slot) = self.slots.get_mut(f) {
+                                slot.chat.push_system_note(&format!("❌ **Guardrail Block:**\n{}", violation));
+                            }
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("guardrail.blocked", &format!("tool {}: {}", id, violation));
+                            }
+                            self.status = "Command blocked by active guardrail tier".to_string();
+                        } else {
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("tool.exec", &format!("{}: {}", id, cmd_line));
+                            }
+                            match tool.execution_type {
+                                crate::tools::ToolExecutionType::Detached => {
+                                    match self.tools_panel.registry.spawn_detached(&id, active_file, ws_root, args.as_deref()) {
+                                        Ok(pid) => {
+                                            if let Some(slot) = self.slots.get_mut(f) {
+                                                slot.chat.push_system_note(&format!("🛠 **Spawned `{}`** (PID: `{}`) in detached process.", tool.name, pid));
+                                            }
+                                            self.status = format!("Tool '{}' spawned (PID: {})", tool.name, pid);
+                                        }
+                                        Err(e) => {
+                                            if let Some(slot) = self.slots.get_mut(f) {
+                                                slot.chat.push_system_note(&format!("❌ **Tool Error:** {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                                crate::tools::ToolExecutionType::TerminalDock => {
+                                    if let Some(slot) = self.slots.get_mut(f) {
+                                        slot.chat.push_system_note(&format!("🛠 **Dispatched `{}` to Terminal Dock:**\n`{}`", tool.name, cmd_line));
+                                    }
+                                    let _ = self.tx.send(AppMessage::TerminalRun(cmd_line));
+                                }
+                            }
+                        }
+                    } else if let Some(slot) = self.slots.get_mut(f) {
+                        slot.chat.push_system_note(&format!("⚠ Tool `{}` not found in registry. Type `/tools list` to check registered tools.", id));
+                    }
+                }
+                AppMessage::SetGuardrailTier(tier) => {
+                    self.settings.guardrail_tier = tier;
+                    if let Some(st) = self.storage.as_ref() {
+                        let _ = st.save_settings(&self.settings);
+                    }
+                }
                 AppMessage::TerminalRun(cmd_line) => {
                     self.editor.run_terminal_command(&cmd_line, &self.tx, &self.rt);
                     self.tab = Tab::Editor;
@@ -1749,6 +1931,25 @@ impl AiDashboardApp {
                         .size(12.0)
                         .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                 );
+                ui.separator();
+                let (gr_r, gr_g, gr_b) = self.settings.guardrail_tier.badge_rgb();
+                let gr_badge = if self.settings.guardrail_tier == crate::guardrails::GuardrailTier::None {
+                    "⚠ [UNRESTRICTED - AUTHORIZED USE ONLY]"
+                } else {
+                    match self.settings.guardrail_tier {
+                        crate::guardrails::GuardrailTier::Heavy => "[🛡 Guardrail: Heavy]",
+                        crate::guardrails::GuardrailTier::Medium => "[🛡 Guardrail: Medium]",
+                        crate::guardrails::GuardrailTier::None => "[⚠ UNRESTRICTED]",
+                    }
+                };
+                if ui.small_button(
+                    egui::RichText::new(gr_badge)
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(gr_r, gr_g, gr_b))
+                ).on_hover_text("Click to configure Safety Guardrails and External Tools in the Tools tab").clicked() {
+                    self.tab = Tab::Tools;
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -2343,7 +2544,7 @@ impl AiDashboardApp {
                             }
                         } else {
                             let slot_model = self.slots[f].model.clone();
-                            let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f]);
+                            let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f], self.settings.guardrail_tier);
                             self.slots[f].chat.send_message(&self.models, &slot_model, &role_prompt, f, &self.api_client, &self.tx, &self.rt);
                         }
                     }
@@ -2360,7 +2561,7 @@ impl AiDashboardApp {
                             let prompt = self.slots[f].chat.take_broadcast().unwrap_or_default();
                             if !prompt.is_empty() {
                                 let slot_model = self.slots[slot_idx].model.clone();
-                                let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[slot_idx]);
+                                let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[slot_idx], self.settings.guardrail_tier);
                                 self.slots[slot_idx].chat.send_prompt(prompt, &self.models, &slot_model, &role_prompt, slot_idx, &self.api_client, &self.tx, &self.rt);
                             }
                         }
@@ -2391,7 +2592,7 @@ impl AiDashboardApp {
                         }
                     } else {
                         let slot_model = self.slots[f].model.clone();
-                        let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f]);
+                        let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f], self.settings.guardrail_tier);
                         self.slots[f].chat.send_message(&self.models, &slot_model, &role_prompt, f, &self.api_client, &self.tx, &self.rt);
                     }
                 }
@@ -2427,6 +2628,7 @@ impl AiDashboardApp {
                 &self.settings.persona,
                 &self.settings.memory,
                 &self.slots[f],
+                self.settings.guardrail_tier,
             );
             let slot_model = self.slots[f].model.clone();
             let history_depth = self.settings.history_depth.max(1) as usize;
@@ -2695,6 +2897,15 @@ impl eframe::App for AiDashboardApp {
                 }
                 Tab::Skills => {
                     self.skills_panel.show(ui, &self.storage, &self.tx, self.focused_slot);
+                }
+                Tab::Tools => {
+                    let ws_root = self.editor.workspace.root_path.to_str();
+                    let focused = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    let mut settings = self.settings.clone();
+                    let storage = self.storage.take();
+                    self.tools_panel.show(ui, &storage, &mut settings, &self.tx, focused, ws_root);
+                    self.storage = storage;
+                    self.settings = settings;
                 }
                 Tab::Compare => {
                     self.show_compare(ui);

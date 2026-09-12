@@ -134,6 +134,15 @@ pub struct AppSettings {
     /// CPU threads used for Ollama inference. 0 = auto-detect optimal threads.
     #[serde(default)]
     pub num_threads: u32,
+    /// Active Guardrail safety tier.
+    #[serde(default)]
+    pub guardrail_tier: crate::guardrails::GuardrailTier,
+    /// Whether the legal liability waiver for Unrestricted tier was acknowledged.
+    #[serde(default)]
+    pub unrestricted_waiver_accepted: bool,
+    /// Timestamp when the legal waiver was signed.
+    #[serde(default)]
+    pub unrestricted_waiver_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_history_depth() -> u32 {
@@ -163,6 +172,9 @@ impl Default for AppSettings {
             slot_layout: Vec::new(),
             allow_remote: false,
             num_threads: 0,
+            guardrail_tier: crate::guardrails::GuardrailTier::Heavy,
+            unrestricted_waiver_accepted: false,
+            unrestricted_waiver_timestamp: None,
         }
     }
 }
@@ -569,6 +581,26 @@ impl Storage {
         }
     }
 
+    pub fn save_tools(&self, registry: &crate::tools::ToolRegistry) -> Result<()> {
+        let raw = bincode::serialize(registry)?;
+        let encrypted = self.vault.encrypt(&raw)?;
+        self.config_tree.insert("tools_registry", encrypted)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    pub fn load_tools(&self) -> Result<crate::tools::ToolRegistry> {
+        if let Some(value) = self.config_tree.get("tools_registry")? {
+            let decrypted = self.vault.decrypt(&value).unwrap_or_else(|_| value.to_vec());
+            match bincode::deserialize::<crate::tools::ToolRegistry>(&decrypted) {
+                Ok(reg) => Ok(reg),
+                Err(_) => Ok(crate::tools::ToolRegistry::with_defaults()),
+            }
+        } else {
+            Ok(crate::tools::ToolRegistry::with_defaults())
+        }
+    }
+
     pub fn save_skill(&self, skill: &Skill) -> Result<()> {
         let key = skill.id.as_bytes().to_vec();
         let sanitized = skill.clone().sanitize();
@@ -911,5 +943,37 @@ mod tests {
         st.delete_skill(skill_id).expect("delete");
         let reloaded = st.load_skills().expect("reload");
         assert!(!reloaded.iter().any(|s| s.id == skill_id));
+    }
+
+    #[test]
+    fn tools_encrypted_roundtrip() {
+        let _guard = store_lock();
+        let dir = std::env::temp_dir().join(format!("aidash-test-tools-enc-{}", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
+
+        let mut reg = st.load_tools().expect("load default tools");
+        assert!(reg.get("editor").is_some());
+
+        reg.add_or_update(crate::tools::UserTool {
+            id: "wireshark".to_string(),
+            name: "Packet Analyzer".to_string(),
+            command: "wireshark".to_string(),
+            args_template: "-r {file}".to_string(),
+            execution_type: crate::tools::ToolExecutionType::Detached,
+            sensitivity: crate::tools::SensitivityLevel::High,
+            min_guardrail: crate::guardrails::GuardrailTier::Medium,
+            description: "Deep packet inspection".to_string(),
+        });
+
+        st.save_tools(&reg).expect("save tools");
+
+        // Inspect raw blob: must be encrypted
+        let raw = st.config_tree.get("tools_registry").unwrap().unwrap();
+        assert_eq!(&raw[0..4], ENVELOPE_MAGIC);
+
+        let loaded = st.load_tools().expect("load tools");
+        let ws = loaded.get("wireshark").expect("wireshark found");
+        assert_eq!(ws.command, "wireshark");
+        assert_eq!(ws.sensitivity, crate::tools::SensitivityLevel::High);
     }
 }

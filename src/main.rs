@@ -8,6 +8,8 @@ mod resources;
 mod security;
 pub mod commands;
 pub mod workspace;
+pub mod guardrails;
+pub mod tools;
 
 use eframe::egui;
 use ui::app::AiDashboardApp;
