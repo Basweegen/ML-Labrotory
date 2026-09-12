@@ -7,6 +7,7 @@ mod neural;
 mod resources;
 mod security;
 pub mod commands;
+pub mod workspace;
 
 use eframe::egui;
 use ui::app::AiDashboardApp;

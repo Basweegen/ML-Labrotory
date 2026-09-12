@@ -1,21 +1,32 @@
 // Copyright 2026 Sean M. Stow. All rights reserved.
+//! AI Code Studio & Workspace IDE
+//!
+//! Integrates complete file and folder management (mkdir, touch, delete, move, edit),
+//! customizable destination folder selection, an interactive hierarchical file tree,
+//! asynchronous terminal command execution dock, and autonomous full-fledged
+//! application scaffolding and deployment.
+
 use eframe::egui;
 use egui_code_editor::{CodeEditor, Syntax};
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient};
 use crate::storage::ChatMessage;
+use crate::workspace::{
+    AppScaffolder, AppTemplateType, CommandResult, CommandRunner, DeployReport, FsNode, WorkspaceManager,
+};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
 
 pub struct EditorPanel {
-    code: String,
-    language: String,
+    pub code: String,
+    pub language: String,
     suggestion_id: usize,
     pending_suggestion: Option<String>,
     suggestion_buf: String,
     show_diff: bool,
     gate: crate::security::ConfirmGate,
-    file_path: String,
-    file_status: String,
+    pub file_path: String,
+    pub file_status: String,
     // AI Coder Chatbox state
     pub coder_model: Option<String>,
     pub coder_input: String,
@@ -25,10 +36,45 @@ pub struct EditorPanel {
     pub coder_stream_buf: String,
     pub show_coder_chat: bool,
     pub include_editor_context: bool,
+
+    // Workspace & File Management State
+    pub workspace: WorkspaceManager,
+    pub show_workspace_tree: bool,
+    pub selected_node_path: Option<PathBuf>,
+    pub file_search_query: String,
+    pub show_destination_modal: bool,
+    pub destination_input: String,
+    pub new_file_dialog_open: bool,
+    pub new_file_input: String,
+    pub new_folder_dialog_open: bool,
+    pub new_folder_input: String,
+    pub rename_dialog_open: bool,
+    pub rename_target: Option<PathBuf>,
+    pub rename_input: String,
+    pub delete_confirm_open: bool,
+    pub delete_target: Option<PathBuf>,
+
+    // Terminal & Command Runner State
+    pub show_terminal: bool,
+    pub terminal_input: String,
+    pub terminal_history: Vec<String>,
+    pub terminal_logs: Vec<CommandResult>,
+    pub terminal_is_running: bool,
+    pub terminal_running_cmd: String,
+
+    // Application Scaffolding & Deployment State
+    pub show_scaffold_modal: bool,
+    pub scaffold_selected_template: AppTemplateType,
+    pub scaffold_app_name: String,
+    pub last_deploy_report: Option<DeployReport>,
 }
 
 impl EditorPanel {
     pub fn new() -> Self {
+        let ws_dest = WorkspaceManager::default_destination();
+        let ws = WorkspaceManager::new(ws_dest.clone());
+        let default_file = ws_dest.join("main.rs");
+
         Self {
             code: "// Start coding with AI assistance\nfn main() {\n    println!(\"Hello, world!\");\n}".to_string(),
             language: "rust".to_string(),
@@ -37,7 +83,7 @@ impl EditorPanel {
             suggestion_buf: String::new(),
             show_diff: true,
             gate: crate::security::ConfirmGate::new(),
-            file_path: Self::default_path(),
+            file_path: default_file.to_string_lossy().to_string(),
             file_status: String::new(),
             coder_model: None,
             coder_input: String::new(),
@@ -47,6 +93,34 @@ impl EditorPanel {
             coder_stream_buf: String::new(),
             show_coder_chat: true,
             include_editor_context: true,
+
+            workspace: ws,
+            show_workspace_tree: true,
+            selected_node_path: None,
+            file_search_query: String::new(),
+            show_destination_modal: false,
+            destination_input: ws_dest.to_string_lossy().to_string(),
+            new_file_dialog_open: false,
+            new_file_input: String::new(),
+            new_folder_dialog_open: false,
+            new_folder_input: String::new(),
+            rename_dialog_open: false,
+            rename_target: None,
+            rename_input: String::new(),
+            delete_confirm_open: false,
+            delete_target: None,
+
+            show_terminal: true,
+            terminal_input: String::new(),
+            terminal_history: Vec::new(),
+            terminal_logs: Vec::new(),
+            terminal_is_running: false,
+            terminal_running_cmd: String::new(),
+
+            show_scaffold_modal: false,
+            scaffold_selected_template: AppTemplateType::RustHighPerformance,
+            scaffold_app_name: "my_application".to_string(),
+            last_deploy_report: None,
         }
     }
 
@@ -62,6 +136,187 @@ impl EditorPanel {
         self.file_status = "Imported from Swarm Relay".to_string();
     }
 
+    /// Load a file from absolute or relative path into editor
+    pub fn load_file_from_path(&mut self, path: &Path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                self.code = content;
+                self.file_path = path.to_string_lossy().to_string();
+                self.selected_node_path = Some(path.to_path_buf());
+                self.language = Self::guess_language_for(path);
+                self.file_status = format!("Loaded {} ({} bytes)", path.display(), self.code.len());
+            }
+            Err(e) => {
+                self.file_status = format!("Error loading file: {}", e);
+            }
+        }
+    }
+
+    /// Guess syntax highlighting language based on file extension
+    pub fn guess_language_for(path: &Path) -> String {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        match ext.as_str() {
+            "rs" => "rust".to_string(),
+            "py" => "python".to_string(),
+            "sh" | "bash" => "shell".to_string(),
+            "js" => "javascript".to_string(),
+            "ts" => "typescript".to_string(),
+            "c" | "h" => "c".to_string(),
+            "cpp" | "hpp" | "cc" => "cpp".to_string(),
+            "go" => "go".to_string(),
+            "java" => "java".to_string(),
+            "sql" => "sql".to_string(),
+            "lua" => "lua".to_string(),
+            "asm" | "s" => "asm".to_string(),
+            _ => "rust".to_string(),
+        }
+    }
+
+    /// Execute terminal command asynchronously
+    pub fn run_terminal_command(
+        &mut self,
+        cmd: &str,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
+    ) {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() || self.terminal_is_running {
+            return;
+        }
+
+        self.terminal_history.push(trimmed.to_string());
+        self.terminal_is_running = true;
+        self.terminal_running_cmd = trimmed.to_string();
+        self.terminal_input.clear();
+
+        let working_dir = self.workspace.root_path.clone();
+        let cmd_str = trimmed.to_string();
+        let tx = tx.clone();
+
+        rt.spawn(async move {
+            let res = match CommandRunner::execute(&cmd_str, &working_dir).await {
+                Ok(r) => r,
+                Err(e) => CommandResult {
+                    cmd: cmd_str,
+                    working_dir,
+                    exit_code: Some(1),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("Execution failed: {}", e),
+                    duration_ms: 0,
+                    executed_at: chrono::Utc::now(),
+                },
+            };
+            let _ = tx.send(crate::ui::app::AppMessage::TerminalFinished(res));
+        });
+    }
+
+    pub fn on_terminal_finished(&mut self, result: CommandResult) {
+        self.terminal_is_running = false;
+        self.terminal_running_cmd.clear();
+        self.terminal_logs.push(result);
+        if self.terminal_logs.len() > 100 {
+            self.terminal_logs.remove(0);
+        }
+    }
+
+    pub fn run_current_file(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        let p = Path::new(&self.file_path);
+        if let Some(cmd) = CommandRunner::recommend_command(p) {
+            self.run_terminal_command(&cmd, tx, rt);
+        } else {
+            self.file_status = format!("No default run command for {:?}", p.file_name());
+        }
+    }
+
+    pub fn run_build(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        let cmd = if self.workspace.root_path.join("Cargo.toml").exists() {
+            "cargo build"
+        } else if self.workspace.root_path.join("package.json").exists() {
+            "npm run build"
+        } else {
+            "echo 'No build configuration found'"
+        };
+        self.run_terminal_command(cmd, tx, rt);
+    }
+
+    pub fn run_test(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        let cmd = if self.workspace.root_path.join("Cargo.toml").exists() {
+            "cargo test"
+        } else if self.workspace.root_path.join("pytest.ini").exists()
+            || self.workspace.root_path.join("requirements.txt").exists()
+        {
+            "python3 -m pytest tests/ || pytest"
+        } else if self.workspace.root_path.join("package.json").exists() {
+            "npm test"
+        } else {
+            "echo 'No test configuration found'"
+        };
+        self.run_terminal_command(cmd, tx, rt);
+    }
+
+    pub fn run_setup(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        self.run_terminal_command("./setup.sh", tx, rt);
+    }
+
+    pub fn run_start(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        self.run_terminal_command("./start.sh", tx, rt);
+    }
+
+    /// Autonomous Full-Fledged Application Scaffolding
+    pub fn scaffold_app(
+        &mut self,
+        template: AppTemplateType,
+        app_name: &str,
+    ) -> anyhow::Result<DeployReport> {
+        let report = AppScaffolder::scaffold(template, &self.workspace.root_path, app_name)?;
+        self.last_deploy_report = Some(report.clone());
+        let _ = self.workspace.refresh_tree();
+
+        // Load entry file into editor if present
+        let entry_candidates = [
+            report.target_dir.join("src/main.rs"),
+            report.target_dir.join("app/main.py"),
+            report.target_dir.join("src/app.js"),
+            report.target_dir.join("cli.py"),
+        ];
+        for candidate in &entry_candidates {
+            if candidate.exists() {
+                self.load_file_from_path(candidate);
+                break;
+            }
+        }
+
+        self.file_status = format!(
+            "Scaffolded full-fledged app '{}' ({} files, {} dirs) in {}",
+            report.app_name,
+            report.created_files.len(),
+            report.created_dirs.len(),
+            report.target_dir.display()
+        );
+
+        Ok(report)
+    }
+
+    /// Deploy multi-file code blocks into destination folder
+    pub fn deploy_multi_file_from_text(&mut self, raw_text: &str) -> anyhow::Result<DeployReport> {
+        let report = AppScaffolder::deploy_multi_file_code(raw_text, &self.workspace.root_path)?;
+        self.last_deploy_report = Some(report.clone());
+        let _ = self.workspace.refresh_tree();
+
+        if let Some(first) = report.created_files.first() {
+            self.load_file_from_path(first);
+        }
+
+        self.file_status = format!(
+            "Deployed {} files into destination: {}",
+            report.created_files.len(),
+            report.target_dir.display()
+        );
+
+        Ok(report)
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -73,100 +328,381 @@ impl EditorPanel {
         rt: &Runtime,
         num_threads: u32,
     ) {
+        self.render_modals(ui, tx, rt);
+
+        // Top Control Bar
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.heading(
-                egui::RichText::new("AI Code Studio & IDE")
-                    .size(20.0)
+                egui::RichText::new("AI Code Studio & Workspace IDE")
+                    .size(19.0)
                     .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
             );
+
+            ui.add_space(8.0);
+            let dest_label = format!(
+                "📂 Dest: {}",
+                self.workspace.root_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_else(|| self.workspace.root_path.to_string_lossy())
+            );
+            if ui
+                .button(egui::RichText::new(dest_label).size(12.0).color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)))
+                .on_hover_text(format!("Current folder destination: {}\nClick to choose or change root folder.", self.workspace.root_path.display()))
+                .clicked()
+            {
+                self.destination_input = self.workspace.root_path.to_string_lossy().to_string();
+                self.show_destination_modal = true;
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                let toggle_label = if self.show_coder_chat {
-                    "🤖 Hide AI Coder"
-                } else {
-                    "🤖 Show AI Coder"
-                };
-                let toggle_fill = if self.show_coder_chat {
-                    egui::Color32::from_rgb(0x00, 0x55, 0xaa)
-                } else {
-                    egui::Color32::from_rgb(0x22, 0x33, 0x55)
-                };
+                ui.add_space(4.0);
+                // AI Coder toggle
+                let coder_label = if self.show_coder_chat { "🤖 Hide AI Coder" } else { "🤖 AI Coder" };
+                let coder_fill = if self.show_coder_chat { egui::Color32::from_rgb(0x00, 0x55, 0xaa) } else { egui::Color32::from_rgb(0x1e, 0x29, 0x3b) };
                 if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(toggle_label).size(12.5).color(egui::Color32::WHITE))
-                            .fill(toggle_fill)
-                            .corner_radius(egui::CornerRadius::same(6)),
-                    )
-                    .on_hover_text("Toggle the integrated AI Coder Chatbox sidebar")
+                    .add(egui::Button::new(egui::RichText::new(coder_label).size(12.0).color(egui::Color32::WHITE)).fill(coder_fill).corner_radius(egui::CornerRadius::same(6)))
                     .clicked()
                 {
                     self.show_coder_chat = !self.show_coder_chat;
                 }
 
-                ui.add_space(8.0);
-                let clear_btn = ui.add(
-                    egui::Button::new(egui::RichText::new("Clear Editor").size(12.0))
-                        .fill(egui::Color32::from_rgb(0x88, 0x22, 0x22))
-                        .corner_radius(egui::CornerRadius::same(6)),
-                );
-                if clear_btn.clicked() {
+                ui.add_space(4.0);
+                // Terminal toggle
+                let term_label = if self.show_terminal { "▶ Hide Terminal" } else { "▶ Terminal" };
+                let term_fill = if self.show_terminal { egui::Color32::from_rgb(0x05, 0x60, 0x40) } else { egui::Color32::from_rgb(0x1e, 0x29, 0x3b) };
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(term_label).size(12.0).color(egui::Color32::WHITE)).fill(term_fill).corner_radius(egui::CornerRadius::same(6)))
+                    .clicked()
+                {
+                    self.show_terminal = !self.show_terminal;
+                }
+
+                ui.add_space(4.0);
+                // Explorer toggle
+                let ws_label = if self.show_workspace_tree { "📁 Hide Files" } else { "📁 File Tree" };
+                let ws_fill = if self.show_workspace_tree { egui::Color32::from_rgb(0x55, 0x33, 0x88) } else { egui::Color32::from_rgb(0x1e, 0x29, 0x3b) };
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(ws_label).size(12.0).color(egui::Color32::WHITE)).fill(ws_fill).corner_radius(egui::CornerRadius::same(6)))
+                    .clicked()
+                {
+                    self.show_workspace_tree = !self.show_workspace_tree;
+                }
+
+                ui.add_space(4.0);
+                // Full-Fledged App Scaffolder button
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("🏗 Scaffold Full App").size(12.0).strong().color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0xd9, 0x77, 0x06)).corner_radius(egui::CornerRadius::same(6)))
+                    .on_hover_text("Generate complete multi-file application (Rust, Python AI Swarm, Web, Cyber Security) in destination folder")
+                    .clicked()
+                {
+                    self.show_scaffold_modal = true;
+                }
+
+                ui.add_space(4.0);
+                if ui.small_button("Clear Editor").clicked() {
                     self.code.clear();
                 }
 
-                ui.add_space(8.0);
-                if ui
-                    .small_button("Send to Chat tab")
-                    .on_hover_text("Copy the editor code into the main chat tab input")
-                    .clicked()
-                {
+                ui.add_space(4.0);
+                if ui.small_button("Send to Chat tab").clicked() {
                     let _ = tx.send(crate::ui::app::AppMessage::EditorToChat(self.code.clone()));
                 }
             });
         });
 
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         ui.separator();
-        ui.add_space(6.0);
+        ui.add_space(4.0);
 
-        if self.show_coder_chat {
-            ui.columns(2, |cols| {
-                self.show_editor_pane(&mut cols[0], tx);
-                self.show_coder_chat_pane(&mut cols[1], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
+        // Layout Configuration based on active sidebars
+        let col_count = 1 + (if self.show_workspace_tree { 1 } else { 0 }) + (if self.show_coder_chat { 1 } else { 0 });
+
+        if col_count == 3 {
+            ui.columns(3, |cols| {
+                self.show_workspace_pane(&mut cols[0], tx);
+                self.show_editor_and_terminal_pane(&mut cols[1], tx, rt);
+                self.show_coder_chat_pane(&mut cols[2], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
             });
+        } else if col_count == 2 {
+            if self.show_workspace_tree {
+                ui.columns(2, |cols| {
+                    self.show_workspace_pane(&mut cols[0], tx);
+                    self.show_editor_and_terminal_pane(&mut cols[1], tx, rt);
+                });
+            } else {
+                ui.columns(2, |cols| {
+                    self.show_editor_and_terminal_pane(&mut cols[0], tx, rt);
+                    self.show_coder_chat_pane(&mut cols[1], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
+                });
+            }
         } else {
-            self.show_editor_pane(ui, tx);
+            self.show_editor_and_terminal_pane(ui, tx, rt);
+        }
+    }
+
+    /// Left Pane: Workspace File Tree & File System CRUD
+    fn show_workspace_pane(&mut self, ui: &mut egui::Ui, tx: &mpsc::Sender<crate::ui::app::AppMessage>) {
+        let frame = egui::Frame::NONE
+            .fill(egui::Color32::from_rgb(0x0c, 0x11, 0x1c))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(8));
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("📁 Workspace Explorer")
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("🔄").on_hover_text("Refresh file tree").clicked() {
+                        let _ = self.workspace.refresh_tree();
+                    }
+                    if ui.small_button("📂").on_hover_text("Change destination folder").clicked() {
+                        self.destination_input = self.workspace.root_path.to_string_lossy().to_string();
+                        self.show_destination_modal = true;
+                    }
+                });
+            });
+
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("Root: {}", self.workspace.root_path.display()))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+            );
+
+            ui.add_space(4.0);
+            // Action buttons toolbar: + File, + Folder, Rename, Delete
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("+ File").size(11.0)).fill(egui::Color32::from_rgb(0x1e, 0x3a, 0x8a)))
+                    .on_hover_text("Create a new file in workspace")
+                    .clicked()
+                {
+                    self.new_file_input.clear();
+                    self.new_file_dialog_open = true;
+                }
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("+ Folder").size(11.0)).fill(egui::Color32::from_rgb(0x13, 0x4e, 0x4a)))
+                    .on_hover_text("Create a new folder in workspace")
+                    .clicked()
+                {
+                    self.new_folder_input.clear();
+                    self.new_folder_dialog_open = true;
+                }
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("✏ Move").size(11.0)).fill(egui::Color32::from_rgb(0x37, 0x30, 0xa3)))
+                    .on_hover_text("Rename or move selected file/folder")
+                    .clicked()
+                {
+                    if let Some(target) = &self.selected_node_path {
+                        let rel = self.workspace.relative_path(target);
+                        self.rename_input = rel.to_string_lossy().to_string();
+                        self.rename_target = Some(target.clone());
+                        self.rename_dialog_open = true;
+                    } else {
+                        self.file_status = "Select a file or folder first to move/rename.".to_string();
+                    }
+                }
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("🗑 Delete").size(11.0)).fill(egui::Color32::from_rgb(0x99, 0x1b, 0x1b)))
+                    .on_hover_text("Delete selected file or folder (with safety confirmation)")
+                    .clicked()
+                {
+                    if let Some(target) = &self.selected_node_path {
+                        self.delete_target = Some(target.clone());
+                        self.delete_confirm_open = true;
+                    } else {
+                        self.file_status = "Select a file or folder first to delete.".to_string();
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.file_search_query)
+                    .hint_text("🔍 Search files...")
+                    .desired_width(f32::INFINITY),
+            );
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // File Tree Scroll Area
+            let mut file_to_load = None;
+            let mut node_to_select = None;
+            let mut path_to_toggle = None;
+
+            egui::ScrollArea::vertical()
+                .id_salt("workspace_tree_scroll")
+                .max_height(ui.available_height() - 10.0)
+                .show(ui, |ui| {
+                    if !self.file_search_query.trim().is_empty() {
+                        let query = self.file_search_query.trim();
+                        let matches = self.workspace.search_files(query);
+                        if matches.is_empty() {
+                            ui.label(egui::RichText::new("No files match query.").size(11.0).color(egui::Color32::GRAY));
+                        } else {
+                            for m in matches {
+                                let name = m.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                let is_selected = self.selected_node_path.as_ref() == Some(&m);
+                                if ui.selectable_label(is_selected, format!("📄 {}", name)).clicked() {
+                                    node_to_select = Some(m.clone());
+                                    file_to_load = Some(m.clone());
+                                }
+                            }
+                        }
+                    } else if self.workspace.file_tree.is_empty() {
+                        ui.label(egui::RichText::new("Destination folder is empty.").size(11.5).color(egui::Color32::GRAY));
+                        ui.add_space(4.0);
+                        if ui.button("Create Sample Project").clicked() {
+                            let _ = self.scaffold_app(AppTemplateType::RustHighPerformance, "app");
+                        }
+                    } else {
+                        for node in &self.workspace.file_tree {
+                            Self::render_tree_node(
+                                ui,
+                                node,
+                                0,
+                                &self.selected_node_path,
+                                &mut node_to_select,
+                                &mut file_to_load,
+                                &mut path_to_toggle,
+                            );
+                        }
+                    }
+                });
+
+            if let Some(target_rel) = path_to_toggle {
+                for node in &mut self.workspace.file_tree {
+                    node.toggle_path(&target_rel);
+                }
+            }
+            if let Some(sel) = node_to_select {
+                self.selected_node_path = Some(sel);
+            }
+            if let Some(to_load) = file_to_load {
+                self.load_file_from_path(&to_load);
+                let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                    "file.open".to_string(),
+                    to_load.to_string_lossy().to_string(),
+                ));
+            }
+        });
+    }
+
+    fn render_tree_node(
+        ui: &mut egui::Ui,
+        node: &FsNode,
+        depth: usize,
+        selected_path: &Option<PathBuf>,
+        node_to_select: &mut Option<PathBuf>,
+        file_to_load: &mut Option<PathBuf>,
+        path_to_toggle: &mut Option<PathBuf>,
+    ) {
+        let is_selected = selected_path.as_ref() == Some(&node.path);
+        let indent = depth as f32 * 12.0;
+
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            if node.is_dir {
+                let arrow = if node.is_expanded { "▼" } else { "▶" };
+                if ui.small_button(arrow).clicked() {
+                    *path_to_toggle = Some(node.rel_path.clone());
+                }
+                let dir_text = format!("📁 {}", node.name);
+                let lbl = ui.selectable_label(is_selected, egui::RichText::new(dir_text).color(egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)).size(11.5));
+                if lbl.clicked() {
+                    *node_to_select = Some(node.path.clone());
+                    *path_to_toggle = Some(node.rel_path.clone());
+                }
+            } else {
+                let icon = match node.path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+                    "rs" => "🦀",
+                    "py" => "🐍",
+                    "sh" | "bash" => "📜",
+                    "js" | "ts" | "html" | "css" => "🌐",
+                    "md" => "📝",
+                    _ => "📄",
+                };
+                let size_str = if node.size > 1024 {
+                    format!("{} KB", node.size / 1024)
+                } else {
+                    format!("{} B", node.size)
+                };
+                let file_label = format!("{} {}", icon, node.name);
+                let lbl = ui.selectable_label(is_selected, egui::RichText::new(file_label).size(11.5));
+                if lbl.clicked() {
+                    *node_to_select = Some(node.path.clone());
+                    *file_to_load = Some(node.path.clone());
+                }
+                lbl.on_hover_text(format!("Path: {}\nSize: {}", node.path.display(), size_str));
+            }
+        });
+
+        if node.is_dir && node.is_expanded {
+            for child in &node.children {
+                Self::render_tree_node(
+                    ui,
+                    child,
+                    depth + 1,
+                    selected_path,
+                    node_to_select,
+                    file_to_load,
+                    path_to_toggle,
+                );
+            }
+        }
+    }
+
+    /// Center Pane: Editor + Dockable Terminal
+    fn show_editor_and_terminal_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
+    ) {
+        // Upper part: Code Editor
+        self.show_editor_pane(ui, tx);
+
+        // Lower part: Terminal / Command Runner Dock (if active)
+        if self.show_terminal {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            self.show_terminal_dock(ui, tx, rt);
         }
     }
 
     fn show_editor_pane(&mut self, ui: &mut egui::Ui, tx: &mpsc::Sender<crate::ui::app::AppMessage>) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Language:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
-            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Language:").size(12.5).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(4.0);
             egui::ComboBox::from_id_salt("editor_language")
-                .selected_text(egui::RichText::new(&self.language).size(13.0))
-                .width(130.0)
+                .selected_text(egui::RichText::new(&self.language).size(12.5))
+                .width(110.0)
                 .show_ui(ui, |ui| {
                     for lang in ["rust", "python", "javascript", "typescript", "go", "c", "cpp", "java", "sql", "shell", "lua", "asm"] {
-                        ui.selectable_value(&mut self.language, lang.to_string(), egui::RichText::new(lang).size(13.0));
+                        ui.selectable_value(&mut self.language, lang.to_string(), egui::RichText::new(lang).size(12.5));
                     }
                 });
-        });
 
-        ui.add_space(6.0);
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("File:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
             ui.add_space(8.0);
+            ui.label(egui::RichText::new("File:").size(12.5).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(4.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.file_path)
-                    .desired_width(200.0)
+                    .desired_width(180.0)
                     .font(egui::TextStyle::Monospace)
-                    .hint_text("path/to/main.rs"),
+                    .hint_text("path/to/file.rs"),
             );
-            ui.add_space(6.0);
+
+            ui.add_space(4.0);
             if ui
-                .button(egui::RichText::new("Save").size(12.5))
+                .button(egui::RichText::new("Save").size(12.0).strong().color(egui::Color32::WHITE))
                 .on_hover_text("Write editor content to this file")
                 .clicked()
             {
@@ -179,7 +715,7 @@ impl EditorPanel {
                 }
             }
             if ui
-                .button(egui::RichText::new("Open").size(12.5))
+                .button(egui::RichText::new("Open").size(12.0))
                 .on_hover_text("Load this file into the editor")
                 .clicked()
             {
@@ -204,7 +740,7 @@ impl EditorPanel {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Templates:").size(12.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+            ui.label(egui::RichText::new("Templates:").size(11.5).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
             ui.add_space(4.0);
             if ui.small_button("Rust").clicked() {
                 self.apply_template("rust");
@@ -223,30 +759,31 @@ impl EditorPanel {
             );
         });
 
-        ui.add_space(6.0);
+        ui.add_space(4.0);
 
         let syntax = Self::syntax_for_language(&self.language);
+        let editor_rows = if self.show_terminal { 16 } else { 26 };
         let mut editor = CodeEditor::default()
             .id_source("code_editor_main")
-            .with_rows(24)
-            .with_fontsize(13.5);
+            .with_rows(editor_rows)
+            .with_fontsize(13.0);
 
         let _ = editor.show(ui, &mut self.code, &syntax);
 
         if let Some(suggestion) = self.pending_suggestion.clone() {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.separator();
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("AI Suggestion Diff:")
-                    .size(13.0)
+                    .size(12.5)
                     .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
             );
             ui.checkbox(&mut self.show_diff, "Show side-by-side / line diff");
             if self.show_diff {
                 let diff = Self::diff_lines(&self.code, &suggestion);
                 egui::ScrollArea::vertical()
-                    .max_height(140.0)
+                    .max_height(100.0)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for (sign, line) in diff.iter().take(300) {
@@ -269,7 +806,7 @@ impl EditorPanel {
             ui.horizontal(|ui| {
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new("Apply Suggestion").size(12.5))
+                        egui::Button::new(egui::RichText::new("Apply Suggestion").size(12.0))
                             .fill(egui::Color32::from_rgb(0x00, 0x77, 0x55))
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
@@ -283,7 +820,7 @@ impl EditorPanel {
                 ui.add_space(6.0);
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new("Dismiss").size(12.5))
+                        egui::Button::new(egui::RichText::new("Dismiss").size(12.0))
                             .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
@@ -295,6 +832,170 @@ impl EditorPanel {
         }
     }
 
+    /// Terminal Dock: Run All Executable Commands, Compilers, & Scripts
+    fn show_terminal_dock(
+        &mut self,
+        ui: &mut egui::Ui,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
+    ) {
+        let frame = egui::Frame::NONE
+            .fill(egui::Color32::from_rgb(0x08, 0x0c, 0x14))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(8));
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("⚡ Command Runner & Terminal Dock")
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
+                );
+
+                if self.terminal_is_running {
+                    ui.label(
+                        egui::RichText::new(format!("⏳ Running '{}'...", self.terminal_running_cmd))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24)),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Clear Console").clicked() {
+                        self.terminal_logs.clear();
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            // Quick preset execution buttons
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("▶ Run Current File").on_hover_text("Execute active file in editor").clicked() {
+                    self.run_current_file(tx, rt);
+                }
+                if ui.small_button("🔨 Build").on_hover_text("Run project build (cargo build / npm build)").clicked() {
+                    self.run_build(tx, rt);
+                }
+                if ui.small_button("🧪 Test").on_hover_text("Run test suite (cargo test / pytest)").clicked() {
+                    self.run_test(tx, rt);
+                }
+                if ui.small_button("⚙ Run setup.sh").on_hover_text("Execute ./setup.sh in workspace root").clicked() {
+                    self.run_setup(tx, rt);
+                }
+                if ui.small_button("🚀 Run start.sh").on_hover_text("Execute ./start.sh in workspace root").clicked() {
+                    self.run_start(tx, rt);
+                }
+            });
+
+            ui.add_space(4.0);
+            // Custom command input bar
+            let mut execute_now = false;
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.terminal_input)
+                        .hint_text("Enter terminal command... (e.g. cargo check, python3 main.py, sh setup.sh)")
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(ui.available_width() - 80.0),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    execute_now = true;
+                }
+
+                let btn_text = if self.terminal_is_running { "Running..." } else { "Run" };
+                let btn = ui.add_enabled(
+                    !self.terminal_is_running && !self.terminal_input.trim().is_empty(),
+                    egui::Button::new(egui::RichText::new(btn_text).size(12.0).color(egui::Color32::WHITE))
+                        .fill(egui::Color32::from_rgb(0x05, 0x96, 0x69))
+                        .corner_radius(egui::CornerRadius::same(4)),
+                );
+                if btn.clicked() {
+                    execute_now = true;
+                }
+            });
+
+            if execute_now {
+                let cmd = self.terminal_input.clone();
+                self.run_terminal_command(&cmd, tx, rt);
+            }
+
+            ui.add_space(4.0);
+            // Log output viewport
+            egui::ScrollArea::vertical()
+                .id_salt("terminal_log_scroll")
+                .max_height(140.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if self.terminal_logs.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Terminal console ready. Click a quick action or enter a command above.")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b))
+                                .monospace(),
+                        );
+                    } else {
+                        for log in &self.terminal_logs {
+                            let (badge_bg, badge_text) = match log.exit_code {
+                                Some(0) => (egui::Color32::from_rgb(0x06, 0x4e, 0x3b), "SUCCESS (0)"),
+                                Some(_c) => (egui::Color32::from_rgb(0x7f, 0x1d, 0x1d), "FAILED"),
+                                None => (egui::Color32::from_rgb(0x78, 0x35, 0x0f), "TERMINATED"),
+                            };
+
+                            egui::Frame::NONE
+                                .fill(egui::Color32::from_rgb(0x0f, 0x17, 0x2a))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::same(6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(badge_text)
+                                                .size(10.0)
+                                                .strong()
+                                                .background_color(badge_bg)
+                                                .color(egui::Color32::WHITE),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&log.cmd)
+                                                .size(11.0)
+                                                .strong()
+                                                .monospace()
+                                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("{}ms", log.duration_ms))
+                                                    .size(10.0)
+                                                    .color(egui::Color32::GRAY),
+                                            );
+                                        });
+                                    });
+
+                                    if !log.stdout.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&log.stdout)
+                                                .size(10.5)
+                                                .monospace()
+                                                .color(egui::Color32::from_rgb(0xa7, 0xf3, 0xd0)),
+                                        );
+                                    }
+                                    if !log.stderr.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&log.stderr)
+                                                .size(10.5)
+                                                .monospace()
+                                                .color(egui::Color32::from_rgb(0xfc, 0xa5, 0xa5)),
+                                        );
+                                    }
+                                });
+                            ui.add_space(3.0);
+                        }
+                    }
+                });
+        });
+    }
+
+    /// Right Pane: AI Coder & Full-Fledged Application Scaffolding
     fn show_coder_chat_pane(
         &mut self,
         ui: &mut egui::Ui,
@@ -315,7 +1016,7 @@ impl EditorPanel {
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("🤖 AI Coder")
+                    egui::RichText::new("🤖 AI Coder & Architect")
                         .size(15.0)
                         .strong()
                         .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
@@ -328,8 +1029,8 @@ impl EditorPanel {
                     .unwrap_or_else(|| "(no model)".to_string());
 
                 egui::ComboBox::from_id_salt("ide_coder_model_selector")
-                    .selected_text(egui::RichText::new(&cur_model).size(12.5))
-                    .width(160.0)
+                    .selected_text(egui::RichText::new(&cur_model).size(12.0))
+                    .width(150.0)
                     .show_ui(ui, |ui| {
                         for m in models {
                             let is_sel = self.coder_model.as_deref() == Some(&m.name)
@@ -349,131 +1050,97 @@ impl EditorPanel {
                 });
             });
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
 
+            // Quick Prompt Suggestions
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("Prompt:").size(11.0).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)));
-                if ui.small_button("✨ Create").on_hover_text("Write prompt to create new code").clicked() {
+                if ui.small_button("✨ Create").clicked() {
                     self.coder_input = "Create a complete, robust implementation of: ".to_string();
                 }
-                if ui.small_button("⚡ Optimize").on_hover_text("Ask AI to optimize current code").clicked() {
-                    self.send_coder_message(
-                        "Refactor and optimize the current editor code for maximum performance, clean idiomatic style, and security.",
-                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
-                    );
+                if ui.small_button("⚡ Optimize").clicked() {
+                    self.send_coder_message("Optimize the current code for peak throughput, memory bounds, and zero allocations.", models, selected_model, system_prompt, api_client, tx, rt, num_threads);
                 }
-                if ui.small_button("🐛 Fix Bugs").on_hover_text("Ask AI to identify and fix bugs").clicked() {
-                    self.send_coder_message(
-                        "Analyze the current editor code for bugs, logic errors, or memory leaks, and provide the corrected code.",
-                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
-                    );
+                if ui.small_button("🛡 Audit").clicked() {
+                    self.send_coder_message("Perform a rigorous cybersecurity and memory safety audit on this code. Highlight all vulnerabilities.", models, selected_model, system_prompt, api_client, tx, rt, num_threads);
                 }
-                if ui.small_button("🧪 Tests").on_hover_text("Ask AI to generate tests").clicked() {
-                    self.send_coder_message(
-                        "Generate comprehensive unit tests covering edge cases for this code.",
-                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
-                    );
-                }
-                if ui.small_button("📖 Explain").on_hover_text("Ask AI to explain this code").clicked() {
-                    self.send_coder_message(
-                        "Explain the architecture, design patterns, and algorithmic flow of this code in detail.",
-                        models, selected_model, system_prompt, api_client, tx, rt, num_threads,
-                    );
+                if ui.small_button("🏗 Scaffold App").clicked() {
+                    self.show_scaffold_modal = true;
                 }
             });
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
 
-            let reserve_h = 135.0 * ui.ctx().zoom_factor();
-            let chat_h = (ui.available_height() - reserve_h).max(120.0);
-
-            let mut apply_code_request: Option<String> = None;
-            let mut append_code_request: Option<String> = None;
+            // Messages Viewport
+            let mut apply_code_req = None;
+            let mut deploy_multi_req = None;
 
             egui::ScrollArea::vertical()
-                .id_salt("ide_coder_chat_scroll")
-                .max_height(chat_h)
+                .id_salt("ide_coder_scroll_area")
+                .max_height(ui.available_height() - 130.0)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    if self.coder_messages.is_empty() && self.coder_stream_buf.is_empty() {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("💬 AI Coder is ready. Ask to generate new code, refactor, or fix bugs. Use 'Apply' on any code snippet to test it immediately.")
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
-                        );
+                    if self.coder_messages.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(
+                                egui::RichText::new("AI Coder ready.")
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+                            );
+                            ui.label(
+                                egui::RichText::new("Ask for full application architectures, modules, bug fixes, or optimizations.")
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(0x47, 0x55, 0x69)),
+                            );
+                        });
                     }
 
                     for (m_idx, msg) in self.coder_messages.iter().enumerate() {
-                        let segs: &[crate::ui::chat::MessageSegment] = if m_idx < self.coder_parsed_cache.len() {
-                            &self.coder_parsed_cache[m_idx]
-                        } else {
-                            &[]
-                        };
-                        Self::render_coder_message(
+                        let segs = self.coder_parsed_cache.get(m_idx).map(|s| &s[..]).unwrap_or(&[]);
+                        Self::render_coder_message_with_deploy(
                             ui,
                             msg,
                             segs,
                             m_idx,
-                            &mut apply_code_request,
-                            &mut append_code_request,
+                            &mut apply_code_req,
+                            &mut deploy_multi_req,
                             tx,
                         );
                     }
 
-                    if !self.coder_stream_buf.is_empty() {
-                        let tmp = ChatMessage {
-                            role: "assistant".to_string(),
-                            content: format!("{}▍", self.coder_stream_buf),
-                            timestamp: chrono::Utc::now(),
-                        };
-                        let stream_segs = crate::ui::chat::parse_segments(&tmp.content);
-                        Self::render_coder_message(
-                            ui,
-                            &tmp,
-                            &stream_segs,
-                            self.coder_messages.len(),
-                            &mut apply_code_request,
-                            &mut append_code_request,
-                            tx,
-                        );
-                    }
-
-                    if self.coder_is_streaming && self.coder_stream_buf.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(
-                                egui::RichText::new("Coding...")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
-                            );
-                        });
+                    if self.coder_is_streaming && !self.coder_stream_buf.is_empty() {
+                        ui.add_space(4.0);
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(0x16, 0x1e, 0x2e))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("AI Coder (generating...)").size(11.0).strong().color(egui::Color32::from_rgb(0x4a, 0xde, 0x80)));
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new(&self.coder_stream_buf).size(12.0).color(egui::Color32::WHITE));
+                            });
                     }
                 });
 
-            if let Some(code) = apply_code_request {
+            if let Some(code) = apply_code_req {
                 self.code = code;
-                self.file_status = "Code applied to Editor from AI Coder.".to_string();
+                self.file_status = "Applied code from AI Coder to editor.".to_string();
             }
-            if let Some(code) = append_code_request {
-                if !self.code.trim().is_empty() {
-                    self.code.push_str("\n\n");
-                }
-                self.code.push_str(&code);
-                self.file_status = "Code appended to Editor from AI Coder.".to_string();
+            if let Some(text) = deploy_multi_req {
+                let _ = self.deploy_multi_file_from_text(&text);
             }
 
             ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
 
+            // Multiline Input Prompt
             let input_resp = ui.add(
                 egui::TextEdit::multiline(&mut self.coder_input)
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Ask AI coder to write, refactor, or fix code... (Enter to send)")
+                    .hint_text("Ask AI coder to write, scaffold full app, refactor, or fix... (Enter to send)")
                     .font(egui::TextStyle::Body),
             );
 
@@ -487,7 +1154,7 @@ impl EditorPanel {
                         can_send,
                         egui::Button::new(
                             egui::RichText::new(if self.coder_is_streaming { "Generating..." } else { "Send (Enter)" })
-                                .size(12.5)
+                                .size(12.0)
                                 .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(0x00, 0x66, 0xcc))
@@ -502,7 +1169,7 @@ impl EditorPanel {
                     if self.coder_is_streaming {
                         ui.add_space(4.0);
                         let stop_btn = ui.add(
-                            egui::Button::new(egui::RichText::new("Stop").size(12.5).color(egui::Color32::WHITE))
+                            egui::Button::new(egui::RichText::new("Stop").size(12.0).color(egui::Color32::WHITE))
                                 .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))
                                 .corner_radius(egui::CornerRadius::same(6)),
                         );
@@ -524,14 +1191,14 @@ impl EditorPanel {
         });
     }
 
-    fn render_coder_message(
+    fn render_coder_message_with_deploy(
         ui: &mut egui::Ui,
         msg: &ChatMessage,
         segments: &[crate::ui::chat::MessageSegment],
-        m_idx: usize,
+        _m_idx: usize,
         apply_req: &mut Option<String>,
-        append_req: &mut Option<String>,
-        _tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        deploy_multi_req: &mut Option<String>,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
     ) {
         let is_user = msg.role == "user";
         let is_sys = msg.role == "system";
@@ -569,142 +1236,523 @@ impl EditorPanel {
                     segments
                 };
 
-                for (s_idx, seg) in actual_segs.iter().enumerate() {
+                for seg in actual_segs {
                     match seg {
                         crate::ui::chat::MessageSegment::Text(t) => {
                             if !t.is_empty() {
-                                ui.label(egui::RichText::new(t).size(12.5).color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t).size(12.0).color(egui::Color32::WHITE));
                             }
                         }
                         crate::ui::chat::MessageSegment::Think(th) => {
                             egui::CollapsingHeader::new(
                                 egui::RichText::new("💭 Thought Process")
-                                    .size(11.0)
+                                    .size(10.5)
                                     .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
                             )
                             .default_open(false)
                             .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(th)
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
-                                        .italics(),
-                                );
+                                ui.label(egui::RichText::new(th).size(10.5).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)).italics());
                             });
                         }
                         crate::ui::chat::MessageSegment::Code { lang, code } => {
-                            ui.add_space(4.0);
+                            ui.add_space(3.0);
                             let cb_frame = egui::Frame::NONE
                                 .fill(egui::Color32::from_rgb(0x0a, 0x0f, 0x1d))
                                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x2d, 0x48)))
                                 .corner_radius(egui::CornerRadius::same(6))
-                                .inner_margin(egui::Margin::symmetric(8, 6));
+                                .inner_margin(egui::Margin::same(6));
 
                             cb_frame.show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let display_lang = if lang.trim().is_empty() { "CODE" } else { lang.trim() };
+                                    let display_lang = if lang.is_empty() { "code" } else { lang };
                                     ui.label(
-                                        egui::RichText::new(format!("💻 {}", display_lang.to_uppercase()))
-                                            .size(11.0)
-                                            .monospace()
+                                        egui::RichText::new(display_lang)
+                                            .size(10.0)
+                                            .strong()
                                             .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
                                     );
-
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.small_button("📥 Apply").on_hover_text("Replace editor code with this snippet").clicked() {
-                                            *apply_req = Some(code.clone());
-                                        }
-                                        ui.add_space(4.0);
-                                        if ui.small_button("➕ Append").on_hover_text("Append this snippet to the editor").clicked() {
-                                            *append_req = Some(code.clone());
-                                        }
-                                        ui.add_space(4.0);
-                                        if ui.small_button("📋 Copy").on_hover_text("Copy snippet to clipboard").clicked() {
+                                        if ui.small_button("📋 Copy").clicked() {
                                             ui.ctx().copy_text(code.clone());
+                                        }
+                                        if ui
+                                            .small_button("⚡ Replace Editor")
+                                            .on_hover_text("Load this code block directly into the editor")
+                                            .clicked()
+                                        {
+                                            *apply_req = Some(code.clone());
                                         }
                                     });
                                 });
 
                                 ui.add_space(2.0);
-                                ui.separator();
-                                ui.add_space(2.0);
-
-                                let scroll_id = format!("coder_cb_{}_{}_{}", m_idx, s_idx, code.len());
                                 egui::ScrollArea::horizontal()
-                                    .id_salt(scroll_id)
-                                    .auto_shrink([false, false])
+                                    .id_salt(format!("code_blk_{}_{}", lang, code.len()))
                                     .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(code)
-                                                    .monospace()
-                                                    .size(12.0)
-                                                    .color(egui::Color32::from_rgb(0xec, 0xf0, 0xf8)),
-                                            )
+                                        ui.label(
+                                            egui::RichText::new(code)
+                                                .size(11.0)
+                                                .monospace()
+                                                .color(egui::Color32::from_rgb(0xe2, 0xe8, 0xf0)),
                                         );
                                     });
                             });
-                            ui.add_space(4.0);
                         }
                     }
                 }
+
+                // Check for multi-file application pattern
+                if !is_user && (msg.content.contains("### File:") || msg.content.contains("```file:")) {
+                    let files = AppScaffolder::extract_multi_files(&msg.content);
+                    if !files.is_empty() {
+                        ui.add_space(4.0);
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(0x1e, 0x3a, 0x8a))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("📦 Multi-File Application Detected ({} files)", files.len()))
+                                            .size(11.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    );
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui
+                                            .add(egui::Button::new(egui::RichText::new("🚀 Deploy Full App to Destination").size(11.0).strong().color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0x05, 0x96, 0x69)))
+                                            .on_hover_text("Automatically creates all folders, writes all files, and adds setup.sh and start.sh")
+                                            .clicked()
+                                        {
+                                            *deploy_multi_req = Some(msg.content.clone());
+                                            let _ = tx.send(crate::ui::app::AppMessage::Notice(format!(
+                                                "Deploying {} files into selected folder destination...",
+                                                files.len()
+                                            )));
+                                        }
+                                    });
+                                });
+                            });
+                    }
+                }
             });
-        ui.add_space(3.0);
     }
 
-    /// Line diff of current code (old) vs AI suggestion (new).
-    /// Returns (sign, text): '+' added, '-' removed, ' ' context.
-    pub fn diff_lines(old: &str, new: &str) -> Vec<(char, String)> {
-        use similar::{ChangeTag, TextDiff};
-        let diff = TextDiff::from_lines(old, new);
-        let mut out = Vec::new();
-        for op in diff.ops() {
-            for change in diff.iter_changes(op) {
-                let sign = match change.tag() {
-                    ChangeTag::Delete => '-',
-                    ChangeTag::Insert => '+',
-                    ChangeTag::Equal => ' ',
-                };
-                out.push((
-                    sign,
-                    change.value().trim_end_matches('\n').to_string(),
-                ));
+    /// Modals for Destination Picker, New File, New Folder, Rename, Delete, and Full App Scaffolding
+    fn render_modals(
+        &mut self,
+        ui: &mut egui::Ui,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        _rt: &Runtime,
+    ) {
+        // 1. Destination Folder Modal
+        if self.show_destination_modal {
+            egui::Window::new("📂 Select Workspace Folder Destination")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Configure the target root destination for all files, folders, and applications:");
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.destination_input)
+                            .desired_width(360.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+
+                    ui.add_space(6.0);
+                    ui.label("Quick Presets:");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("Documents/Code_air/ml_lab").clicked() {
+                            let p = WorkspaceManager::default_destination();
+                            self.destination_input = p.to_string_lossy().to_string();
+                        }
+                        if ui.small_button("Current ML-Laboratory").clicked() {
+                            if let Ok(p) = std::env::current_dir() {
+                                self.destination_input = p.to_string_lossy().to_string();
+                            }
+                        }
+                        if ui.small_button("Home Directory").clicked() {
+                            if let Some(h) = dirs::home_dir() {
+                                self.destination_input = h.to_string_lossy().to_string();
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Select & Apply Destination").clicked() {
+                            let p = PathBuf::from(self.destination_input.trim());
+                            let _ = self.workspace.set_root(p);
+                            self.show_destination_modal = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_destination_modal = false;
+                        }
+                    });
+                });
+        }
+
+        // 2. New File Modal
+        if self.new_file_dialog_open {
+            egui::Window::new("📄 Create New File")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Enter relative file path within workspace:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_file_input)
+                            .hint_text("e.g. src/neural/quantum.rs or tests/test_main.py")
+                            .desired_width(320.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create File").clicked() {
+                            let rel = Path::new(self.new_file_input.trim());
+                            if !rel.as_os_str().is_empty() {
+                                match self.workspace.create_file(rel, "") {
+                                    Ok(p) => {
+                                        self.load_file_from_path(&p);
+                                        let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                                            "file.create".to_string(),
+                                            p.to_string_lossy().to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.file_status = format!("File create failed: {}", e);
+                                    }
+                                }
+                            }
+                            self.new_file_dialog_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_file_dialog_open = false;
+                        }
+                    });
+                });
+        }
+
+        // 3. New Folder Modal
+        if self.new_folder_dialog_open {
+            egui::Window::new("📁 Create New Folder")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Enter relative folder path within workspace:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_folder_input)
+                            .hint_text("e.g. src/components or docs/api")
+                            .desired_width(320.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create Folder").clicked() {
+                            let rel = Path::new(self.new_folder_input.trim());
+                            if !rel.as_os_str().is_empty() {
+                                match self.workspace.create_dir(rel) {
+                                    Ok(p) => {
+                                        self.file_status = format!("Created folder: {}", p.display());
+                                        let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                                            "folder.create".to_string(),
+                                            p.to_string_lossy().to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.file_status = format!("Folder create failed: {}", e);
+                                    }
+                                }
+                            }
+                            self.new_folder_dialog_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_folder_dialog_open = false;
+                        }
+                    });
+                });
+        }
+
+        // 4. Rename / Move Modal
+        if self.rename_dialog_open {
+            egui::Window::new("✏ Rename / Move Target")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    if let Some(target) = &self.rename_target {
+                        ui.label(format!("Source: {}", target.display()));
+                        ui.add_space(4.0);
+                        ui.label("Enter new relative destination path:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.rename_input)
+                                .desired_width(320.0),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Confirm Move").clicked() {
+                                let src_rel = self.workspace.relative_path(target);
+                                let dst_rel = Path::new(self.rename_input.trim());
+                                match self.workspace.move_entry(&src_rel, dst_rel) {
+                                    Ok(d) => {
+                                        self.file_status = format!("Moved to {}", d.display());
+                                        let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                                            "file.move".to_string(),
+                                            format!("{} -> {}", target.display(), d.display()),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.file_status = format!("Move failed: {}", e);
+                                    }
+                                }
+                                self.rename_dialog_open = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.rename_dialog_open = false;
+                            }
+                        });
+                    }
+                });
+        }
+
+        // 5. Delete Confirmation Modal (Safety First)
+        if self.delete_confirm_open {
+            egui::Window::new("⚠ Confirm Delete")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    if let Some(target) = &self.delete_target {
+                        ui.label(
+                            egui::RichText::new("Are you sure you want to permanently delete this target?")
+                                .color(egui::Color32::from_rgb(0xff, 0x66, 0x66))
+                                .strong(),
+                        );
+                        ui.label(format!("Target: {}", target.display()));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(egui::RichText::new("Delete Forever").color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0xaa, 0x22, 0x22)))
+                                .clicked()
+                            {
+                                let rel = self.workspace.relative_path(target);
+                                match self.workspace.delete_entry(&rel) {
+                                    Ok(()) => {
+                                        self.file_status = format!("Deleted {}", target.display());
+                                        let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                                            "file.delete".to_string(),
+                                            target.to_string_lossy().to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.file_status = format!("Delete failed: {}", e);
+                                    }
+                                }
+                                self.delete_confirm_open = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.delete_confirm_open = false;
+                            }
+                        });
+                    }
+                });
+        }
+
+        // 6. Autonomous Full-Fledged Application Scaffolder Modal
+        if self.show_scaffold_modal {
+            egui::Window::new("🏗 Autonomous Full-Fledged Application Scaffolder")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Generate a complete, production-grade application in the destination folder:");
+                    ui.add_space(4.0);
+
+                    ui.label("Application Architecture / Template:");
+                    for tmpl in AppTemplateType::all() {
+                        let is_sel = self.scaffold_selected_template == tmpl;
+                        if ui.selectable_label(is_sel, tmpl.label()).clicked() {
+                            self.scaffold_selected_template = tmpl;
+                            if self.scaffold_app_name == "my_application" || self.scaffold_app_name.is_empty() {
+                                self.scaffold_app_name = tmpl.default_folder_name().to_string();
+                            }
+                        }
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label("Application Name / Folder:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.scaffold_app_name)
+                            .desired_width(280.0),
+                    );
+
+                    let target_preview = self.workspace.root_path.join(&self.scaffold_app_name);
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("Target: {}", target_preview.display()))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                    );
+
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("✓ Includes src/, tests/, README.md, and executable setup.sh & start.sh")
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(0x4a, 0xde, 0x80)),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("⚡ Generate & Deploy Full App").size(12.5).strong().color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0xd9, 0x77, 0x06)))
+                            .clicked()
+                        {
+                            let tmpl = self.scaffold_selected_template;
+                            let name = self.scaffold_app_name.clone();
+                            match self.scaffold_app(tmpl, &name) {
+                                Ok(rep) => {
+                                    let _ = tx.send(crate::ui::app::AppMessage::Audit(
+                                        "app.scaffold".to_string(),
+                                        rep.target_dir.display().to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.file_status = format!("Scaffold failed: {}", e);
+                                }
+                            }
+                            self.show_scaffold_modal = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_scaffold_modal = false;
+                        }
+                    });
+                });
+        }
+    }
+
+    fn save_to_file(&mut self) -> bool {
+        let path = PathBuf::from(self.file_path.trim());
+        if path.as_os_str().is_empty() {
+            self.file_status = "Pick a file path first.".to_string();
+            return false;
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    self.file_status = format!("Can't create folder: {}", e);
+                    return false;
+                }
             }
         }
-        out
-    }
-
-    fn syntax_for_language(lang: &str) -> Syntax {
-        match lang {
-            "rust" => Syntax::rust(),
-            "python" => Syntax::python(),
-            "javascript" | "typescript" => Syntax::rust(),
-            "go" => Syntax::rust(),
-            "c" | "cpp" => Syntax::rust(),
-            "java" => Syntax::rust(),
-            "sql" => Syntax::sql(),
-            "shell" => Syntax::shell(),
-            "lua" => Syntax::lua(),
-            "asm" => Syntax::asm(),
-            _ => Syntax::rust(),
+        match std::fs::write(&path, &self.code) {
+            Ok(()) => {
+                self.file_status = format!("Saved {} bytes to {}", self.code.len(), path.display());
+                let _ = self.workspace.refresh_tree();
+                true
+            }
+            Err(e) => {
+                self.file_status = format!("Save failed: {}", e);
+                false
+            }
         }
     }
-}
 
-/// Extracts code from a markdown block if present, or returns trimmed content.
-pub fn extract_code_or_raw(content: &str) -> String {
-    if let Some(start) = content.find("```") {
-        let after_ticks = &content[start + 3..];
-        let code_start = after_ticks.find('\n').map(|i| i + 1).unwrap_or(0);
-        let code_body = &after_ticks[code_start..];
-        if let Some(end) = code_body.find("```") {
-            return code_body[..end].trim().to_string();
+    fn open_from_file(&mut self) -> bool {
+        let path = self.file_path.trim().to_string();
+        if path.is_empty() {
+            self.file_status = "Pick a file path first.".to_string();
+            return false;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.code = text;
+                self.file_status = format!("Opened {} ({} bytes)", path, self.code.len());
+                self.language = Self::guess_language_for(Path::new(&path));
+                true
+            }
+            Err(e) => {
+                self.file_status = format!("Open failed: {}", e);
+                false
+            }
         }
     }
-    content.trim().to_string()
-}
 
-impl EditorPanel {
+    fn apply_template(&mut self, kind: &str) {
+        match kind {
+            "rust" => {
+                self.language = "rust".to_string();
+                self.code = "// Copyright 2026 Sean M. Stow. All rights reserved.\n// New Rust app\n// Run: cargo run or rustc main.rs -o app && ./app\n\nfn main() {\n    println!(\"Hello from ML Lab\");\n}\n".to_string();
+            }
+            "python" => {
+                self.language = "python".to_string();
+                self.code = "# Copyright 2026 Sean M. Stow. All rights reserved.\n# New Python app\n# Run: python3 main.py\n\ndef main():\n    print(\"Hello from ML Lab\")\n\nif __name__ == \"__main__\":\n    main()\n".to_string();
+            }
+            "shell" => {
+                self.language = "shell".to_string();
+                self.code = "#!/bin/sh\n# Copyright 2026 Sean M. Stow. All rights reserved.\n# New shell script\n# Run: sh script.sh\n\necho \"Hello from ML Lab\"\n".to_string();
+            }
+            _ => {}
+        }
+        self.file_status = format!("{} template loaded — Save to keep it.", kind);
+    }
+
+    fn run_hint(&self) -> &str {
+        match self.language.as_str() {
+            "rust" => "Run: cargo run or rustc <file> -o app && ./app",
+            "python" => "Run: python3 <file>",
+            "shell" => "Run: bash <file>",
+            "javascript" => "Run: node <file>",
+            _ => "Run with your toolchain",
+        }
+    }
+
+    pub fn push_chunk(&mut self, suggestion_id: usize, piece: &str) {
+        if suggestion_id + 1 != self.suggestion_id || piece.is_empty() {
+            return;
+        }
+        let clean = crate::ui::chat::sanitize_text_cow(piece);
+        if clean.is_empty() {
+            return;
+        }
+        if self.suggestion_buf.len() < 50_000 {
+            self.suggestion_buf.push_str(&clean);
+        }
+        if self.coder_stream_buf.len() < 50_000 {
+            self.coder_is_streaming = true;
+            self.coder_stream_buf.push_str(&clean);
+        }
+    }
+
+    pub fn handle_ai_suggestion(&mut self, suggestion_id: usize, response: Result<crate::ollama::api::ChatResponse, anyhow::Error>) {
+        if suggestion_id + 1 != self.suggestion_id {
+            return;
+        }
+        self.suggestion_buf.clear();
+        self.coder_is_streaming = false;
+        self.coder_stream_buf.clear();
+
+        match response {
+            Ok(resp) => {
+                let clean = crate::ui::chat::sanitize_text(&resp.message.content);
+                self.pending_suggestion = Some(clean.clone());
+                self.push_coder_message(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: clean,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+            Err(e) => {
+                let err_msg = crate::ui::chat::sanitize_text(&format!("Error: {}", e));
+                self.pending_suggestion = Some(err_msg.clone());
+                self.push_coder_message(ChatMessage {
+                    role: "system".to_string(),
+                    content: err_msg,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+        }
+    }
+
     fn send_coder_message(
         &mut self,
         prompt: &str,
@@ -769,11 +1817,11 @@ impl EditorPanel {
         let mut full_prompt = String::new();
         if self.include_editor_context && !self.code.trim().is_empty() {
             full_prompt.push_str(&format!(
-                "Current File ({}, {}):\n```{}\n{}\n```\n\nTask / Request:\n{}",
-                self.file_path, self.language, self.language, self.code, p
+                "Workspace Destination: {}\nCurrent File ({}, {}):\n```{}\n{}\n```\n\nTask / Request:\n{}",
+                self.workspace.root_path.display(), self.file_path, self.language, self.language, self.code, p
             ));
         } else {
-            full_prompt.push_str(p);
+            full_prompt.push_str(&format!("Workspace Destination: {}\n\nTask:\n{}", self.workspace.root_path.display(), p));
         }
 
         let suggestion_id = self.suggestion_id;
@@ -786,7 +1834,7 @@ impl EditorPanel {
         let sys_prompt = if !system_prompt.trim().is_empty() {
             system_prompt.to_string()
         } else {
-            "You are an expert software engineer and code architect. Produce correct, clean, idiomatic code in standard markdown code blocks with language specifiers.".to_string()
+            "You are an expert software engineer and code architect. When generating full applications, specify files using '### File: relative/path/to/file' followed by code fences. Always include setup.sh and start.sh scripts.".to_string()
         };
 
         let history: Vec<(String, String)> = self
@@ -852,7 +1900,6 @@ impl EditorPanel {
         self.suggestion_buf.clear();
     }
 
-    /// Code arriving from chat: adopt it and guess its language.
     pub fn set_code_from_chat(&mut self, code: String, lang: String) {
         let l = lang.to_lowercase();
         let mapped = match l.as_str() {
@@ -872,137 +1919,41 @@ impl EditorPanel {
         self.file_status = "Code from chat — pick a file path and Save.".to_string();
     }
 
-    fn default_path() -> String {
-        let base = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        base.join("Documents")
-            .join("Code_air")
-            .join("ml_lab")
-            .join("main.py")
-            .to_string_lossy()
-            .to_string()
-    }
-
-    fn save_to_file(&mut self) -> bool {
-        let path = std::path::PathBuf::from(self.file_path.trim());
-        if path.as_os_str().is_empty() {
-            self.file_status = "Pick a file path first.".to_string();
-            return false;
-        }
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    self.file_status = format!("Can't create folder: {}", e);
-                    return false;
-                }
-            }
-        }
-        match std::fs::write(&path, &self.code) {
-            Ok(()) => {
-                self.file_status = format!("Saved {} bytes to {}", self.code.len(), path.display());
-                true
-            }
-            Err(e) => {
-                self.file_status = format!("Save failed: {}", e);
-                false
-            }
+    fn syntax_for_language(lang: &str) -> Syntax {
+        match lang {
+            "rust" => Syntax::rust(),
+            "shell" => Syntax::shell(),
+            _ => Syntax::rust(),
         }
     }
 
-    fn open_from_file(&mut self) -> bool {
-        let path = self.file_path.trim().to_string();
-        if path.is_empty() {
-            self.file_status = "Pick a file path first.".to_string();
-            return false;
+    pub fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
+        let diff = similar::TextDiff::from_lines(old, new);
+        let mut out = Vec::new();
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                similar::ChangeTag::Delete => '-',
+                similar::ChangeTag::Insert => '+',
+                similar::ChangeTag::Equal => ' ',
+            };
+            out.push((sign, change.value()));
         }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                self.code = text;
-                self.file_status = format!("Opened {} ({} bytes)", path, self.code.len());
-                true
-            }
-            Err(e) => {
-                self.file_status = format!("Open failed: {}", e);
-                false
-            }
+        out
+    }
+}
+
+pub fn extract_code_or_raw(content: &str) -> String {
+    if let Some(start) = content.find("```") {
+        let after_fence = &content[start + 3..];
+        let code_body = match after_fence.find('\n') {
+            Some(nl) => &after_fence[nl + 1..],
+            None => after_fence,
+        };
+        if let Some(end) = code_body.find("```") {
+            return code_body[..end].trim().to_string();
         }
     }
-
-    fn apply_template(&mut self, kind: &str) {
-        match kind {
-            "rust" => {
-                self.language = "rust".to_string();
-                self.code = "// New Rust app\n// Run: rustc main.rs -o app && ./app\n\nfn main() {\n    println!(\"Hello from ML Lab\");\n}\n".to_string();
-            }
-            "python" => {
-                self.language = "python".to_string();
-                self.code = "# New Python app\n# Run: python3 main.py\n\ndef main():\n    print(\"Hello from ML Lab\")\n\n\nif __name__ == \"__main__\":\n    main()\n".to_string();
-            }
-            "shell" => {
-                self.language = "shell".to_string();
-                self.code = "#!/bin/sh\n# New shell script\n# Run: sh script.sh\n\necho \"Hello from ML Lab\"\n".to_string();
-            }
-            _ => {}
-        }
-        self.file_status = format!("{} template loaded — Save to keep it.", kind);
-    }
-
-    fn run_hint(&self) -> &str {
-        match self.language.as_str() {
-            "rust" => "Run: rustc <file> -o app && ./app",
-            "python" => "Run: python3 <file>",
-            "shell" => "Run: sh <file>",
-            "javascript" => "Run: node <file>",
-            _ => "Run with your toolchain",
-        }
-    }
-
-    /// Live token piece for the in-flight suggestion; stale ids ignored.
-    pub fn push_chunk(&mut self, suggestion_id: usize, piece: &str) {
-        if suggestion_id + 1 != self.suggestion_id || piece.is_empty() {
-            return;
-        }
-        let clean = crate::ui::chat::sanitize_text_cow(piece);
-        if clean.is_empty() {
-            return;
-        }
-        if self.suggestion_buf.len() < 50_000 {
-            self.suggestion_buf.push_str(&clean);
-        }
-        if self.coder_stream_buf.len() < 50_000 {
-            self.coder_is_streaming = true;
-            self.coder_stream_buf.push_str(&clean);
-        }
-    }
-
-    pub fn handle_ai_suggestion(&mut self, suggestion_id: usize, response: Result<crate::ollama::api::ChatResponse, anyhow::Error>) {
-        if suggestion_id + 1 != self.suggestion_id {
-            return;
-        }
-        self.suggestion_buf.clear();
-        self.coder_is_streaming = false;
-        self.coder_stream_buf.clear();
-
-        match response {
-            Ok(resp) => {
-                let clean = crate::ui::chat::sanitize_text(&resp.message.content);
-                self.pending_suggestion = Some(clean.clone());
-                self.push_coder_message(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: clean,
-                    timestamp: chrono::Utc::now(),
-                });
-            }
-            Err(e) => {
-                let err_msg = crate::ui::chat::sanitize_text(&format!("Error: {}", e));
-                self.pending_suggestion = Some(err_msg.clone());
-                self.push_coder_message(ChatMessage {
-                    role: "system".to_string(),
-                    content: err_msg,
-                    timestamp: chrono::Utc::now(),
-                });
-            }
-        }
-    }
+    content.trim().to_string()
 }
 
 #[cfg(test)]
@@ -1012,16 +1963,13 @@ mod tests {
     #[test]
     fn suggestion_chunk_currency() {
         let mut e = EditorPanel::new();
-        // No request in flight: stale ids ignored.
         e.push_chunk(0, "x");
         assert!(e.suggestion_buf.is_empty());
-        // Simulate an issued request (id 0 -> next id 1).
         e.suggestion_id = 1;
         e.push_chunk(0, "hello ");
         e.push_chunk(0, "world");
         assert_eq!(e.suggestion_buf, "hello world");
         assert_eq!(e.coder_stream_buf, "hello world");
-        // Stale and future ids ignored.
         e.push_chunk(5, "stale");
         e.push_chunk(7, "stale");
         assert_eq!(e.suggestion_buf, "hello world");
@@ -1090,5 +2038,25 @@ mod tests {
         e.load_imported_code(relay_output);
         assert_eq!(e.code, "def solve_quantum_circuit():\n    return 42");
         assert_eq!(e.file_status, "Imported from Swarm Relay");
+    }
+
+    #[test]
+    fn test_editor_workspace_and_scaffold() {
+        let temp_dir = std::env::temp_dir().join(format!("test-editor-ws-{}", std::process::id()));
+        let mut e = EditorPanel::new();
+        e.workspace.set_root(temp_dir.clone()).unwrap();
+
+        // Scaffold Python AI Swarm app
+        let report = e.scaffold_app(AppTemplateType::PythonAiSwarm, "test_swarm").unwrap();
+        assert!(report.target_dir.join("app/main.py").exists());
+        assert!(report.target_dir.join("setup.sh").exists());
+        assert!(report.target_dir.join("start.sh").exists());
+
+        // Verify loaded file
+        assert!(e.file_path.contains("main.py"));
+        assert_eq!(e.language, "python");
+        assert!(e.code.contains("SwarmAgent"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

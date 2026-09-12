@@ -61,6 +61,18 @@ pub enum AppMessage {
     ShowStatus(usize),
     RunSkill { skill_name: String, target_slot: Option<usize> },
     ReinforceSkill { skill_id: Uuid, reward_delta: f32 },
+    TerminalRun(String),
+    TerminalFinished(crate::workspace::CommandResult),
+    WorkspaceMkdir(String),
+    WorkspaceTouch(String),
+    WorkspaceRm(String),
+    WorkspaceMv { src: String, dst: String },
+    WorkspaceLs(Option<String>),
+    WorkspaceProject(crate::commands::ProjectCommand),
+    #[allow(dead_code)]
+    DeployApp { template: crate::workspace::AppTemplateType, name: String },
+    #[allow(dead_code)]
+    DeployMultiFile(String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -1451,6 +1463,131 @@ impl AiDashboardApp {
                         if let Ok(Some(skill)) = st.reinforce_skill(skill_id, reward_delta) {
                             self.network.swarm_pheromones.deposit(skill.domain_idx, self.focused_slot, reward_delta);
                             self.status = format!("Skill '{}' reinforced ({:+.2})", skill.name, reward_delta);
+                        }
+                    }
+                }
+                AppMessage::TerminalRun(cmd_line) => {
+                    self.editor.run_terminal_command(&cmd_line, &self.tx, &self.rt);
+                    self.tab = Tab::Editor;
+                }
+                AppMessage::TerminalFinished(result) => {
+                    if let Some(st) = self.storage.as_ref() {
+                        let status_str = if result.success { "success" } else { "failed" };
+                        let _ = st.log_audit("terminal.exec", &format!("{}: {}", status_str, result.cmd));
+                    }
+                    self.editor.on_terminal_finished(result);
+                }
+                AppMessage::WorkspaceMkdir(dir_path) => {
+                    match self.editor.workspace.create_dir(std::path::Path::new(&dir_path)) {
+                        Ok(p) => {
+                            self.status = format!("Created folder: {}", p.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.mkdir", &p.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Failed to create folder: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceTouch(file_path) => {
+                    match self.editor.workspace.create_file(std::path::Path::new(&file_path), "") {
+                        Ok(p) => {
+                            self.status = format!("Created file: {}", p.display());
+                            self.editor.load_file_from_path(&p);
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.touch", &p.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Failed to create file: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceRm(target) => {
+                    match self.editor.workspace.delete_entry(std::path::Path::new(&target)) {
+                        Ok(()) => {
+                            self.status = format!("Deleted: {}", target);
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.rm", &target);
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Delete failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceMv { src, dst } => {
+                    match self.editor.workspace.move_entry(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+                        Ok(d) => {
+                            self.status = format!("Moved {} -> {}", src, d.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.mv", &format!("{} -> {}", src, dst));
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Move failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceLs(path_opt) => {
+                    let p = path_opt.unwrap_or_else(|| self.editor.workspace.root_path.display().to_string());
+                    self.status = format!("Listed contents of {}", p);
+                    let _ = self.editor.workspace.refresh_tree();
+                }
+                AppMessage::WorkspaceProject(proj) => match proj {
+                    crate::commands::ProjectCommand::Scaffold { template, name } => {
+                        let tmpl = match template.to_lowercase().as_str() {
+                            "python" | "py" | "swarm" => crate::workspace::AppTemplateType::PythonAiSwarm,
+                            "web" | "js" | "html" => crate::workspace::AppTemplateType::ModernWeb,
+                            "cyber" | "quantum" | "vault" => crate::workspace::AppTemplateType::QuantumCyberSecurity,
+                            _ => crate::workspace::AppTemplateType::RustHighPerformance,
+                        };
+                        match self.editor.scaffold_app(tmpl, &name) {
+                            Ok(rep) => {
+                                self.status = format!("Scaffolded {} in {}", rep.app_name, rep.target_dir.display());
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.log_audit("project.scaffold", &format!("{}: {}", rep.app_name, rep.target_dir.display()));
+                                }
+                            }
+                            Err(e) => {
+                                self.status = format!("Scaffold failed: {}", e);
+                            }
+                        }
+                    }
+                    crate::commands::ProjectCommand::Build => {
+                        self.editor.run_build(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Test => {
+                        self.editor.run_test(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Run => {
+                        self.editor.run_start(&self.tx, &self.rt);
+                    }
+                },
+                AppMessage::DeployApp { template, name } => {
+                    match self.editor.scaffold_app(template, &name) {
+                        Ok(rep) => {
+                            self.status = format!("App deployed to {}", rep.target_dir.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("app.deployed", &rep.target_dir.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("App deployment failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::DeployMultiFile(text) => {
+                    match self.editor.deploy_multi_file_from_text(&text) {
+                        Ok(rep) => {
+                            self.status = format!("Deployed {} files to {}", rep.created_files.len(), rep.target_dir.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("app.multi_file_deployed", &format!("{} files in {}", rep.created_files.len(), rep.target_dir.display()));
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Multi-file deploy failed: {}", e);
                         }
                     }
                 }

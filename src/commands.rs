@@ -13,6 +13,15 @@ pub enum SkillsCommand {
     Add { name: String, description: String },
 }
 
+/// Project management subcommands
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectCommand {
+    Scaffold { template: String, name: String },
+    Build,
+    Run,
+    Test,
+}
+
 /// Supported slash commands
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlashCommand {
@@ -25,6 +34,13 @@ pub enum SlashCommand {
     Audit,
     Threads(u32),
     Status,
+    Exec(String),
+    Mkdir(String),
+    Touch(String),
+    Rm(String),
+    Mv { src: String, dst: String },
+    Ls(Option<String>),
+    Project(ProjectCommand),
 }
 
 /// Action to apply to app state or chat slot
@@ -36,6 +52,8 @@ pub enum CommandAction {
     LaunchSwarm(String),
     RunSkill(String),
     SetThreads(u32),
+    ExecuteTerminal(String),
+    WorkspaceRefresh,
 }
 
 /// Formatted output of command execution
@@ -158,6 +176,71 @@ impl SlashCommand {
                 }
             }
             "status" | "info" => Ok(Some(SlashCommand::Status)),
+            "exec" | "run" => {
+                let cmd_line = parts.collect::<Vec<&str>>().join(" ");
+                if cmd_line.is_empty() {
+                    Err("Usage: /exec <command>\nExample: /exec cargo build".to_string())
+                } else {
+                    Ok(Some(SlashCommand::Exec(cmd_line)))
+                }
+            }
+            "mkdir" => {
+                let dir_path = parts.collect::<Vec<&str>>().join(" ");
+                if dir_path.is_empty() {
+                    Err("Usage: /mkdir <path>\nExample: /mkdir src/components".to_string())
+                } else {
+                    Ok(Some(SlashCommand::Mkdir(dir_path)))
+                }
+            }
+            "touch" => {
+                let file_path = parts.collect::<Vec<&str>>().join(" ");
+                if file_path.is_empty() {
+                    Err("Usage: /touch <file_path>\nExample: /touch src/utils.rs".to_string())
+                } else {
+                    Ok(Some(SlashCommand::Touch(file_path)))
+                }
+            }
+            "rm" | "del" => {
+                let target = parts.collect::<Vec<&str>>().join(" ");
+                if target.is_empty() {
+                    Err("Usage: /rm <path>\nExample: /rm old_module.rs".to_string())
+                } else {
+                    Ok(Some(SlashCommand::Rm(target)))
+                }
+            }
+            "mv" | "move" => {
+                let src = match parts.next() {
+                    Some(s) => s.to_string(),
+                    None => return Err("Usage: /mv <source> <destination>\nExample: /mv draft.py main.py".to_string()),
+                };
+                let dst = match parts.next() {
+                    Some(d) => d.to_string(),
+                    None => return Err("Usage: /mv <source> <destination>".to_string()),
+                };
+                Ok(Some(SlashCommand::Mv { src, dst }))
+            }
+            "ls" | "dir" => {
+                let path_arg = parts.next().map(|s| s.to_string());
+                Ok(Some(SlashCommand::Ls(path_arg)))
+            }
+            "project" | "proj" => {
+                let sub = parts.next().unwrap_or("run").to_ascii_lowercase();
+                match sub.as_str() {
+                    "scaffold" | "create" | "new" => {
+                        let tmpl = parts.next().unwrap_or("rust").to_string();
+                        let name = parts.collect::<Vec<&str>>().join(" ");
+                        let clean_name = if name.is_empty() { "app".to_string() } else { name };
+                        Ok(Some(SlashCommand::Project(ProjectCommand::Scaffold {
+                            template: tmpl,
+                            name: clean_name,
+                        })))
+                    }
+                    "build" => Ok(Some(SlashCommand::Project(ProjectCommand::Build))),
+                    "test" => Ok(Some(SlashCommand::Project(ProjectCommand::Test))),
+                    "run" | "start" => Ok(Some(SlashCommand::Project(ProjectCommand::Run))),
+                    other => Err(format!("Unknown project subcommand '{}'. Usage: /project [scaffold <type> <name> | build | test | run]", other)),
+                }
+            }
             unknown => Err(format!("Unknown command '/{}'. Type /help for available commands.", unknown)),
         }
     }
@@ -194,7 +277,14 @@ impl SlashCommand {
          • `/skills add <name> <desc>` — Define a new reusable capability.\n\
          • `/audit` — Query recent security and secret detection events.\n\
          • `/threads <1-64>` — Set inference CPU threads for matrix acceleration.\n\
-         • `/status` — View system memory, GPU offload, and Ollama status."
+         • `/status` — View system memory, GPU offload, and Ollama status.\n\
+         • `/exec <command>` — Run terminal command in active destination folder.\n\
+         • `/mkdir <path>` — Create directory structure in destination folder.\n\
+         • `/touch <path>` — Create a new source file in destination folder.\n\
+         • `/rm <path>` — Delete a file or folder in destination folder.\n\
+         • `/mv <src> <dst>` — Move or rename file/folder in destination folder.\n\
+         • `/ls [path]` — List files and subfolders in destination folder.\n\
+         • `/project scaffold <type> <name>` — Scaffold full-fledged application."
     }
 }
 
@@ -368,6 +458,124 @@ pub async fn run_headless_cli(cmd: SlashCommand) -> Result<()> {
                 _ => "/clear",
             });
         }
+        SlashCommand::Exec(cmd_line) => {
+            let cwd = std::env::current_dir()?;
+            println!("Executing: {} (in {})", cmd_line, cwd.display());
+            let result = crate::workspace::CommandRunner::execute(&cmd_line, &cwd).await?;
+            println!("{}", result.format_display());
+        }
+        SlashCommand::Mkdir(dir_path) => {
+            let cwd = std::env::current_dir()?;
+            let target = cwd.join(&dir_path);
+            std::fs::create_dir_all(&target)?;
+            println!("Created folder: {}", target.display());
+        }
+        SlashCommand::Touch(file_path) => {
+            let cwd = std::env::current_dir()?;
+            let target = cwd.join(&file_path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !target.exists() {
+                let header = crate::workspace::WorkspaceManager::default_header_for(&target);
+                std::fs::write(&target, header.as_bytes())?;
+            }
+            println!("Created file: {}", target.display());
+        }
+        SlashCommand::Rm(path) => {
+            let cwd = std::env::current_dir()?;
+            let target = cwd.join(&path);
+            if !target.exists() {
+                println!("Target does not exist: {}", target.display());
+            } else if target.is_dir() {
+                std::fs::remove_dir_all(&target)?;
+                println!("Removed directory: {}", target.display());
+            } else {
+                std::fs::remove_file(&target)?;
+                println!("Removed file: {}", target.display());
+            }
+        }
+        SlashCommand::Mv { src, dst } => {
+            let cwd = std::env::current_dir()?;
+            let s = cwd.join(&src);
+            let d = cwd.join(&dst);
+            if let Some(parent) = d.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&s, &d)?;
+            println!("Moved {} -> {}", s.display(), d.display());
+        }
+        SlashCommand::Ls(path_opt) => {
+            let cwd = std::env::current_dir()?;
+            let target = path_opt.map(|p| cwd.join(p)).unwrap_or(cwd);
+            println!("=== Directory Listing: {} ===", target.display());
+            for entry in std::fs::read_dir(&target)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                let is_dir = meta.is_dir();
+                let icon = if is_dir { "📁" } else { "📄" };
+                println!("{} {:<30} {:>10} bytes", icon, entry.file_name().to_string_lossy(), meta.len());
+            }
+        }
+        SlashCommand::Project(proj) => match proj {
+            ProjectCommand::Scaffold { template, name } => {
+                let cwd = std::env::current_dir()?;
+                let tmpl = match template.to_lowercase().as_str() {
+                    "python" | "py" | "swarm" => crate::workspace::AppTemplateType::PythonAiSwarm,
+                    "web" | "js" | "html" => crate::workspace::AppTemplateType::ModernWeb,
+                    "cyber" | "quantum" | "vault" => crate::workspace::AppTemplateType::QuantumCyberSecurity,
+                    _ => crate::workspace::AppTemplateType::RustHighPerformance,
+                };
+                let report = crate::workspace::AppScaffolder::scaffold(tmpl, &cwd, &name)?;
+                println!("=== Full-Fledged Application Scaffolded Successfully ===");
+                println!("App Name: {}", report.app_name);
+                println!("Destination: {}", report.target_dir.display());
+                println!("Created Folders: {}", report.created_dirs.len());
+                println!("Created Files: {}", report.created_files.len());
+                println!("Setup Script: {}", report.setup_script.display());
+                println!("Startup Script: {}", report.startup_script.display());
+            }
+            ProjectCommand::Build => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("Cargo.toml").exists() {
+                    "cargo build"
+                } else if cwd.join("package.json").exists() {
+                    "npm run build"
+                } else {
+                    "echo 'No build system detected'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+            ProjectCommand::Test => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("Cargo.toml").exists() {
+                    "cargo test"
+                } else if cwd.join("pytest.ini").exists() || cwd.join("requirements.txt").exists() {
+                    "pytest"
+                } else if cwd.join("package.json").exists() {
+                    "npm test"
+                } else {
+                    "echo 'No test runner detected'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+            ProjectCommand::Run => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("start.sh").exists() {
+                    "./start.sh"
+                } else if cwd.join("Cargo.toml").exists() {
+                    "cargo run"
+                } else if cwd.join("main.py").exists() {
+                    "python3 main.py"
+                } else {
+                    "echo 'No run target detected'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+        },
     }
     Ok(())
 }
@@ -446,5 +654,51 @@ mod tests {
     #[test]
     fn parse_unknown_command() {
         assert!(SlashCommand::parse("/foobar").is_err());
+    }
+
+    #[test]
+    fn parse_file_and_exec_commands() {
+        assert_eq!(
+            SlashCommand::parse("/exec cargo check").unwrap(),
+            Some(SlashCommand::Exec("cargo check".to_string()))
+        );
+        assert_eq!(
+            SlashCommand::parse("/run python3 script.py").unwrap(),
+            Some(SlashCommand::Exec("python3 script.py".to_string()))
+        );
+        assert_eq!(
+            SlashCommand::parse("/mkdir src/neural/quantum").unwrap(),
+            Some(SlashCommand::Mkdir("src/neural/quantum".to_string()))
+        );
+        assert_eq!(
+            SlashCommand::parse("/touch src/neural/mod.rs").unwrap(),
+            Some(SlashCommand::Touch("src/neural/mod.rs".to_string()))
+        );
+        assert_eq!(
+            SlashCommand::parse("/rm old_file.rs").unwrap(),
+            Some(SlashCommand::Rm("old_file.rs".to_string()))
+        );
+        assert_eq!(
+            SlashCommand::parse("/mv draft.py final.py").unwrap(),
+            Some(SlashCommand::Mv {
+                src: "draft.py".to_string(),
+                dst: "final.py".to_string()
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/ls src").unwrap(),
+            Some(SlashCommand::Ls(Some("src".to_string())))
+        );
+        assert_eq!(
+            SlashCommand::parse("/project scaffold rust my_service").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::Scaffold {
+                template: "rust".to_string(),
+                name: "my_service".to_string(),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/project build").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::Build))
+        );
     }
 }

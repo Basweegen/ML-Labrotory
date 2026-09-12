@@ -1038,6 +1038,28 @@ impl ChatPanel {
                         crate::commands::SlashCommand::Status => {
                             let _ = tx.send(crate::ui::app::AppMessage::ShowStatus(slot_idx));
                         }
+                        crate::commands::SlashCommand::Exec(cmd_line) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::TerminalRun(cmd_line));
+                            self.push_system_note("⚡ **Command sent to IDE Terminal Dock.**");
+                        }
+                        crate::commands::SlashCommand::Mkdir(dir_path) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceMkdir(dir_path));
+                        }
+                        crate::commands::SlashCommand::Touch(file_path) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceTouch(file_path));
+                        }
+                        crate::commands::SlashCommand::Rm(target) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceRm(target));
+                        }
+                        crate::commands::SlashCommand::Mv { src, dst } => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceMv { src, dst });
+                        }
+                        crate::commands::SlashCommand::Ls(path_opt) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceLs(path_opt));
+                        }
+                        crate::commands::SlashCommand::Project(proj) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceProject(proj));
+                        }
                     }
                     return;
                 }
