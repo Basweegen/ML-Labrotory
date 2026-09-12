@@ -176,6 +176,30 @@ pub enum OllamaError {
     Api(String),
 }
 
+/// Plain-language cause of a failed Ollama call, for the status line.
+/// Raw reqwest text ("error sending request for url...") tells users nothing,
+/// so the team reports "it doesn't connect" with no actionable detail.
+pub fn friendly_error(err: &anyhow::Error) -> String {
+    for cause in err.chain() {
+        if let Some(req) = cause.downcast_ref::<reqwest::Error>() {
+            if req.is_connect() {
+                return "Ollama isn't reachable - start it (`ollama serve`), then press Refresh".to_string();
+            }
+            if req.is_timeout() {
+                return "Ollama timed out - still loading a model? Wait a bit, then press Refresh".to_string();
+            }
+        }
+    }
+    let s = format!("{err:#}");
+    if s.contains("Connection refused") {
+        return "Ollama isn't reachable - start it (`ollama serve`), then press Refresh".to_string();
+    }
+    if s.contains("timed out") || s.contains("timeout") {
+        return "Ollama timed out - still loading a model? Wait a bit, then press Refresh".to_string();
+    }
+    s.chars().take(160).collect()
+}
+
 #[derive(Clone)]
 pub struct OllamaClient {
     client: Client,
@@ -422,6 +446,16 @@ mod tests {
         assert!(OllamaClient::new("http://localhost.evil.com:11434", false).is_err());
         assert!(OllamaClient::new("ftp://localhost/x", false).is_err());
         assert!(OllamaClient::new("not a url", false).is_err());
+    }
+
+    #[test]
+    fn friendly_error_speaks_plainly() {
+        let refused = anyhow::anyhow!("Connection refused (os error 111)");
+        assert!(friendly_error(&refused).contains("ollama serve"));
+        let time = anyhow::anyhow!("request timed out after 10s");
+        assert!(friendly_error(&time).contains("timed out"));
+        let other = anyhow::anyhow!("Status: 500 Internal Server Error");
+        assert_eq!(friendly_error(&other), "Status: 500 Internal Server Error");
     }
 
     #[test]

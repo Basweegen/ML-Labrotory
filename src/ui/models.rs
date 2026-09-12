@@ -142,11 +142,23 @@ impl ModelsPanel {
         ui.add_space(8.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             if models.is_empty() {
+                // Down (no version handshake) vs linked-but-empty need
+                // different fixes: setup steps vs a pull command.
+                let down = ollama_version.is_none();
                 ui.centered_and_justified(|ui| {
                     ui.add_space(40.0);
-                    ui.label(egui::RichText::new("No models installed").size(16.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Pull a model to get started").size(13.0).color(egui::Color32::from_rgb(0x66, 0x66, 0x66)));
+                    if down {
+                        ui.label(egui::RichText::new("Ollama not reachable").size(16.0).color(egui::Color32::from_rgb(0xcc, 0x66, 0x66)));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("1. Install Ollama: ollama.com/download (Linux, macOS, Windows)").size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                        ui.label(egui::RichText::new("2. Start it: ollama serve").size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                        ui.label(egui::RichText::new("3. Pull a model: ollama pull llama3.2:1b").size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                        ui.label(egui::RichText::new("4. This tab retries on its own - or press Refresh").size(13.0).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+                    } else {
+                        ui.label(egui::RichText::new("No models installed").size(16.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Pull a model to get started").size(13.0).color(egui::Color32::from_rgb(0x66, 0x66, 0x66)));
+                    }
                 });
             } else {
                 let mem = crate::resources::system_memory();

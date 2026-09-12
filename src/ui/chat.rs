@@ -384,6 +384,12 @@ impl ChatPanel {
         self.revision
     }
 
+    /// Latency numbers for the Compare scoreboard: last reply secs,
+    /// lifetime total, reply count (avg = total / count).
+    pub fn latency_stats(&self) -> (Option<f32>, f32, u32) {
+        (self.last_reply_secs, self.reply_secs_total, self.reply_count)
+    }
+
     /// System notice bubble (guard blocks, etc.).
     pub fn push_system_note(&mut self, content: impl Into<String>) {
         self.push_capped(ChatMessage {
@@ -429,6 +435,11 @@ impl ChatPanel {
 
     pub fn stream_seq(&self) -> u64 {
         self.stream_seq
+    }
+
+    /// Live streamed chars (0 while thinking); drives the avatar mouth.
+    pub fn stream_len(&self) -> usize {
+        self.stream_buf.len()
     }
 
     /// Live token piece from the streaming task. Stale generations (after
@@ -729,6 +740,19 @@ impl ChatPanel {
                     }
                 }
                 ui.add_space(4.0);
+                let relay_btn = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Relay \u{25B8}").size(13.0))
+                            .fill(egui::Color32::from_rgb(0x44, 0x22, 0x66))
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .on_hover_text("Pass this input through every slot in order - each model builds on the last");
+                if relay_btn.clicked() {
+                    if let Some(prompt) = self.take_broadcast() {
+                        let _ = tx.send(crate::ui::app::AppMessage::Relay(prompt));
+                    }
+                }
+                ui.add_space(4.0);
                 let can_retry = !self.is_streaming
                     && selected_model.is_some()
                     && api_client.is_some()
@@ -918,12 +942,46 @@ impl ChatPanel {
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
     ) {
         let is_user = msg.role == "user";
-        let (bg_color, align) = if is_user {
-            (egui::Color32::from_rgb(0x00, 0x44, 0x88), egui::Align::RIGHT)
+        // Light-theme aware: hardcoded dark fills + white text turn
+        // unreadable on a light background, so pick per visuals.
+        let dark = ui.visuals().dark_mode;
+        let (bg_color, align, body) = if is_user {
+            (
+                egui::Color32::from_rgb(0x00, 0x44, 0x88),
+                egui::Align::RIGHT,
+                egui::Color32::WHITE,
+            )
         } else if msg.role == "system" {
-            (egui::Color32::from_rgb(0x44, 0x33, 0x00), egui::Align::LEFT)
+            (
+                if dark {
+                    egui::Color32::from_rgb(0x44, 0x33, 0x00)
+                } else {
+                    egui::Color32::from_rgb(0xf5, 0xe6, 0xc0)
+                },
+                egui::Align::LEFT,
+                if dark {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(0x11, 0x11, 0x11)
+                },
+            )
+        } else if dark {
+            (
+                egui::Color32::from_rgb(0x2d, 0x2d, 0x2d),
+                egui::Align::LEFT,
+                egui::Color32::WHITE,
+            )
         } else {
-            (egui::Color32::from_rgb(0x2d, 0x2d, 0x2d), egui::Align::LEFT)
+            (
+                egui::Color32::from_rgb(0xea, 0xea, 0xea),
+                egui::Align::LEFT,
+                egui::Color32::from_rgb(0x11, 0x11, 0x11),
+            )
+        };
+        let meta = if dark {
+            egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)
+        } else {
+            egui::Color32::from_rgb(0x55, 0x55, 0x55)
         };
         let who = if is_user {
             "You"
@@ -954,11 +1012,14 @@ impl ChatPanel {
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
+                    // Readability: bubbles never stretch full-width on wide
+                    // windows; long lines wrap inside the cap instead.
+                    ui.set_max_width(620.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(msg.timestamp.format("%H:%M").to_string())
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                                .color(meta),
                         );
                         ui.label(
                             egui::RichText::new(who)
@@ -1120,23 +1181,6 @@ impl ChatPanel {
                                 }
                                 note.push_str("\n*Usage:* `/swarm preset <id> [prompt]` (e.g. `/swarm preset triad Build an auth system`)");
                                 self.push_system_note(&note);
-                            }
-                            crate::commands::SwarmCommand::Dag { preset, prompt } => {
-                                let dag_preset = preset.as_deref().and_then(crate::swarm::DagPreset::from_id);
-                                let p_label = dag_preset.map(|p| p.label()).unwrap_or("Diamond Swarm");
-                                let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmDag {
-                                    preset: dag_preset,
-                                    prompt,
-                                });
-                                self.push_system_note(&format!("🕸 **Autonomous Swarm DAG `{}` activated.** Switching to Relay tab...", p_label));
-                            }
-                            crate::commands::SwarmCommand::Blackboard => {
-                                let _ = tx.send(crate::ui::app::AppMessage::ShowBlackboard);
-                                self.push_system_note("🐝 **Opening Stigmergic Blackboard Vault in Relay tab...**");
-                            }
-                            crate::commands::SwarmCommand::Abort => {
-                                let _ = tx.send(crate::ui::app::AppMessage::AbortSwarm);
-                                self.push_system_note("🛑 **Aborting active swarm operations across all nodes.**");
                             }
                         }
                         crate::commands::SlashCommand::Skills(sub) => {

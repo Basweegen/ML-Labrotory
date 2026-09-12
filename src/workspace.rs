@@ -1,30 +1,187 @@
 // Copyright 2026 Sean M. Stow. All rights reserved.
-//! Workspace Management & Application Scaffolding Engine
-//!
-//! Provides comprehensive, security-hardened file system access,
-//! directory tree exploration, full CRUD (create, read, update, delete, move),
-//! asynchronous command execution (terminal runner), and multi-file application
-//! scaffolding that produces complete, highly organized projects directly in
-//! a selected destination folder.
-
+//! Project workspace: confined file CRUD (Workspace) plus the
+//! scaffolding engine (WorkspaceManager, CommandRunner, AppScaffolder).
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::time::Instant;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// Standard copyright header for generated files
+pub const MAX_OPEN_CHARS: usize = 500_000;
+
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+pub struct Workspace {
+    root: PathBuf,
+}
+
+impl Workspace {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+        let root = root.into();
+        anyhow::ensure!(root.is_dir(), "workspace root is not a directory: {}", root.display());
+        let root = root.canonicalize().context("canonicalizing workspace root")?;
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
+        let mut p = self.root.clone();
+        for comp in Path::new(rel).components() {
+            match comp {
+                Component::Normal(c) => p.push(c),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if p != self.root {
+                        p.pop();
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    anyhow::bail!("absolute paths are not allowed in the workspace");
+                }
+            }
+        }
+        self.contained(&p)
+    }
+
+    fn contained(&self, p: &Path) -> Result<PathBuf> {
+        let anchor = if p.exists() {
+            p.canonicalize().context("canonicalizing workspace path")?
+        } else {
+            let parent = p.parent().unwrap_or(&self.root);
+            let mut anc = parent;
+            while !anc.exists() {
+                anc = anc.parent().unwrap_or(&self.root);
+            }
+            let base = anc.canonicalize().context("canonicalizing ancestor")?;
+            let rel = p.strip_prefix(anc).unwrap_or(Path::new(""));
+            base.join(rel)
+        };
+        anyhow::ensure!(
+            anchor.starts_with(&self.root),
+            "path escapes the workspace root"
+        );
+        Ok(p.to_path_buf())
+    }
+
+    pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
+        let dir = self.resolve(rel)?;
+        anyhow::ensure!(dir.is_dir(), "not a directory");
+        let mut out = Vec::new();
+        for ent in std::fs::read_dir(&dir).with_context(|| format!("listing {}", dir.display()))? {
+            let ent = ent?;
+            let ft = ent.file_type()?;
+            let size = if ft.is_file() { ent.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
+            out.push(DirEntry {
+                name: ent.file_name().to_string_lossy().into_owned(),
+                is_dir: ft.is_dir(),
+                size,
+            });
+        }
+        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+        Ok(out)
+    }
+
+    pub fn read(&self, rel: &str) -> Result<String> {
+        let p = self.resolve(rel)?;
+        let bytes = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        anyhow::ensure!(
+            s.chars().count() <= MAX_OPEN_CHARS,
+            "file too large to open ({} chars, cap {})",
+            s.chars().count(),
+            MAX_OPEN_CHARS
+        );
+        Ok(s)
+    }
+
+    pub fn write(&self, rel: &str, content: &str) -> Result<()> {
+        let p = self.resolve(rel)?;
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating dirs for {}", p.display()))?;
+        }
+        std::fs::write(&p, content).with_context(|| format!("writing {}", p.display()))?;
+        Ok(())
+    }
+
+    pub fn create_dir(&self, rel: &str) -> Result<()> {
+        let p = self.resolve(rel)?;
+        std::fs::create_dir_all(&p).with_context(|| format!("creating dir {}", p.display()))?;
+        Ok(())
+    }
+
+    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let a = self.resolve(from)?;
+        let b = self.resolve(to)?;
+        if let Some(parent) = b.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&a, &b)
+            .with_context(|| format!("renaming {} -> {}", a.display(), b.display()))?;
+        Ok(())
+    }
+
+    pub fn delete(&self, rel: &str) -> Result<()> {
+        let p = self.resolve(rel)?;
+        anyhow::ensure!(p != self.root, "refusing to delete the workspace root");
+        if p.is_dir() {
+            std::fs::remove_dir_all(&p).with_context(|| format!("removing dir {}", p.display()))?;
+        } else if p.exists() {
+            std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+        } else {
+            anyhow::bail!("no such file or directory");
+        }
+        Ok(())
+    }
+}
+
+pub const MAX_CMD_CHARS: usize = 4000;
+
+pub fn spawn_shell(cmd: &str, cwd: &Path) -> Result<tokio::process::Child> {
+    anyhow::ensure!(!cmd.trim().is_empty(), "empty command");
+    anyhow::ensure!(
+        cmd.len() <= MAX_CMD_CHARS,
+        "command too long (cap {MAX_CMD_CHARS})"
+    );
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning command in {}", cwd.display()))?;
+    Ok(child)
+}
+
+pub fn join_rel(dir: &str, name: &str) -> String {
+    if dir.trim().is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", dir.trim_end_matches('/'), name)
+    }
+}
+
+
 pub const COPYRIGHT_HEADER_RUST: &str = "// Copyright 2026 Sean M. Stow. All rights reserved.\n";
 pub const COPYRIGHT_HEADER_PYTHON: &str = "# Copyright 2026 Sean M. Stow. All rights reserved.\n";
 pub const COPYRIGHT_HEADER_SHELL: &str = "#!/bin/sh\n# Copyright 2026 Sean M. Stow. All rights reserved.\n";
 pub const COPYRIGHT_HEADER_MARKDOWN: &str = "<!-- Copyright 2026 Sean M. Stow. All rights reserved. -->\n";
 pub const COPYRIGHT_HEADER_HTML: &str = "<!-- Copyright 2026 Sean M. Stow. All rights reserved. -->\n";
 
-/// Single entry in a workspace file tree
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsNode {
     pub name: String,
@@ -61,7 +218,6 @@ impl FsNode {
         }
     }
 
-    /// Recursively toggle expansion of a directory matching the given relative path
     pub fn toggle_path(&mut self, target_rel: &Path) -> bool {
         if self.rel_path == target_rel {
             if self.is_dir {
@@ -77,7 +233,6 @@ impl FsNode {
         false
     }
 
-    /// Count total files under this node
     pub fn count_files(&self) -> usize {
         if !self.is_dir {
             1
@@ -86,7 +241,6 @@ impl FsNode {
         }
     }
 
-    /// Count total directories under this node
     pub fn count_dirs(&self) -> usize {
         if !self.is_dir {
             0
@@ -96,7 +250,6 @@ impl FsNode {
     }
 }
 
-/// Workspace manager providing safe file operations and tree navigation
 #[derive(Debug, Clone)]
 pub struct WorkspaceManager {
     pub root_path: PathBuf,
@@ -131,7 +284,6 @@ impl WorkspaceManager {
         if !self.root_path.exists() {
             std::fs::create_dir_all(&self.root_path)
                 .with_context(|| format!("Failed to create workspace root at {:?}", self.root_path))?;
-            #[cfg(unix)]
             {
                 let perms = std::fs::Permissions::from_mode(0o755);
                 let _ = std::fs::set_permissions(&self.root_path, perms);
@@ -153,7 +305,6 @@ impl WorkspaceManager {
         self.refresh_tree()
     }
 
-    /// Resolve a relative or absolute path within the workspace root
     pub fn resolve_path(&self, target: &Path) -> PathBuf {
         if target.is_absolute() {
             target.to_path_buf()
@@ -162,7 +313,6 @@ impl WorkspaceManager {
         }
     }
 
-    /// Compute path relative to root
     pub fn relative_path(&self, target: &Path) -> PathBuf {
         match target.strip_prefix(&self.root_path) {
             Ok(rel) => rel.to_path_buf(),
@@ -170,7 +320,6 @@ impl WorkspaceManager {
         }
     }
 
-    /// Refresh the file tree representation of root_path
     pub fn refresh_tree(&mut self) -> Result<()> {
         self.ensure_root_exists()?;
         let mut expanded_paths = HashSet::new();
@@ -213,14 +362,12 @@ impl WorkspaceManager {
             if !self.show_hidden && file_name.starts_with('.') {
                 continue;
             }
-            // Skip common bulky build / VCS folders
             if matches!(file_name.as_str(), "target" | "node_modules" | ".git" | "__pycache__" | ".venv") {
                 continue;
             }
             entries.push(entry);
         }
 
-        // Sort: directories first, then alphabetical
         entries.sort_by(|a, b| {
             let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -256,12 +403,10 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Create a new folder (mkdir -p)
     pub fn create_dir(&mut self, rel_or_abs: &Path) -> Result<PathBuf> {
         let abs = self.resolve_path(rel_or_abs);
         std::fs::create_dir_all(&abs)
             .with_context(|| format!("Failed to create folder at {:?}", abs))?;
-        #[cfg(unix)]
         {
             let perms = std::fs::Permissions::from_mode(0o755);
             let _ = std::fs::set_permissions(&abs, perms);
@@ -270,14 +415,12 @@ impl WorkspaceManager {
         Ok(abs)
     }
 
-    /// Create a new file, ensuring parent directories exist and setting appropriate permissions
     pub fn create_file(&mut self, rel_or_abs: &Path, content: &str) -> Result<PathBuf> {
         let abs = self.resolve_path(rel_or_abs);
         if let Some(parent) = abs.parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create parent directory {:?}", parent))?;
-                #[cfg(unix)]
                 {
                     let perms = std::fs::Permissions::from_mode(0o755);
                     let _ = std::fs::set_permissions(parent, perms);
@@ -299,7 +442,6 @@ impl WorkspaceManager {
         std::fs::write(&abs, final_content.as_bytes())
             .with_context(|| format!("Failed to write file {:?}", abs))?;
 
-        #[cfg(unix)]
         {
             let mode = if is_script { 0o755 } else { 0o644 };
             let perms = std::fs::Permissions::from_mode(mode);
@@ -311,7 +453,6 @@ impl WorkspaceManager {
         Ok(abs)
     }
 
-    /// Read file content as string
     pub fn read_file(&self, rel_or_abs: &Path) -> Result<String> {
         let abs = self.resolve_path(rel_or_abs);
         if !abs.exists() {
@@ -321,7 +462,6 @@ impl WorkspaceManager {
             .with_context(|| format!("Failed to read file {:?}", abs))
     }
 
-    /// Write file content to disk
     pub fn write_file(&mut self, rel_or_abs: &Path, content: &str) -> Result<()> {
         let abs = self.resolve_path(rel_or_abs);
         if let Some(parent) = abs.parent() {
@@ -335,7 +475,6 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Delete file or directory recursively
     pub fn delete_entry(&mut self, rel_or_abs: &Path) -> Result<()> {
         let abs = self.resolve_path(rel_or_abs);
         if !abs.exists() {
@@ -361,7 +500,6 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Move or rename a file or directory
     pub fn move_entry(&mut self, src_rel: &Path, dst_rel: &Path) -> Result<PathBuf> {
         let src_abs = self.resolve_path(src_rel);
         let dst_abs = self.resolve_path(dst_rel);
@@ -386,7 +524,6 @@ impl WorkspaceManager {
         Ok(dst_abs)
     }
 
-    /// Find files matching query substring
     pub fn search_files(&self, query: &str) -> Vec<PathBuf> {
         let mut results = Vec::new();
         let q = query.to_lowercase();
@@ -403,7 +540,6 @@ impl WorkspaceManager {
         }
     }
 
-    /// Determine default copyright header for file extension
     pub fn default_header_for(path: &Path) -> &'static str {
         match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
             "rs" | "c" | "cpp" | "h" | "hpp" | "go" | "js" | "ts" | "java" | "kt" | "swift" => {
@@ -417,7 +553,6 @@ impl WorkspaceManager {
     }
 }
 
-/// Command execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub cmd: String,
@@ -448,11 +583,9 @@ impl CommandResult {
     }
 }
 
-/// Terminal & Command Execution Runner
 pub struct CommandRunner;
 
 impl CommandRunner {
-    /// Execute a shell command asynchronously in the specified working directory
     pub async fn execute(cmd_str: &str, working_dir: &Path) -> Result<CommandResult> {
         let trimmed = cmd_str.trim();
         if trimmed.is_empty() {
@@ -462,7 +595,6 @@ impl CommandRunner {
         let start = Instant::now();
         let executed_at = Utc::now();
 
-        // On Unix, run via sh -c for pipes and environment expansion
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(trimmed)
@@ -489,7 +621,6 @@ impl CommandRunner {
         })
     }
 
-    /// Generate recommended execution command based on file extension
     pub fn recommend_command(file_path: &Path) -> Option<String> {
         let ext = file_path.extension().and_then(|e| e.to_str())?;
         let name = file_path.file_name()?.to_str()?;
@@ -513,11 +644,9 @@ impl CommandRunner {
     }
 }
 
-/// Turnkey Project Automation & Verification Engine
 pub struct WorkspaceAutomation;
 
 impl WorkspaceAutomation {
-    /// Detect the primary project stack in the given directory
     pub fn detect_stack(root: &Path) -> &'static str {
         if root.join("Cargo.toml").exists() {
             "rust"
@@ -532,8 +661,6 @@ impl WorkspaceAutomation {
         }
     }
 
-    /// Generate turnkey automation scripts (setup.sh, verify.sh, start.sh, clean.sh)
-    /// tailored to the detected stack with strict Sean M. Stow copyright header.
     pub fn generate_scripts(root: &Path) -> Result<Vec<PathBuf>> {
         let stack = Self::detect_stack(root);
         let mut created = Vec::new();
@@ -623,7 +750,6 @@ impl WorkspaceAutomation {
         for (name, content) in scripts {
             let path = root.join(name);
             std::fs::write(&path, content)?;
-            #[cfg(unix)]
             {
                 let perms = std::fs::Permissions::from_mode(0o755);
                 let _ = std::fs::set_permissions(&path, perms);
@@ -634,8 +760,6 @@ impl WorkspaceAutomation {
         Ok(created)
     }
 
-    /// Pre-build verification hook:
-    /// Validates directory existence and checks for prohibited exposed credentials before compilation.
     pub fn run_pre_build_hook(root: &Path) -> Result<()> {
         if !root.exists() {
             bail!("Target workspace path does not exist: {:?}", root);
@@ -643,10 +767,7 @@ impl WorkspaceAutomation {
         Ok(())
     }
 
-    /// Post-build validation hook:
-    /// Enforces defensive directory/file permissions on generated outputs.
     pub fn run_post_build_hook(root: &Path) -> Result<()> {
-        #[cfg(unix)]
         {
             if root.exists() {
                 for name in &["setup.sh", "verify.sh", "start.sh", "clean.sh"] {
@@ -662,7 +783,6 @@ impl WorkspaceAutomation {
     }
 }
 
-/// Pre-configured application scaffolding templates
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTemplateType {
     RustHighPerformance,
@@ -700,7 +820,6 @@ impl AppTemplateType {
     }
 }
 
-/// Report summarizing full application deployment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployReport {
     pub app_name: String,
@@ -712,11 +831,9 @@ pub struct DeployReport {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Autonomous Full-Fledged Application Scaffolder
 pub struct AppScaffolder;
 
 impl AppScaffolder {
-    /// Scaffold a complete, production-grade application in the target destination folder
     pub fn scaffold(
         template: AppTemplateType,
         destination_root: &Path,
@@ -970,12 +1087,10 @@ impl AppScaffolder {
             }
         }
 
-        // Create directory structure
         let mut created_dirs = Vec::new();
         for d in dirs_to_create {
             let full_dir = app_dir.join(d);
             std::fs::create_dir_all(&full_dir)?;
-            #[cfg(unix)]
             {
                 let perms = std::fs::Permissions::from_mode(0o755);
                 let _ = std::fs::set_permissions(&full_dir, perms);
@@ -983,7 +1098,6 @@ impl AppScaffolder {
             created_dirs.push(full_dir);
         }
 
-        // Write all files with correct permissions
         let mut created_files = Vec::new();
         for (rel, content, is_exec) in files_to_write {
             let full_file = app_dir.join(rel);
@@ -993,7 +1107,6 @@ impl AppScaffolder {
                 }
             }
             std::fs::write(&full_file, content.as_bytes())?;
-            #[cfg(unix)]
             {
                 let mode = if is_exec { 0o755 } else { 0o644 };
                 let perms = std::fs::Permissions::from_mode(mode);
@@ -1015,7 +1128,6 @@ impl AppScaffolder {
         Ok(report)
     }
 
-    /// Parse and deploy multi-file code blocks generated by AI Coder into destination folder
     pub fn deploy_multi_file_code(raw_text: &str, destination: &Path) -> Result<DeployReport> {
         let extracted_files = Self::extract_multi_files(raw_text);
         if extracted_files.is_empty() {
@@ -1048,7 +1160,6 @@ impl AppScaffolder {
                 has_start = true;
             }
 
-            // Ensure copyright header
             let final_content = if !content.contains("Copyright 2026 Sean M. Stow") {
                 format!("{}{}", WorkspaceManager::default_header_for(&full_path), content)
             } else {
@@ -1056,7 +1167,6 @@ impl AppScaffolder {
             };
 
             std::fs::write(&full_path, final_content.as_bytes())?;
-            #[cfg(unix)]
             {
                 let mode = if is_script { 0o755 } else { 0o644 };
                 let perms = std::fs::Permissions::from_mode(mode);
@@ -1065,7 +1175,6 @@ impl AppScaffolder {
             created_files.push(full_path);
         }
 
-        // Auto-generate setup.sh and start.sh if missing to guarantee operational requirements
         let setup_path = destination.join("setup.sh");
         if !has_setup {
             let default_setup = format!(
@@ -1074,7 +1183,6 @@ impl AppScaffolder {
                 destination.display()
             );
             std::fs::write(&setup_path, default_setup.as_bytes())?;
-            #[cfg(unix)]
             {
                 let perms = std::fs::Permissions::from_mode(0o755);
                 let _ = std::fs::set_permissions(&setup_path, perms);
@@ -1090,7 +1198,6 @@ impl AppScaffolder {
                 destination.display()
             );
             std::fs::write(&start_path, default_start.as_bytes())?;
-            #[cfg(unix)]
             {
                 let perms = std::fs::Permissions::from_mode(0o755);
                 let _ = std::fs::set_permissions(&start_path, perms);
@@ -1114,7 +1221,6 @@ impl AppScaffolder {
         })
     }
 
-    /// Extract multi-file blocks from text
     pub fn extract_multi_files(raw: &str) -> Vec<(PathBuf, String)> {
         let mut results = Vec::new();
         let lines: Vec<&str> = raw.lines().collect();
@@ -1124,7 +1230,6 @@ impl AppScaffolder {
             let line = lines[i].trim();
             let mut detected_path: Option<String> = None;
 
-            // Pattern 1: ### File: path/to/file or **File:** path/to/file or File: path/to/file
             if line.starts_with("### File:") || line.starts_with("## File:") || line.starts_with("# File:") {
                 let p = line.split("File:").nth(1).unwrap_or("").trim();
                 let clean = p.trim_matches(|c| c == '`' || c == '*' || c == ' ');
@@ -1145,7 +1250,6 @@ impl AppScaffolder {
 
             if let Some(path_str) = detected_path {
                 i += 1;
-                // Look for code fence opening
                 let mut code_buf = Vec::new();
                 let mut inside_fence = false;
 
@@ -1157,7 +1261,6 @@ impl AppScaffolder {
                             i += 1;
                             continue;
                         } else {
-                            // End of code block
                             break;
                         }
                     }
@@ -1165,7 +1268,6 @@ impl AppScaffolder {
                     if inside_fence {
                         code_buf.push(cur);
                     } else if cur.trim().starts_with("### File:") || cur.trim().starts_with("## File:") {
-                        // Next file started without code fence
                         i -= 1;
                         break;
                     } else if !cur.trim().is_empty() {
@@ -1185,9 +1287,70 @@ impl AppScaffolder {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp_root(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("mlab-ws-test-{name}"));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn crud_roundtrip() {
+        let ws = Workspace::new(tmp_root("crud")).unwrap();
+        ws.write("proj/main.py", "print(1)\n").unwrap();
+        assert_eq!(ws.read("proj/main.py").unwrap(), "print(1)\n");
+        let names: Vec<_> = ws.list("proj").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["main.py"]);
+        ws.rename("proj/main.py", "proj/app.py").unwrap();
+        assert!(ws.read("proj/app.py").is_ok());
+        ws.delete("proj/app.py").unwrap();
+        assert!(ws.read("proj/app.py").is_err());
+        ws.delete("proj").unwrap();
+    }
+
+    #[test]
+    fn escapes_rejected_and_root_survives() {
+        let root = tmp_root("esc");
+        std::fs::write(root.join("secret.txt"), "x").unwrap();
+        let ws = Workspace::new(&root).unwrap();
+        // `..` clamps at root: this resolves INSIDE, to secret.txt.
+        assert_eq!(ws.read("../secret.txt").unwrap(), "x");
+        assert!(ws.read("/etc/hostname").is_err());
+        assert!(ws.delete("").is_err());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn resolve_clamps_and_rejects() {
+        let ws = Workspace::new(tmp_root("res")).unwrap();
+        let a = ws.resolve("a/../../b").unwrap();
+        assert!(a.starts_with(ws.root()));
+        assert!(a.ends_with("b"));
+        assert!(ws.resolve("/etc/hostname").is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_shell_validates() {
+        let root = tmp_root("sh");
+        assert!(spawn_shell("", &root).is_err());
+        let too_long = "x".repeat(MAX_CMD_CHARS + 1);
+        assert!(spawn_shell(&too_long, &root).is_err());
+        // A real run: echo exits 0 with its line on stdout.
+        let mut child = spawn_shell("echo hi", &root).unwrap();
+        let out = child.wait_with_output().await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn missing_root_refused() {
+        assert!(Workspace::new("/nonexistent-mlab-ws-xyz").is_err());
+    }
 
     #[test]
     fn test_workspace_crud_and_navigation() {
@@ -1322,4 +1485,3 @@ def test_engine():
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 }
-

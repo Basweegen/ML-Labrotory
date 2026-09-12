@@ -8,10 +8,9 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 use ndarray::Array1;
-use serde::{Deserialize, Serialize};
 
 use crate::neural::ModelProfileNetwork;
-use crate::ollama::api::{ChatResponse, Model, OllamaClient};
+use crate::ollama::api::{friendly_error, ChatResponse, Model, OllamaClient};
 use crate::ollama::cli::OllamaCli;
 use crate::resources::{self, ESTIMATED_MODEL_BYTES, ResourceGuard, ResourceReport};
 use crate::voice::VoiceEngine;
@@ -19,13 +18,15 @@ use crate::storage::{AppSettings, ChatSession, SlotConfig, Storage, Theme};
 use crate::ui::chat::ChatPanel;
 use crate::ui::editor::EditorPanel;
 use crate::ui::history::HistoryPanel;
+use crate::ui::workspace::WorkspacePanel;
+use crate::ui::train::TrainPanel;
+use crate::workspace::{spawn_shell, Workspace};
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
 use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::tools_panel::ToolsPanel;
-use crate::ui::learning::LearningPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
@@ -50,6 +51,11 @@ pub enum AppMessage {
     EditorChunk(usize, String),
     Audit(String, String),
     Broadcast(String),
+    Relay(String),
+    Synthesize,
+    CmdRun { cmd: String, cwd: String },
+    CmdLine(u64, String),
+    CmdStop,
     PullProgress(String),
     SpeakText(String),
     StopSpeak,
@@ -80,12 +86,6 @@ pub enum AppMessage {
         template: crate::ui::relay::SwarmTemplate,
         prompt: Option<String>,
     },
-    LaunchSwarmDag {
-        preset: Option<crate::swarm::DagPreset>,
-        prompt: Option<String>,
-    },
-    ShowBlackboard,
-    AbortSwarm,
     #[allow(dead_code)]
     SetGuardrailTier(crate::guardrails::GuardrailTier),
     #[allow(dead_code)]
@@ -95,7 +95,7 @@ pub enum AppMessage {
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModelRole {
     General,
     Coder,
@@ -145,6 +145,17 @@ impl ModelRole {
     }
 }
 
+/// Shorten a model/label string for fixed-width UI spots (combo boxes,
+/// tab lists, card headers). Char-boundary safe; marks truncation.
+pub fn short_name(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars || max_chars <= 1 {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars - 1).collect();
+    format!("{cut}\u{2026}")
+}
+
 /// Shared identity + memory + slot role + guardrail directive, sent as the system prompt.
 fn compose_system_prompt(
     persona: &str,
@@ -168,6 +179,16 @@ fn compose_system_prompt(
 }
 
 /// One runnable model slot: a model assignment + a role + its own chat history.
+/// A sequential collaboration: the task passes slot to slot in `order`,
+/// each model seeing the previous answers. One inference at a time, so a
+/// local box never contends with itself.
+struct RelayState {
+    task: String,
+    order: Vec<usize>,
+    pos: usize,
+    prior: Vec<(usize, String)>,
+}
+
 pub struct ModelSlot {
     pub id: usize,
     pub model: Option<String>,
@@ -256,10 +277,11 @@ pub enum Tab {
     Relay,
     Compare,
     Editor,
-    Models,
+    Workspace,
     History,
     Neural,
-    Learning,
+    Train,
+    Models,
     Skills,
     Tools,
     Settings,
@@ -272,10 +294,11 @@ impl Tab {
             Tab::Relay => "Swarm Relay",
             Tab::Compare => "Compare",
             Tab::Editor => "Editor",
-            Tab::Models => "Models",
+            Tab::Workspace => "Files",
             Tab::History => "History",
             Tab::Neural => "Neural",
-            Tab::Learning => "Learning",
+            Tab::Train => "Train",
+            Tab::Models => "Models",
             Tab::Skills => "Skills",
             Tab::Tools => "Tools",
             Tab::Settings => "Settings",
@@ -288,10 +311,11 @@ impl Tab {
             Tab::Relay => "🧬",
             Tab::Compare => "⚖",
             Tab::Editor => "📝",
-            Tab::Models => "🤖",
+            Tab::Workspace => "🗂",
             Tab::History => "📜",
             Tab::Neural => "🧠",
-            Tab::Learning => "📈",
+            Tab::Train => "🎓",
+            Tab::Models => "🤖",
             Tab::Skills => "⚡",
             Tab::Tools => "🛠",
             Tab::Settings => "⚙",
@@ -307,7 +331,6 @@ impl Tab {
             "Models" => Some(Tab::Models),
             "History" => Some(Tab::History),
             "Neural" => Some(Tab::Neural),
-            "Learning" | "Learning Algorithm" => Some(Tab::Learning),
             "Skills" => Some(Tab::Skills),
             "Tools" => Some(Tab::Tools),
             "Settings" => Some(Tab::Settings),
@@ -325,10 +348,12 @@ impl Tab {
             Tab::Relay,
             Tab::Compare,
             Tab::Editor,
-            Tab::Models,
+            Tab::Workspace,
             Tab::History,
             Tab::Neural,
-            Tab::Learning,
+            Tab::Train,
+            Tab::Compare,
+            Tab::Models,
             Tab::Skills,
             Tab::Tools,
             Tab::Settings,
@@ -344,6 +369,9 @@ pub struct AiDashboardApp {
     cli_client: Option<OllamaCli>,
     voice: Option<VoiceEngine>,
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
+    relay_chain: Option<RelayState>,
+    cmd_child: Option<tokio::process::Child>,
+    cmd_id: u64,
     last_ollama_url: String,
     last_allow_remote: bool,
     linked: bool,
@@ -353,6 +381,8 @@ pub struct AiDashboardApp {
     last_theme: Theme,
     models: Vec<Model>,
     models_loading: bool,
+    retry_due: Option<Instant>,
+    retry_count: u32,
     status: String,
     slots: Vec<ModelSlot>,
     show_model_slots: bool,
@@ -365,10 +395,11 @@ pub struct AiDashboardApp {
     relay: RelayPanel,
     models_panel: ModelsPanel,
     history: HistoryPanel,
+    workspace_panel: WorkspacePanel,
+    train_panel: TrainPanel,
     skills_panel: SkillsPanel,
     tools_panel: ToolsPanel,
     settings_panel: SettingsPanel,
-    learning_panel: LearningPanel,
     settings: AppSettings,
     storage: Option<Storage>,
     neural_panel: NeuralVizPanel,
@@ -376,18 +407,21 @@ pub struct AiDashboardApp {
     mem: resources::MemoryStats,
     mem_checked: Instant,
     report: ResourceReport,
+    /// TTS playback estimate: face chatters while now < speaking_until.
+    speaking_until: Option<Instant>,
+    /// Mic record window (5s + margin): face shows listening.
+    listening_until: Option<Instant>,
+    /// Last click on the big face: Happy "poked" reaction for 2.5s.
+    face_poke_at: Option<Instant>,
 }
 
 impl AiDashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let storage = Storage::new().ok();
-        let mut settings = storage
+        let settings = storage
             .as_ref()
             .and_then(|s| s.load_settings().ok())
             .unwrap_or_default();
-        if !settings.visible_tabs.iter().any(|v| v == "Learning") {
-            settings.visible_tabs.push("Learning".to_string());
-        }
         apply_luxury_visuals(&cc.egui_ctx, &settings.theme);
         let rt = Runtime::new().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
@@ -404,6 +438,9 @@ impl AiDashboardApp {
             cli_client,
             voice: None,
             inflight: HashMap::new(),
+            relay_chain: None,
+            cmd_child: None,
+            cmd_id: 0,
             last_ollama_url: settings.ollama_url.clone(),
             last_allow_remote: settings.allow_remote,
             linked: false,
@@ -413,6 +450,8 @@ impl AiDashboardApp {
             last_theme: settings.theme.clone(),
             models: Vec::new(),
             models_loading: false,
+            retry_due: None,
+            retry_count: 0,
             status: "Ready".to_string(),
             slots: Self::restore_slots(&settings),
             show_model_slots: true,
@@ -425,10 +464,11 @@ impl AiDashboardApp {
             relay: RelayPanel::new(),
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
+            workspace_panel: WorkspacePanel::new(),
+            train_panel: TrainPanel::new(),
             skills_panel: SkillsPanel::new(),
             tools_panel: ToolsPanel::new(),
             settings_panel: SettingsPanel::new(),
-            learning_panel: LearningPanel::new(),
             settings,
             storage,
             neural_panel: NeuralVizPanel::new(),
@@ -436,15 +476,10 @@ impl AiDashboardApp {
             mem,
             mem_checked: Instant::now(),
             report,
+            speaking_until: None,
+            listening_until: None,
+            face_poke_at: None,
         };
-        if let Some(ref st) = app.storage {
-            if let Ok(Some(saved_dag)) = st.load_swarm_dag() {
-                app.relay.dag = saved_dag;
-            }
-            if let Ok(Some(saved_bb)) = st.load_blackboard() {
-                app.relay.blackboard = saved_bb;
-            }
-        }
         app.refresh_models();
         app
     }
@@ -661,6 +696,7 @@ impl AiDashboardApp {
     fn animating(&self) -> bool {
         self.models_loading
             || self.models_panel.is_busy()
+            || self.cmd_child.is_some()
             || self.slots.iter().any(|s| s.chat.is_streaming())
             || self.relay.is_running
             || self.editor.coder_is_streaming
@@ -713,40 +749,26 @@ impl AiDashboardApp {
         } else {
             -0.5
         };
+        self.network
+            .record_skill(role_idx.min(6) as u8, ok, reward);
         self.network.add_experience(crate::neural::Experience {
             state: ctx.clone().into(),
             action,
             reward,
-            next_state: ctx.clone().into(),
+            next_state: ctx.into(),
             done: true,
         });
         self.network.update_performance(reward);
-        let (domain_idx, domain_label) = match role_idx {
-            1 => (1, "Coder"),
-            2 => (2, "Researcher"),
-            3 => (3, "Cyber / Critic"),
-            4 => (4, "Planner"),
-            5 => (5, "Writer"),
-            _ => (0, "General"),
+        let domain_idx = match role_idx {
+            1 => 1, // Coder
+            2 => 2, // Researcher
+            3 => 3, // Critic / Cyber
+            4 => 4, // Planner
+            5 => 5, // Writer
+            _ => 0, // General
         };
         self.network.swarm_pheromones.deposit(domain_idx, idx, reward);
-
-        if ok && reward > 0.5 {
-            let val = vec![
-                if ok { 1.0 } else { 0.0 },
-                (elapsed / 60.0).min(1.0),
-                (resp_chars as f32 / 10_000.0).min(1.0),
-                role_idx as f32 / 6.0,
-                idx as f32 / 8.0,
-                reward.min(2.0),
-                0.8,
-                1.0,
-            ];
-            let label = format!("{}: slot #{} ({} chars, {:.1}s)", domain_label, idx, resp_chars, elapsed);
-            self.network.memory_network.write(ctx.as_slice().unwrap_or(&[]), &val, domain_label, &label, reward);
-        }
-
-        if self.network.optimizer_config.auto_train && self.network.experience_buffer.len() >= 4 {
+        if self.network.experience_buffer.len() >= 4 {
             if let Ok(loss) = self.network.train_step() {
                 if loss.is_finite() && loss > 0.0 {
                     if let Some(ql) = &mut self.network.quantum_layer {
@@ -857,6 +879,38 @@ impl AiDashboardApp {
                 .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
         );
         ui.add_space(8.0);
+        egui::Grid::new("scoreboard")
+            .num_columns(5)
+            .spacing([16.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Slot");
+                ui.strong("Model");
+                ui.strong("Replies");
+                ui.strong("Last");
+                ui.strong("Avg");
+                ui.end_row();
+                for (i, slot) in self.slots.iter().enumerate() {
+                    let (last, total, count) = slot.chat.latency_stats();
+                    let avg = if count > 0 {
+                        format!("{:.1}s", total / count as f32)
+                    } else {
+                        "\u{2014}".to_string()
+                    };
+                    ui.label(format!("{}", i + 1));
+                    ui.label(short_name(
+                        &slot.model.clone().unwrap_or("(empty)".to_string()),
+                        22,
+                    ));
+                    ui.label(format!("{count}"));
+                    ui.label(last.map(|s| format!("{s:.1}s")).unwrap_or("\u{2014}".to_string()));
+                    ui.label(avg);
+                    ui.end_row();
+                }
+            });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
         let answered: Vec<(usize, &ModelSlot)> = self
             .slots
             .iter()
@@ -894,9 +948,12 @@ impl AiDashboardApp {
                                         egui::RichText::new(format!(
                                             "Slot {} \u{00B7} {} [{}]",
                                             i + 1,
-                                            slot.model
-                                                .clone()
-                                                .unwrap_or("(empty)".to_string()),
+                                            short_name(
+                                                &slot.model
+                                                    .clone()
+                                                    .unwrap_or("(empty)".to_string()),
+                                                26,
+                                            ),
                                             slot.role.label()
                                         ))
                                         .size(13.0)
@@ -923,11 +980,266 @@ impl AiDashboardApp {
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                                     );
+                                    if ui
+                                        .small_button("Copy answer")
+                                        .on_hover_text("Copy this slot's full reply to the clipboard")
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(last.content.clone());
+                                    }
                                 });
                         }
                     }
                 });
             });
+    }
+
+    // ---------- relay collaboration ----------
+
+    /// Prompt for relay step `step` (0-based): original task plus every
+    /// previous answer, each capped so context can't blow up.
+    fn relay_prompt(task: &str, prior: &[(usize, String)], step: usize, total: usize) -> String {
+        let mut s = format!(
+            "[Relay {}/{}] Original task:\n{}\n",
+            step + 1,
+            total,
+            task
+        );
+        for (idx, answer) in prior {
+            let cut: String = answer.chars().take(3000).collect();
+            s.push_str(&format!(
+                "\n--- Previous answer from slot {} ---\n{}\n",
+                idx + 1,
+                cut
+            ));
+        }
+        s.push_str(
+            "\nBuild on the previous answer(s): improve, correct, or extend them. \
+             If they are already good, say so briefly and add what's missing.",
+        );
+        s
+    }
+
+    /// Start a relay: task flows through every idle slot with a model.
+    fn start_relay(&mut self, prompt: String) {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        // Secret-guard the raw task once upfront (framing is added below).
+        let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+        if let Some(note) = self
+            .slots
+            .get_mut(f0)
+            .and_then(|s| s.chat.broadcast_check(&prompt).err())
+        {
+            if let Some(slot) = self.slots.get_mut(f0) {
+                slot.chat.push_system_note(note);
+            }
+            self.status = "Relay blocked: possible secret - resend to override".to_string();
+            self.audit("relay.blocked", "secret guard".to_string());
+            return;
+        }
+        let order: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].model.is_some() && !self.slots[i].chat.is_streaming())
+            .collect();
+        if order.len() < 2 {
+            self.status = "Relay needs 2+ idle slots with a model".to_string();
+            return;
+        }
+        for i in 0..self.slots.len() {
+            self.abort_slot(i);
+        }
+        let first = order[0];
+        let step0 = Self::relay_prompt(&prompt, &[], 0, order.len());
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(first) {
+            if let Err(note) = slot.chat.broadcast_check(&step0) {
+                slot.chat.push_system_note(note);
+                false
+            } else {
+                let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
+                let model = slot.model.clone();
+                slot.chat.send_prompt(
+                    step0, &models, &model, &rp, first, &api, &self.tx, &self.rt,
+                )
+            }
+        } else {
+            false
+        };
+        if sent {
+            self.relay_chain = Some(RelayState {
+                task: prompt.clone(),
+                order: order.clone(),
+                pos: 0,
+                prior: Vec::new(),
+            });
+            self.status = format!("Relay 1/{}: slot {} working\u{2026}", order.len(), first + 1);
+            self.audit("relay.start", format!("{} steps", order.len()));
+        } else {
+            self.status = format!("Relay failed to start on slot {}", first + 1);
+        }
+    }
+
+    /// Advance the chain when the expected slot finishes. Anything else
+    /// (wrong slot, failure, full inbox) ends the relay with a reason.
+    fn advance_relay(&mut self, finished_idx: usize, ok: bool) {
+        let Some(st) = self.relay_chain.take() else { return };
+        if st.order.get(st.pos) != Some(&finished_idx) {
+            self.relay_chain = Some(st);
+            return;
+        }
+        if !ok {
+            self.status = format!("Relay stopped: slot {} failed", finished_idx + 1);
+            self.audit("relay.failed", format!("slot {}", finished_idx + 1));
+            return;
+        }
+        let reply: String = self
+            .slots
+            .get(finished_idx)
+            .and_then(|s| {
+                s.chat
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant")
+            })
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let mut prior = st.prior;
+        prior.push((finished_idx, reply));
+        let next_pos = st.pos + 1;
+        if next_pos >= st.order.len() {
+            self.status = format!("Relay done: {} slots built on it", st.order.len());
+            self.audit("relay.done", format!("{} steps", st.order.len()));
+            return;
+        }
+        let next_idx = st.order[next_pos];
+        let task = st.task.clone();
+        let order = st.order.clone();
+        let prompt = Self::relay_prompt(&task, &prior, next_pos, order.len());
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(next_idx) {
+            if let Err(note) = slot.chat.broadcast_check(&prompt) {
+                slot.chat.push_system_note(note);
+                self.status = "Relay stopped: a step tripped the secret guard".to_string();
+                self.audit("relay.blocked", "secret guard".to_string());
+                return;
+            }
+            let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
+            let model = slot.model.clone();
+            slot.chat.send_prompt(
+                prompt, &models, &model, &rp, next_idx, &api, &self.tx, &self.rt,
+            )
+        } else {
+            false
+        };
+        if sent {
+            self.relay_chain = Some(RelayState { task, order: order.clone(), pos: next_pos, prior });
+            self.status = format!(
+                "Relay {}/{}: slot {} working\u{2026}",
+                next_pos + 1,
+                order.len(),
+                next_idx + 1
+            );
+        } else {
+            self.status = format!("Relay stopped: slot {} unavailable", next_idx + 1);
+            self.audit("relay.stalled", format!("slot {}", next_idx + 1));
+        }
+    }
+
+    /// One extra pass: merge every slot's latest answer into the focused
+    /// slot. The focused model reads its peers and writes the best combined
+    /// answer as a new turn in its own history.
+    fn synthesize_answers(&mut self) {
+        let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+        let mut parts: Vec<(usize, String, String)> = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(last) = slot
+                .chat
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+            {
+                parts.push((
+                    i,
+                    slot.model.clone().unwrap_or_else(|| "(empty)".to_string()),
+                    last.content.clone(),
+                ));
+            }
+        }
+        if parts.len() < 2 {
+            self.status = "Synthesize needs answers in 2+ slots (Ask all first)".to_string();
+            return;
+        }
+        let mut prompt = String::from(
+            "Merge these answers from fellow models into one best answer. \
+             Keep what's correct from each, resolve contradictions in favor of \
+             the stronger reasoning, and stay concise:\n",
+        );
+        for (i, model, text) in &parts {
+            let cut: String = text.chars().take(2500).collect();
+            prompt.push_str(&format!("\n--- Slot {} ({}) ---\n{}\n", i + 1, model, cut));
+        }
+        let models = self.models.clone();
+        let api = self.api_client.clone();
+        let persona = self.settings.persona.clone();
+        let memory = self.settings.memory.clone();
+        let sent = if let Some(slot) = self.slots.get_mut(f) {
+            if slot.chat.is_streaming() {
+                self.status = format!("Slot {} is still working - wait, then Synthesize", f + 1);
+                return;
+            }
+            if let Err(note) = slot.chat.broadcast_check(&prompt) {
+                slot.chat.push_system_note(note);
+                self.status = "Synthesize blocked: possible secret - resend to override".to_string();
+                self.audit("synthesize.blocked", "secret guard".to_string());
+                return;
+            }
+            let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
+            let model = slot.model.clone();
+            slot.chat.send_prompt(prompt, &models, &model, &rp, f, &api, &self.tx, &self.rt)
+        } else {
+            false
+        };
+        if sent {
+            self.status = format!("Synthesizing {} answers into slot {}", parts.len(), f + 1);
+            self.audit("synthesize.sent", format!("{} answers -> slot {}", parts.len(), f + 1));
+        } else {
+            self.status = format!("Slot {} has no model or link - can't synthesize", f + 1);
+        }
+    }
+
+    /// One-click relay lineup: first three slots become Planner, Coder,
+    /// Critic so Relay runs a plan-code-review pipeline. Needs 3+ slots.
+    fn apply_relay_template(&mut self) {
+        use ModelRole::*;
+        if self.slots.len() < 3 {
+            self.status = "Template needs 3+ slots (add slots with + Add model)".to_string();
+            return;
+        }
+        let roles = [Planner, Coder, Critic];
+        for (i, r) in roles.into_iter().enumerate() {
+            if let Some(slot) = self.slots.get_mut(i) {
+                slot.role = r;
+                slot.custom_role.clear();
+            }
+        }
+        self.focused_slot = 0;
+        self.status = "Template applied: slot 1 plans, 2 codes, 3 reviews - press Relay".to_string();
+        self.audit("relay.template", "planner/coder/critic".to_string());
+    }
+
+    /// Snapshot of the live relay for the progress strip (pos, order).
+    fn relay_status(&self) -> Option<(usize, Vec<usize>)> {
+        self.relay_chain.as_ref().map(|st| (st.pos, st.order.clone()))
     }
 
     // ---------- model loading ----------
@@ -1010,19 +1322,6 @@ impl AiDashboardApp {
                                         }
                                     }
                                     crate::commands::SwarmCommand::ListPresets => {}
-                                    crate::commands::SwarmCommand::Dag { preset, prompt } => {
-                                        let dag_preset = preset.as_deref().and_then(crate::swarm::DagPreset::from_id);
-                                        let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmDag {
-                                            preset: dag_preset,
-                                            prompt,
-                                        });
-                                    }
-                                    crate::commands::SwarmCommand::Blackboard => {
-                                        let _ = self.tx.send(crate::ui::app::AppMessage::ShowBlackboard);
-                                    }
-                                    crate::commands::SwarmCommand::Abort => {
-                                        let _ = self.tx.send(crate::ui::app::AppMessage::AbortSwarm);
-                                    }
                                 }
                                 crate::commands::SlashCommand::Skills(sub) => {
                                     let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
@@ -1131,6 +1430,12 @@ impl AiDashboardApp {
                         self.audit("broadcast.sent", format!("{} slots", sent));
                     }
                 }
+                AppMessage::Relay(prompt) => {
+                    self.start_relay(prompt);
+                }
+                AppMessage::Synthesize => {
+                    self.synthesize_answers();
+                }
                 AppMessage::OllamaVersion(v) => {
                     self.ollama_version = Some(v);
                 }
@@ -1145,6 +1450,7 @@ impl AiDashboardApp {
                     // Retire the handle even when stale: a stopped or
                     // superseded request must not leave a finished task behind.
                     self.inflight.remove(&idx);
+                    let mut relay_event: Option<(usize, bool)> = None;
                     if self.slots.get(idx).map(|s| s.chat.stream_seq()) != Some(seq) {
                         continue; // stale: stopped or superseded by a newer send
                     }
@@ -1190,6 +1496,7 @@ impl AiDashboardApp {
                             role_idx,
                             &model_name,
                         );
+                        relay_event = Some((idx, ok));
                         if self.settings.voice_enabled {
                             if let Some(eng) = self.voice.clone() {
                                 if let Some(last) = self.slots[idx]
@@ -1207,6 +1514,9 @@ impl AiDashboardApp {
                                 }
                             }
                         }
+                    }
+                    if let Some((r_idx, r_ok)) = relay_event {
+                        self.advance_relay(r_idx, r_ok);
                     }
                 }
                 AppMessage::EditorChunk(id, piece) => {
@@ -1233,6 +1543,8 @@ impl AiDashboardApp {
                     self.models_loading = false;
                     match res {
                         Ok(m) => {
+                            self.retry_due = None;
+                            self.retry_count = 0;
                             self.linked = true;
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
@@ -1278,7 +1590,20 @@ impl AiDashboardApp {
                         }
                         Err(e) => {
                             self.linked = false;
-                            self.status = format!("Model refresh failed: {}", e);
+                            let why = friendly_error(&e);
+                            const BACKOFF: [u64; 6] = [5, 15, 30, 60, 120, 300];
+                            if self.retry_count < BACKOFF.len() as u32 {
+                                let wait = BACKOFF[self.retry_count as usize];
+                                self.retry_due =
+                                    Some(Instant::now() + std::time::Duration::from_secs(wait));
+                                self.retry_count += 1;
+                                self.status = format!("{why} (retrying in {wait}s…)");
+                            } else {
+                                self.retry_due = None;
+                                self.status = format!(
+                                    "{why} (auto-retry stopped - press Refresh in Models)"
+                                );
+                            }
                         }
                     }
                 }
@@ -1303,6 +1628,8 @@ impl AiDashboardApp {
                     self.refresh_models();
                 }
                 AppMessage::RefreshModels => {
+                    self.retry_due = None;
+                    self.retry_count = 0;
                     self.refresh_models();
                 }
                 AppMessage::ModelDeleted(res) => {
@@ -1333,6 +1660,9 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopStream(idx) => {
+                    if self.relay_chain.take().is_some() {
+                        self.audit("relay.cancelled", format!("slot {}", idx + 1));
+                    }
                     self.abort_slot(idx);
                     if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.stop_stream();
@@ -1340,7 +1670,98 @@ impl AiDashboardApp {
                     self.status = format!("Slot {} stopped", idx + 1);
                     self.audit("chat.stop", format!("slot {}", idx + 1));
                 }
+                AppMessage::CmdRun { cmd, cwd } => {
+                    let cmd = cmd.trim().to_string();
+                    if cmd.is_empty() || cmd.len() > crate::workspace::MAX_CMD_CHARS {
+                        self.status = "Command rejected (empty or too long)".to_string();
+                    } else if self.cmd_child.is_some() {
+                        self.status = "A command is already running - Stop it first".to_string();
+                    } else {
+                        let root = self.settings.workspace_root.clone();
+                        let dir = Workspace::new(&root).and_then(|ws| ws.resolve(&cwd));
+                        match dir {
+                            Err(e) => self.status = format!("Run failed: {e:#}"),
+                            Ok(dir) => match spawn_shell(&cmd, &dir) {
+                                Err(e) => self.status = format!("Run failed: {e:#}"),
+                                Ok(mut child) => {
+                                    let stdout = child.stdout.take();
+                                    let stderr = child.stderr.take();
+                                    self.cmd_id += 1;
+                                    let id = self.cmd_id;
+                                    if let Some(pipe) = stdout {
+                                        let tx = self.tx.clone();
+                                        self.rt.spawn(async move {
+                                            use tokio::io::AsyncBufReadExt;
+                                            let mut r =
+                                                tokio::io::BufReader::new(pipe).lines();
+                                            while let Ok(Some(mut line)) =
+                                                r.next_line().await
+                                            {
+                                                if line.len() > 500 {
+                                                    line.truncate(500);
+                                                    line.push('\u{2026}');
+                                                }
+                                                if tx.send(AppMessage::CmdLine(id, line)).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if let Some(pipe) = stderr {
+                                        let tx = self.tx.clone();
+                                        self.rt.spawn(async move {
+                                            use tokio::io::AsyncBufReadExt;
+                                            let mut r =
+                                                tokio::io::BufReader::new(pipe).lines();
+                                            while let Ok(Some(mut line)) =
+                                                r.next_line().await
+                                            {
+                                                if line.len() > 500 {
+                                                    line.truncate(500);
+                                                    line.push('\u{2026}');
+                                                }
+                                                let text = format!("! {line}");
+                                                if tx.send(AppMessage::CmdLine(id, text)).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    self.cmd_child = Some(child);
+                                    self.workspace_panel.note_cmd_started(id, &cmd);
+                                    let short: String = cmd.chars().take(200).collect();
+                                    self.audit(
+                                        "workspace.run",
+                                        format!("{short} @ {}", cwd),
+                                    );
+                                    self.status = format!("Running: {short}");
+                                }
+                            },
+                        }
+                    }
+                }
+                AppMessage::CmdLine(id, line) => {
+                    self.workspace_panel.push_cmd_line(id, line);
+                }
+                AppMessage::CmdStop => {
+                    if let Some(mut c) = self.cmd_child.take() {
+                        let _ = c.start_kill();
+                        // Kept until try_wait reaps it below, then finished.
+                        self.cmd_child = Some(c);
+                        self.status = "Stopping command\u{2026}".to_string();
+                        self.audit("workspace.stop", String::new());
+                    }
+                }
                 AppMessage::StopAll => {
+                    if self.relay_chain.take().is_some() {
+                        self.audit("relay.cancelled", "stop all".to_string());
+                    }
+                    if let Some(mut c) = self.cmd_child.take() {
+                        let _ = c.start_kill();
+                        let id = self.cmd_id;
+                        self.workspace_panel
+                            .finish_cmd(id, "[stopped]".to_string());
+                    }
                     for i in 0..self.slots.len() {
                         self.abort_slot(i);
                         if let Some(slot) = self.slots.get_mut(i) {
@@ -1397,248 +1818,6 @@ impl AiDashboardApp {
                         self.tab = Tab::Editor;
                         self.status = "Imported Swarm code into Editor IDE".to_string();
                         self.audit("relay.import_editor", "editor".to_string());
-                    } else if let Some(rest) = s.strip_prefix("DAG_CHUNK:") {
-                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                        if parts.len() == 2 {
-                            if let Ok(node_id) = parts[0].parse::<usize>() {
-                                self.relay.push_dag_chunk(node_id, parts[1].to_string());
-                            }
-                        }
-                    } else if let Some(rest) = s.strip_prefix("DAG_DONE:") {
-                        let parts: Vec<&str> = rest.splitn(3, ':').collect();
-                        if parts.len() >= 3 {
-                            let node_id: usize = parts[0].parse().unwrap_or(0);
-                            let dur: f32 = parts[1].parse().unwrap_or(0.0);
-                            let content = parts[2].to_string();
-
-                            // Phase 3: Autonomous Physical Tool Execution Check
-                            let (auto_tool, tool_id_opt) = self
-                                .relay
-                                .dag
-                                .find_node(node_id)
-                                .map(|n| (n.auto_exec_tool, n.tool_id.clone()))
-                                .unwrap_or((false, None));
-
-                            // Populate node output for tool examination
-                            if let Some(node) = self.relay.dag.find_node_mut(node_id) {
-                                node.output = content.clone();
-                            }
-
-                            let mut tool_failed = false;
-                            if auto_tool && tool_id_opt.is_some() {
-                                let ws_root = self.editor.workspace.root_path.to_str();
-                                match self.relay.execute_node_tool(
-                                    node_id,
-                                    &self.tools_panel.registry,
-                                    self.settings.guardrail_tier,
-                                    ws_root,
-                                ) {
-                                    Ok(res) => {
-                                        if !res.success {
-                                            tool_failed = true;
-                                            let err_msg = format!(
-                                                "Physical tool '{}' failed (exit code {}):\nSTDERR:\n{}\nSTDOUT:\n{}",
-                                                res.tool_id,
-                                                res.exit_code,
-                                                if res.stderr.is_empty() { "[empty]" } else { &res.stderr },
-                                                if res.stdout.is_empty() { "[empty]" } else { &res.stdout },
-                                            );
-                                            let will_retry = self.relay.dag_node_failed(node_id, err_msg.clone(), &self.models);
-                                            if let Some(st) = self.storage.as_ref() {
-                                                let _ = st.save_swarm_dag(&self.relay.dag);
-                                                let _ = st.save_blackboard(&self.relay.blackboard);
-                                            }
-                                            if will_retry {
-                                                self.status = format!(
-                                                    "Node #{} tool verification failed (exit {}) -> auto-retrying with compiler diagnostics",
-                                                    node_id, res.exit_code
-                                                );
-                                                self.audit(
-                                                    "swarm.dag_tool_retry",
-                                                    format!("node {} tool {}: exit {}", node_id, res.tool_id, res.exit_code),
-                                                );
-                                                self.relay.dispatch_ready_dag_nodes(
-                                                    &self.api_client,
-                                                    &self.tx,
-                                                    &self.rt,
-                                                    self.settings.num_threads,
-                                                );
-                                            } else {
-                                                self.status = format!(
-                                                    "Node #{} tool verification failed (max retries reached): {}",
-                                                    node_id, res.tool_id
-                                                );
-                                                self.audit(
-                                                    "swarm.dag_tool_failed",
-                                                    format!("node {} tool {}", node_id, res.tool_id),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.status = format!("Tool execution error on node {}: {}", node_id, e);
-                                        self.audit("swarm.dag_tool_error", format!("node {}: {}", node_id, e));
-                                    }
-                                }
-                            }
-
-                            if !tool_failed {
-                                // Complete node and deposit artifact into stigmergic blackboard
-                                self.relay.dag_node_completed(node_id, content, dur);
-
-                                // Stigmergic pheromone deposit and memory network write
-                                if let Some(node) = self.relay.dag.find_node(node_id) {
-                                    let (domain_idx, domain_label) = match node.role {
-                                        ModelRole::Planner => (4, "Planner"),
-                                        ModelRole::Coder => (1, "Coder"),
-                                        ModelRole::Critic => (3, "Cyber / Critic"),
-                                        ModelRole::Researcher => (2, "Researcher"),
-                                        ModelRole::Writer => (5, "Writer"),
-                                        _ => (0, "General"),
-                                    };
-                                    let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
-                                    self.network.swarm_pheromones.deposit(domain_idx, node_id.min(7), reward);
-
-                                    // Formulate probe and memory vector from completed task
-                                    let probe = crate::neural::extract_probe_features(&node.directive);
-                                    let val = vec![
-                                        1.0,
-                                        (dur / 60.0).min(1.0),
-                                        (node.output.len() as f32 / 10_000.0).min(1.0),
-                                        domain_idx as f32 / 6.0,
-                                        (node_id as f32 / 8.0).min(1.0),
-                                        reward.min(2.0),
-                                        1.0,
-                                        0.9,
-                                    ];
-                                    let label = format!("{}: DAG Node #{} '{}'", domain_label, node_id, node.name);
-                                    self.network.memory_network.write(probe.as_slice().unwrap_or(&[]), &val, domain_label, &label, reward);
-
-                                    // Add to experience buffer for neural learning
-                                    self.network.add_experience(crate::neural::Experience {
-                                        state: probe.clone().into(),
-                                        action: domain_idx.min(self.network.output_dim.saturating_sub(1)),
-                                        reward,
-                                        next_state: probe.into(),
-                                        done: true,
-                                    });
-
-                                    // Auto-train if enabled
-                                    if self.network.optimizer_config.auto_train && self.network.experience_buffer.len() >= 4 {
-                                        if let Ok(loss) = self.network.train_step() {
-                                            if loss.is_finite() && loss > 0.0 {
-                                                self.neural_panel.add_training_loss(loss);
-                                                self.neural_panel.last_loss = Some(loss);
-                                                let path = Self::network_path().to_string_lossy().to_string();
-                                                let _ = self.network.save(&path);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Persist DAG and Blackboard encrypted at rest in local Sled vault
-                                if let Some(st) = self.storage.as_ref() {
-                                    let _ = st.save_swarm_dag(&self.relay.dag);
-                                    let _ = st.save_blackboard(&self.relay.blackboard);
-                                }
-
-                                // Advance DAG execution by dispatching newly ready nodes
-                                self.relay.dispatch_ready_dag_nodes(
-                                    &self.api_client,
-                                    &self.tx,
-                                    &self.rt,
-                                    self.settings.num_threads,
-                                );
-
-                                let node_name = self
-                                    .relay
-                                    .dag
-                                    .find_node(node_id)
-                                    .map(|n| n.name.clone())
-                                    .unwrap_or_else(|| format!("Node {}", node_id));
-
-                                if self.relay.dag.is_finished() {
-                                    self.status = format!(
-                                        "Swarm DAG '{}' successfully completed all nodes!",
-                                        self.relay.dag.preset.label()
-                                    );
-                                    self.audit(
-                                        "swarm.dag_finished",
-                                        self.relay.dag.preset.label().to_string(),
-                                    );
-                                } else {
-                                    self.status = format!("Swarm DAG node '{}' completed in {:.1}s", node_name, dur);
-                                    self.audit("swarm.dag_node_done", format!("node {} ({:.1}s)", node_id, dur));
-                                }
-                            }
-                        }
-                    } else if let Some(rest) = s.strip_prefix("DAG_FAIL:") {
-                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                        let node_id: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
-                        let err = parts.get(1).unwrap_or(&"Unknown error").to_string();
-                        let will_retry = self.relay.dag_node_failed(node_id, err.clone(), &self.models);
-                        if let Some(st) = self.storage.as_ref() {
-                            let _ = st.save_swarm_dag(&self.relay.dag);
-                        }
-                        if will_retry {
-                            self.status = format!("Swarm DAG node {} failed (recovering via auto-retry): {}", node_id, err);
-                            self.audit("swarm.dag_node_retry", format!("node {}: {}", node_id, err));
-                            // Automatically re-dispatch ready retry nodes
-                            self.relay.dispatch_ready_dag_nodes(
-                                &self.api_client,
-                                &self.tx,
-                                &self.rt,
-                                self.settings.num_threads,
-                            );
-                        } else {
-                            self.status = format!("Swarm DAG node {} failed (max retries exceeded): {}", node_id, err);
-                            self.audit("swarm.dag_node_failed", format!("node {}: {}", node_id, err));
-                        }
-                    } else if let Some(rest) = s.strip_prefix("DAG_RETRY:") {
-                        if let Ok(node_id) = rest.parse::<usize>() {
-                            self.relay.dag.reset_node_for_retry(node_id, None);
-                            self.relay.dag.is_running = true;
-                            if let Some(st) = self.storage.as_ref() {
-                                let _ = st.save_swarm_dag(&self.relay.dag);
-                            }
-                            self.relay.dispatch_ready_dag_nodes(
-                                &self.api_client,
-                                &self.tx,
-                                &self.rt,
-                                self.settings.num_threads,
-                            );
-                            self.status = format!("Manually retrying Swarm DAG node {}", node_id);
-                            self.audit("swarm.dag_node_manual_retry", format!("node {}", node_id));
-                        }
-                    } else if let Some(rest) = s.strip_prefix("DAG_RUN_TOOL:") {
-                        if let Ok(node_id) = rest.parse::<usize>() {
-                            let ws_root = self.editor.workspace.root_path.to_str();
-                            match self.relay.execute_node_tool(
-                                node_id,
-                                &self.tools_panel.registry,
-                                self.settings.guardrail_tier,
-                                ws_root,
-                            ) {
-                                Ok(res) => {
-                                    self.status = format!(
-                                        "Tool '{}' executed on node {}: exit code {}",
-                                        res.tool_id, node_id, res.exit_code
-                                    );
-                                    self.audit(
-                                        "swarm.dag_run_tool",
-                                        format!("node {}: {} (exit {})", node_id, res.tool_id, res.exit_code),
-                                    );
-                                    if let Some(st) = self.storage.as_ref() {
-                                        let _ = st.save_swarm_dag(&self.relay.dag);
-                                        let _ = st.save_blackboard(&self.relay.blackboard);
-                                    }
-                                }
-                                Err(err) => {
-                                    self.status = format!("Tool execution failed for node {}: {}", node_id, err);
-                                    self.audit("swarm.dag_run_tool_error", format!("node {}: {}", node_id, err));
-                                }
-                            }
-                        }
                     } else {
                         self.status = s;
                     }
@@ -1717,6 +1896,8 @@ impl AiDashboardApp {
                 AppMessage::VoiceListen(idx) => {
                     if let Some(eng) = self.voice.clone() {
                         let tx = self.tx.clone();
+                        self.listening_until =
+                            Some(Instant::now() + std::time::Duration::from_secs(6));
                         self.status = "Listening (5s)...".to_string();
                         self.rt.spawn(async move {
                             let result = eng.listen().await.unwrap_or_default();
@@ -1735,6 +1916,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::VoiceInput(idx, text) => {
+                    self.listening_until = None;
                     if text.trim().is_empty() {
                         self.status = "Heard nothing".to_string();
                     } else if let Some(slot) = self.slots.get_mut(idx) {
@@ -1743,6 +1925,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopSpeak => {
+                    self.speaking_until = None;
                     if let Some(eng) = self.voice.clone() {
                         self.rt.spawn(async move {
                             eng.stop().await;
@@ -1755,6 +1938,10 @@ impl AiDashboardApp {
                 AppMessage::SpeakText(text) => {
                     if let Some(eng) = self.voice.clone() {
                         let text: String = text.chars().take(1000).collect();
+                        // ~14 chars/sec speech; face chatters while it plays.
+                        let secs = (text.chars().count() / 14).clamp(2, 60) as u64;
+                        self.speaking_until =
+                            Some(Instant::now() + std::time::Duration::from_secs(secs));
                         self.status = "Reading message aloud…".to_string();
                         self.rt.spawn(async move {
                             let _ = eng.speak(&text).await;
@@ -1791,44 +1978,6 @@ impl AiDashboardApp {
                     self.tab = Tab::Relay;
                     self.status = format!("Loaded Swarm preset: {}", template.label());
                     self.audit("swarm.preset_launched", template.short_id().to_string());
-                }
-                AppMessage::LaunchSwarmDag { preset, prompt } => {
-                    self.tab = Tab::Relay;
-                    self.relay.swarm_mode = crate::ui::relay::SwarmMode::Dag;
-                    if let Some(p) = preset {
-                        self.relay.dag.apply_preset(p);
-                    }
-                    // Auto-assign models to nodes that don't have one
-                    for node in &mut self.relay.dag.nodes {
-                        if node.model.is_none() {
-                            node.model = crate::ui::relay::RelayPanel::find_best_model_for_role(&node.role, &self.models);
-                        }
-                    }
-                    if let Some(p) = prompt {
-                        self.relay.dag.objective = p;
-                        if self.relay.dag.nodes.iter().all(|n| n.model.is_some()) {
-                            self.relay.start_dag(&self.api_client, &self.tx, &self.rt, self.settings.num_threads);
-                            self.status = format!("Launched Swarm DAG: {}", self.relay.dag.preset.label());
-                        } else {
-                            self.status = format!("Configured Swarm DAG: {} (Assign remaining models to run)", self.relay.dag.preset.label());
-                        }
-                    } else {
-                        self.status = format!("Loaded Swarm DAG preset: {}", self.relay.dag.preset.label());
-                    }
-                    self.audit("swarm.dag_launched", self.relay.dag.preset.label().to_string());
-                }
-                AppMessage::ShowBlackboard => {
-                    self.tab = Tab::Relay;
-                    self.relay.swarm_mode = crate::ui::relay::SwarmMode::Dag;
-                    self.relay.show_blackboard_drawer = true;
-                    self.status = "Swarm Stigmergic Blackboard opened".to_string();
-                    self.audit("swarm.blackboard_opened", "blackboard drawer".to_string());
-                }
-                AppMessage::AbortSwarm => {
-                    self.relay.abort_dag();
-                    self.relay.abort_pipeline();
-                    self.status = "Swarm execution aborted".to_string();
-                    self.audit("swarm.abort", "all nodes and steps aborted".to_string());
                 }
                 AppMessage::SetThreads(n) => {
                     self.settings.num_threads = n;
@@ -2436,7 +2585,7 @@ impl AiDashboardApp {
                 .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
         );
         for (i, slot) in self.slots.iter().enumerate() {
-            let name = slot.model.clone().unwrap_or("(empty)".to_string());
+            let name = short_name(&slot.model.clone().unwrap_or("(empty)".to_string()), 24);
             ui.label(
                 egui::RichText::new(format!("{}. {} [{}]", i + 1, name, slot.role.label()))
                     .size(12.0),
@@ -2470,6 +2619,32 @@ impl AiDashboardApp {
         let mut pending_custom: Option<(usize, String)> = None;
         let mut add_pressed = false;
 
+        // Relay progress strip: live step position + slot order + cancel.
+        if let Some((pos, order)) = self.relay_status() {
+            let chain: Vec<String> = order.iter().map(|i| format!("S{}", i + 1)).collect();
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "\u{25B6} Relay {}/{}: {}",
+                        pos + 1,
+                        order.len(),
+                        chain.join(" \u{2192} ")
+                    ))
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0xbb, 0x88, 0xff)),
+                );
+                if ui
+                    .small_button("Cancel")
+                    .on_hover_text("Stop the relay (stops all slots)")
+                    .clicked()
+                {
+                    let _ = self.tx.send(AppMessage::StopAll);
+                }
+            });
+            ui.add_space(4.0);
+        }
+
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             if ui
@@ -2494,6 +2669,22 @@ impl AiDashboardApp {
                 .clicked()
             {
                 self.fill_empty_slots();
+            }
+            ui.add_space(8.0);
+            if ui
+                .small_button("Synthesize")
+                .on_hover_text("Merge every slot's latest answer into the focused slot")
+                .clicked()
+            {
+                let _ = self.tx.send(AppMessage::Synthesize);
+            }
+            ui.add_space(8.0);
+            if ui
+                .small_button("Plan\u{2192}Code\u{2192}Critic")
+                .on_hover_text("Set slots 1-3 to Planner, Coder, Critic for relay pipelines")
+                .clicked()
+            {
+                self.apply_relay_template();
             }
             ui.add_space(8.0);
             if self.clear_chats_armed {
@@ -2591,6 +2782,26 @@ impl AiDashboardApp {
                             .as_ref()
                             .is_some_and(|m| !known.contains_key(m));
                         ui.horizontal(|ui| {
+                            if self.settings.show_avatar {
+                                let c = &self.slots[i].chat;
+                                let now = chrono::Utc::now();
+                                let last = c.messages().last();
+                                let since_last =
+                                    last.map(|m| (now - m.timestamp).num_seconds());
+                                let since_asst = last
+                                    .filter(|m| m.role == "assistant")
+                                    .map(|m| (now - m.timestamp).num_seconds());
+                                let mood = crate::ui::avatar::mood_for(
+                                    c.is_streaming(),
+                                    c.stream_len(),
+                                    last.map(|m| m.role.as_str()),
+                                    since_last,
+                                    since_asst,
+                                );
+                                let accent =
+                                    crate::ui::avatar::accent_for_role(&snapshot[i].2.label());
+                                let _ = crate::ui::avatar::show_face(ui, 24.0, mood, accent);
+                            }
                             ui.label(
                                 egui::RichText::new(format!(
                                     "Slot {} · {}",
@@ -2620,7 +2831,7 @@ impl AiDashboardApp {
                         // Model picker
                         let current = model.clone().unwrap_or("(none)".to_string());
                         egui::ComboBox::from_id_salt(format!("slot_model_{}", id))
-                            .selected_text(current)
+                            .selected_text(short_name(&current, 28))
                             .width(210.0)
                             .show_ui(ui, |ui| {
                                 if ui
@@ -3068,6 +3279,97 @@ impl AiDashboardApp {
             let slot_model = self.slots[f].model.clone();
             let history_depth = self.settings.history_depth.max(1) as usize;
             let slot_role = self.slots[f].role.label();
+            // Stack-chan face: mood from chat state + live overrides
+            // (poke > voice > relay > chat mood; streaming always wins).
+            let (face_mood, face_hint): (crate::ui::avatar::FaceMood, String) = {
+                let c = &self.slots[f].chat;
+                let now = chrono::Utc::now();
+                let last = c.messages().last();
+                let since_last = last.map(|m| (now - m.timestamp).num_seconds());
+                let since_asst = last
+                    .filter(|m| m.role == "assistant")
+                    .map(|m| (now - m.timestamp).num_seconds());
+                let mood = crate::ui::avatar::mood_for(
+                    c.is_streaming(),
+                    c.stream_len(),
+                    last.map(|m| m.role.as_str()),
+                    since_last,
+                    since_asst,
+                );
+                let hint = match mood {
+                    crate::ui::avatar::FaceMood::Talking => "talking…".to_string(),
+                    crate::ui::avatar::FaceMood::Thinking => "thinking…".to_string(),
+                    crate::ui::avatar::FaceMood::Happy => "happy!".to_string(),
+                    crate::ui::avatar::FaceMood::Sad => "uh oh…".to_string(),
+                    crate::ui::avatar::FaceMood::Sleepy => "zzz…".to_string(),
+                    crate::ui::avatar::FaceMood::Idle => "idle".to_string(),
+                };
+                (mood, hint)
+            };
+            let now_i = Instant::now();
+            let poked = self
+                .face_poke_at
+                .map(|t| now_i.duration_since(t).as_secs_f32() < 2.5)
+                .unwrap_or(false);
+            let listening = self.listening_until.map(|u| now_i < u).unwrap_or(false);
+            let speaking = self.speaking_until.map(|u| now_i < u).unwrap_or(false);
+            let relay = self.relay_status();
+            let (face_mood, face_hint) = if self.slots[f].chat.is_streaming() {
+                match &relay {
+                    Some((pos, order)) => (
+                        face_mood,
+                        format!("relay {}/{} \u{00B7} {}", pos + 1, order.len(), face_hint),
+                    ),
+                    None => (face_mood, face_hint),
+                }
+            } else if poked {
+                (crate::ui::avatar::FaceMood::Happy, "\u{2665} hey!".to_string())
+            } else if listening {
+                (crate::ui::avatar::FaceMood::Thinking, "listening…".to_string())
+            } else if speaking {
+                (crate::ui::avatar::FaceMood::Talking, "speaking…".to_string())
+            } else {
+                match &relay {
+                    Some((pos, order)) => (
+                        crate::ui::avatar::FaceMood::Thinking,
+                        format!("relay {}/{}", pos + 1, order.len()),
+                    ),
+                    None => (face_mood, face_hint),
+                }
+            };
+            if self.settings.show_avatar {
+                ui.horizontal(|ui| {
+                    let accent = crate::ui::avatar::accent_for_role(&slot_role);
+                    let size = self.settings.avatar_size.clamp(40.0, 80.0);
+                    let resp = crate::ui::avatar::show_face(ui, size, face_mood, accent)
+                        .on_hover_text("Click to poke");
+                    if resp.clicked() {
+                        self.face_poke_at = Some(Instant::now());
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Chatting with {} as {}",
+                                short_name(
+                                    &slot_model.clone().unwrap_or(
+                                        "(no model \u{2014} pick one above)".to_string()
+                                    ),
+                                    40,
+                                ),
+                                slot_role,
+                            ))
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+                        );
+                        ui.label(
+                            egui::RichText::new(face_hint)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+            }
             let mut chat_hdr_assign: Option<String> = None;
             let mut chat_hdr_unassign = false;
             ui.horizontal(|ui| {
@@ -3212,6 +3514,41 @@ impl eframe::App for AiDashboardApp {
         }
         self.poll_messages();
 
+        // A failed model refresh retries itself on backoff so a box whose
+        // Ollama starts late (or restarts) reconnects with no clicks.
+        if let Some(due) = self.retry_due {
+            if Instant::now() >= due {
+                self.retry_due = None;
+                self.refresh_models();
+            }
+        }
+
+        // Reap a finished workspace command (Stop kills; try_wait reaps).
+        let reap = if let Some(child) = self.cmd_child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => Some(Ok(status.code().unwrap_or(-1))),
+                Ok(None) => None,
+                Err(e) => Some(Err(e.to_string())),
+            }
+        } else {
+            None
+        };
+        if let Some(res) = reap {
+            self.cmd_child = None;
+            let id = self.cmd_id;
+            match res {
+                Ok(code) => {
+                    self.workspace_panel
+                        .finish_cmd(id, format!("[exit {code}]"));
+                    self.status = format!("Command exited ({code})");
+                }
+                Err(e) => {
+                    self.workspace_panel
+                        .finish_cmd(id, format!("[wait failed: {e}]"));
+                }
+            }
+        }
+
         // Re-create the API client if the URL or the remote flag changed.
         if self.settings.ollama_url != self.last_ollama_url
             || self.settings.allow_remote != self.last_allow_remote
@@ -3258,7 +3595,6 @@ impl eframe::App for AiDashboardApp {
                         &self.tx,
                         &self.rt,
                         self.settings.num_threads,
-                        &self.tools_panel.registry,
                     );
                 }
                 Tab::Models => {
@@ -3310,9 +3646,47 @@ impl eframe::App for AiDashboardApp {
                         self.settings.num_threads,
                     );
                 }
+                Tab::Workspace => {
+                    if self.storage.is_some() {
+                        let storage = self.storage.take();
+                        if let Some(st) = storage.as_ref() {
+                            self.workspace_panel.show(ui, &mut self.settings, st, &self.tx);
+                        }
+                        self.storage = storage;
+                    } else {
+                        ui.label("Storage unavailable.");
+                    }
+                }
                 Tab::History => {
                     if let Some(st) = self.storage.as_ref() {
                         self.history.show(ui, st, &self.tx);
+                    } else {
+                        ui.label("Storage unavailable.");
+                    }
+                }
+                Tab::Train => {
+                    if self.storage.is_some() {
+                        let storage = self.storage.take();
+                        if let Some(st) = storage.as_ref() {
+                            self.train_panel.show(
+                                ui,
+                                &mut self.network,
+                                &mut self.neural_panel,
+                                st,
+                                &self.tx,
+                            );
+                        }
+                        self.storage = storage;
+                        if self.train_panel.take_reset() {
+                            self.reset_network();
+                        }
+                        if self.train_panel.take_dirty() {
+                            let path = Self::network_path().to_string_lossy().to_string();
+                            if self.network.save(&path).is_err() {
+                                self.status =
+                                    "Train settings changed (net save failed)".to_string();
+                            }
+                        }
                     } else {
                         ui.label("Storage unavailable.");
                     }
@@ -3330,9 +3704,6 @@ impl eframe::App for AiDashboardApp {
                     });
                     ui.add_space(4.0);
                     self.neural_panel.show(ui, &mut self.network);
-                }
-                Tab::Learning => {
-                    self.learning_panel.show(ui, &mut self.network, &self.models, &self.tx);
                 }
                 Tab::Skills => {
                     self.skills_panel.show(ui, &self.storage, &self.tx, self.focused_slot);
@@ -3375,5 +3746,18 @@ impl eframe::App for AiDashboardApp {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(tick));
         let ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = if self.frame_ms <= 0.0 { ms } else { self.frame_ms * 0.9 + ms * 0.1 };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_name_truncates_cleanly() {
+        assert_eq!(short_name("abc", 5), "abc");
+        assert_eq!(short_name("abcdef", 5), "abcd\u{2026}");
+        assert_eq!(short_name("héllo🍰world", 6), "héllo\u{2026}");
+        assert_eq!(short_name("ab", 1), "ab");
     }
 }
