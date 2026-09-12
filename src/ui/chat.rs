@@ -218,7 +218,7 @@ pub fn render_code_block(
 }
 
 pub struct ChatPanel {
-    input: String,
+    pub input: String,
     messages: Vec<ChatMessage>,
     parsed_cache: Vec<Vec<MessageSegment>>,
     is_streaming: bool,
@@ -431,6 +431,10 @@ impl ChatPanel {
         self.revision = self.revision.saturating_add(1);
     }
 
+    pub fn voice_enabled(&self) -> bool {
+        self.voice_enabled
+    }
+
     pub fn set_voice_enabled(&mut self, enabled: bool) {
         self.voice_enabled = enabled;
     }
@@ -447,70 +451,15 @@ impl ChatPanel {
         self.input.push_str(t);
     }
 
-    pub fn show(
+    /// Message list view that can be embedded in split view columns or full view.
+    pub fn show_message_list(
         &mut self,
         ui: &mut egui::Ui,
-        _models: &[crate::ollama::api::Model],
-        selected_model: &Option<String>,
-        role_prompt: &str,
-        api_client: &Option<OllamaClient>,
-        slot_idx: usize,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
-        rt: &Runtime,
+        max_height: f32,
     ) {
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            let voice_btn = ui.add(
-                egui::Button::new(if self.voice_enabled { "Voice ON" } else { "Voice OFF" })
-                    .corner_radius(egui::CornerRadius::same(6)),
-            )
-            .on_hover_text("Toggle voice input/output (local, free)");
-            if voice_btn.clicked() {
-                let _ = tx.send(crate::ui::app::AppMessage::VoiceToggled(
-                    !self.voice_enabled,
-                ));
-            }
-            let mic_btn = ui
-                .add(
-                    egui::Button::new("Dictate")
-                        .corner_radius(egui::CornerRadius::same(6)),
-                )
-                .on_hover_text("Record 5s from mic and transcribe into the input box");
-            if mic_btn.clicked() {
-                let _ = tx.send(crate::ui::app::AppMessage::VoiceListen(slot_idx));
-            }
-            if ui
-                .small_button("Stop voice")
-                .on_hover_text("Stop read-aloud playback")
-                .clicked()
-            {
-                let _ = tx.send(crate::ui::app::AppMessage::StopSpeak);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(4.0);
-                if ui
-                    .small_button("Clear chat")
-                    .on_hover_text("Clear this slot's chat history")
-                    .clicked()
-                {
-                    self.clear_chat();
-                }
-            });
-        });
-
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        // Message history. Reserve room for the input block below (field +
-        // Send row + status + separators ≈ 170px at 100%): the list may use
-        // everything ABOVE the reserve but never more, so Send always has
-        // room. Scales with the Settings zoom factor so large text can't
-        // overflow the reserve.
-        let input_reserve = 170.0 * ui.ctx().zoom_factor();
-        let list_h = (ui.available_height() - input_reserve).max(80.0);
         egui::ScrollArea::vertical()
-            .max_height(list_h)
+            .max_height(max_height)
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
@@ -572,13 +521,100 @@ impl ChatPanel {
                     });
                 }
             });
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        _models: &[crate::ollama::api::Model],
+        selected_model: &Option<String>,
+        role_prompt: &str,
+        api_client: &Option<OllamaClient>,
+        slot_idx: usize,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        rt: &Runtime,
+        dual_run_mode: bool,
+    ) {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            let voice_btn = ui.add(
+                egui::Button::new(if self.voice_enabled { "Voice ON" } else { "Voice OFF" })
+                    .corner_radius(egui::CornerRadius::same(6)),
+            )
+            .on_hover_text("Toggle voice input/output (local, free)");
+            if voice_btn.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::VoiceToggled(
+                    !self.voice_enabled,
+                ));
+            }
+            let mic_btn = ui
+                .add(
+                    egui::Button::new("Dictate")
+                        .corner_radius(egui::CornerRadius::same(6)),
+                )
+                .on_hover_text("Record 5s from mic and transcribe into the input box");
+            if mic_btn.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::VoiceListen(slot_idx));
+            }
+            if ui
+                .small_button("Stop voice")
+                .on_hover_text("Stop read-aloud playback")
+                .clicked()
+            {
+                let _ = tx.send(crate::ui::app::AppMessage::StopSpeak);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(4.0);
+                if ui
+                    .small_button("Clear chat")
+                    .on_hover_text("Clear this slot's chat history")
+                    .clicked()
+                {
+                    self.clear_chat();
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Message history. Reserve room for the input block below (field +
+        // Send row + status + separators ≈ 170px at 100%): the list may use
+        // everything ABOVE the reserve but never more, so Send always has
+        // room. Scales with the Settings zoom factor so large text can't
+        // overflow the reserve.
+        let input_reserve = 170.0 * ui.ctx().zoom_factor();
+        let list_h = (ui.available_height() - input_reserve).max(80.0);
+        self.show_message_list(ui, tx, list_h);
 
         ui.separator();
+        ui.add_space(4.0);
 
-        let trimmed_input = self.input.trim();
-        if !trimmed_input.is_empty() && trimmed_input.len() >= 6 {
-            let (domain_idx, domain_name) = crate::neural::classify_prompt_domain(trimmed_input);
-            ui.horizontal(|ui| {
+        // Explicit ID salt prevents widget ID shifts during live typing
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.input)
+                .id_salt(format!("chat_input_textedit_slot_{}", slot_idx))
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text(if dual_run_mode {
+                    "Type your message for ALL active models... (Enter to send to both, Shift+Enter for newline)"
+                } else {
+                    "Type your message... (Enter to send, Shift+Enter for newline)"
+                })
+                .font(egui::TextStyle::Body),
+        );
+
+        let trimmed_input = self.input.trim().to_string();
+        let domain_info = if !trimmed_input.is_empty() && trimmed_input.len() >= 6 {
+            Some(crate::neural::classify_prompt_domain(&trimmed_input))
+        } else {
+            None
+        };
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if let Some((domain_idx, domain_name)) = domain_info {
                 ui.label(
                     egui::RichText::new("🐝 Swarm Router:")
                         .size(11.0)
@@ -597,24 +633,8 @@ impl ChatPanel {
                         .size(11.0)
                         .color(egui::Color32::from_rgb(0x00, 0xee, 0xff))
                 );
-            });
-            ui.add_space(2.0);
-        }
+            }
 
-        ui.add_space(4.0);
-        // Full-width field on its own row; Send/Stop share a right-aligned
-        // row beneath it. (Side by side proved unworkable: in a horizontal
-        // row both the multiline field and the button column expand to full
-        // width, so they wrapped unpredictably.)
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut self.input)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
-                .font(egui::TextStyle::Body),
-        );
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let need_model = selected_model.is_none();
                 let need_link = api_client.is_none();
@@ -630,6 +650,8 @@ impl ChatPanel {
                     "Send (pick model ^)"
                 } else if need_link {
                     "Send (no Ollama link)"
+                } else if dual_run_mode {
+                    "⚡ Send to Both (Enter)"
                 } else {
                     "Send (Enter)"
                 };
@@ -643,10 +665,16 @@ impl ChatPanel {
                         .fill(fill)
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x44, 0xaa, 0xff)))
                         .corner_radius(egui::CornerRadius::same(6))
-                        .min_size(egui::vec2(112.0, 34.0))
+                        .min_size(egui::vec2(130.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
                 if send_btn.clicked() {
-                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                    if dual_run_mode {
+                        if let Some(prompt) = self.take_broadcast() {
+                            let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                        }
+                    } else {
+                        self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                    }
                 }
                 ui.add_space(4.0);
                 let ask_btn = ui
@@ -704,13 +732,20 @@ impl ChatPanel {
             });
             // Enter sends while the field has focus (multiline keeps focus on
             // Enter, so lost_focus() never fires for it). Shift+Enter = newline.
+            // Exclude ctrl modifier so Ctrl+Enter triggers broadcast!
             let send_triggered = ui.input(|i| {
-                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift && !i.modifiers.ctrl
             }) && response.has_focus()
                 && !self.input.trim().is_empty()
                 && !self.is_streaming;
             if send_triggered {
-                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                if dual_run_mode {
+                    if let Some(prompt) = self.take_broadcast() {
+                        let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                    }
+                } else {
+                    self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                }
             }
             // Ctrl+Enter broadcasts the field to every slot (Enter alone sends here).
             let broadcast_triggered = ui.input(|i| {
@@ -978,7 +1013,7 @@ impl ChatPanel {
         ui.add_space(4.0);
     }
 
-    fn send_message(
+    pub fn send_message(
         &mut self,
         _models: &[crate::ollama::api::Model],
         selected_model: &Option<String>,
@@ -1407,4 +1442,30 @@ mod panel_tests {
         assert!(matches!(res2, Cow::Owned(_)));
         assert_eq!(res2, "HelloRed world!");
     }
+
+    #[test]
+    fn test_take_broadcast_and_clear_chat() {
+        let mut p = ChatPanel::new();
+        p.input = "  broadcast message to all models  ".to_string();
+        let prompt = p.take_broadcast();
+        assert_eq!(prompt.as_deref(), Some("broadcast message to all models"));
+        assert!(p.input.is_empty());
+
+        // When streaming, take_broadcast must return None
+        p.input = "next message".to_string();
+        p.is_streaming = true;
+        assert!(p.take_broadcast().is_none());
+        assert_eq!(p.input, "next message");
+
+        p.is_streaming = false;
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        assert_eq!(p.messages.len(), 1);
+        p.clear_chat();
+        assert_eq!(p.messages.len(), 0);
+    }
 }
+

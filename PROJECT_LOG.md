@@ -487,11 +487,62 @@
 - **Tasks & Status:**
   - [x] [COMPLETE] Implement `src/workspace.rs` with `WorkspaceManager`, `CommandRunner`, and `AppScaffolder`.
   - [x] [COMPLETE] Register `pub mod workspace;` in `src/main.rs`.
-  - [x] [COMPLETE] Extend `src/commands.rs` with file, execution, and project slash commands.
-  - [x] [COMPLETE] Update `src/ui/editor.rs` with 3-column IDE (Workspace Explorer, Editor + Terminal Dock, AI Coder + App Deployer) and interactive modals.
-  - [x] [COMPLETE] Update `src/ui/chat.rs` with new slash command interceptors.
-  - [x] [COMPLETE] Wire `AppMessage` handlers and audit logs in `src/ui/app.rs`.
   - [x] [COMPLETE] Verify unit tests (80 tests passing, 0 failed, 0 warnings).
   - [x] [COMPLETE] Build optimized release binary at `target/release/ai-dashboard`.
   - [x] [COMPLETE] Mark Section 16 as COMPLETE.
 
+---
+
+## 17. Chat Input Stability & Dual-Model Concurrent Execution Engine (2026-09-12)
+- **Lead Architect:** Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+- **Copyright:** Copyright 2026 Sean M. Stow. All rights reserved.
+- **Problem Statement & Root Cause Diagnostics:**
+  1. **Chat Box Focus Loss (Typing Abruptly Halts at 6 Characters):**
+     - In `src/ui/chat.rs`, `trimmed_input.len() >= 6` conditionally triggered an egui `ui.horizontal` layout containing Swarm Router domain badges immediately preceding an un-salted `egui::TextEdit::multiline(&mut self.input)`.
+     - In `egui`, introducing widgets above a field dynamically alters the layout index and auto-generated widget ID. When typing the 6th character, `egui` drops keyboard focus and text cursor state because the widget ID changes. Backspacing past 5 characters triggered the same focus drop in reverse.
+  2. **Only One Model Running When Both Are Initiated:**
+     - In `src/ui/app.rs`, `show_chat` strictly rendered a single column for `self.focused_slot`, leaving any second active model slot completely invisible in the Chat tab.
+     - Pressing Enter or clicking Send inside `slot.chat.show` only dispatched `send_message` targeting `slot_idx: f`. Consequently, Slot 2 never received the prompt.
+     - The broadcast shortcut (`Ctrl+Enter`) was consumed by single-slot send because `send_triggered` matched `!i.modifiers.shift` without excluding `ctrl`, causing single send to mark `is_streaming = true` and blocking subsequent broadcast.
+     - `AppMessage::Broadcast` lacked slash command interception, ignoring commands like `/clear` across multiple slots.
+
+- **Defensive Engineering & Solutions Implemented:**
+  1. **Chat Input Field Stabilization (`src/ui/chat.rs`):**
+     - Assigned persistent, immutable ID salt: `.id_salt(format!("chat_input_textedit_slot_{}", slot_idx))` and `.id_salt("chat_unified_multiline_input")`.
+     - Relocated the dynamic Swarm Router classification badge into the action/status row *below* the text input. Because no conditional widgets precede `TextEdit`, typing never modifies the widget hierarchy above the field. Focus is 100% maintained at any character length.
+     - Fixed keyboard event guards: `send_triggered` requires `!i.modifiers.ctrl`, enabling `Ctrl+Enter` to cleanly trigger multi-slot broadcast.
+     - Made `pub input: String` and added `pub fn voice_enabled(&self) -> bool`, `pub fn send_message(...)`, and `pub fn show_message_list(...)`.
+  2. **Dual Chat Split View & Multi-Model Concurrent Engine (`src/ui/app.rs`):**
+     - Added `pub split_chat_view: bool` and `pub dual_run_mode: bool` to `AiDashboardApp`, defaulting to `true` whenever 2+ models are initiated.
+     - Enhanced `show_chat` with a Multi-Model Toolbar:
+       - Active model chips indicator (`⚡ Multi-Model: Slot 1: ... | Slot 2: ...`).
+       - Mode switcher: `[⊞ Split View]` vs `[⬚ Single View]`.
+       - Execution mode toggle: `[⚡ Run Both on Enter (Dual Mode)]`.
+     - **Dual Split View Layout**:
+       - Divides the chat viewport into side-by-side columns (`ui.columns`) for every active initiated model slot.
+       - Each column displays its dedicated Slot Header (model name, role tag, streaming spinner, and `[Clear]` button) and renders that slot's messages and live streaming chunks in real time.
+       - Full-width Unified Input Dock at the bottom:
+         - Multiline input field with stable ID salt (`chat_unified_multiline_input`).
+         - Dynamic Swarm Router badge displayed in the action row.
+         - `⚡ Send to Both (Enter)` primary button that broadcasts prompts to all active slots simultaneously.
+         - Targeted `[Slot 1 Only]` / `[Slot 2 Only]` buttons for selective turn execution.
+         - `[Stop All]` button that immediately aborts all active concurrent streams.
+     - **Unified Slash Command Interception in Broadcast**:
+       - `AppMessage::Broadcast` now intercepts slash commands (`/clear`, `/new`, `/model`, `/swarm`, `/exec`, `/touch`, `/mkdir`, etc.), clearing or managing all active slots simultaneously.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 81 tests passing (0 failed, 0 warnings).
+  - Added dedicated unit tests: `test_take_broadcast_and_clear_chat`.
+  - Optimized release build verified: `target/release/ai-dashboard` compiled successfully with 0 errors.
+  - Zero telemetry, local-only loopback (`127.0.0.1:11434`), memory bounds respected (`MAX_MESSAGES: 500`, `MAX_CONTENT_CHARS: 50,000`).
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Fix chat input focus loss by adding stable `.id_salt` and relocating Swarm Router badge below text edit.
+  - [x] [COMPLETE] Fix `send_triggered` and `broadcast_triggered` key modifiers for Enter vs Ctrl+Enter.
+  - [x] [COMPLETE] Implement `show_message_list` and public getters on `ChatPanel`.
+  - [x] [COMPLETE] Implement Dual Chat Split View (`split_chat_view`) and Dual Execution (`dual_run_mode`) in `show_chat`.
+  - [x] [COMPLETE] Add multi-model toolbar, side-by-side columns, unified bottom input dock, and `Stop All` stream control.
+  - [x] [COMPLETE] Implement slash command interception in `AppMessage::Broadcast`.
+  - [x] [COMPLETE] Run automated tests (81/81 passed).
+  - [x] [COMPLETE] Compile optimized release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Section 17 as COMPLETE.
