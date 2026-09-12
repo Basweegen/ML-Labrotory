@@ -50,6 +50,15 @@ impl SettingsPanel {
             ui.checkbox(&mut settings.show_avatar, "Show assistant face (reactive avatar)");
         });
         ui.label(egui::RichText::new("Stack-chan style face above chat + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Face size:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(8.0);
+            let mut sz = settings.avatar_size.clamp(40.0, 80.0);
+            if ui.add(egui::Slider::new(&mut sz, 40.0..=80.0).suffix(" px")).changed() {
+                settings.avatar_size = sz;
+            }
+        });
 
         ui.add_space(12.0);
         ui.separator();

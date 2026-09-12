@@ -280,6 +280,12 @@ pub struct AiDashboardApp {
     mem: resources::MemoryStats,
     mem_checked: Instant,
     report: ResourceReport,
+    /// TTS playback estimate: face chatters while now < speaking_until.
+    speaking_until: Option<Instant>,
+    /// Mic record window (5s + margin): face shows listening.
+    listening_until: Option<Instant>,
+    /// Last click on the big face: Happy "poked" reaction for 2.5s.
+    face_poke_at: Option<Instant>,
 }
 
 impl AiDashboardApp {
@@ -337,6 +343,9 @@ impl AiDashboardApp {
             mem,
             mem_checked: Instant::now(),
             report,
+            speaking_until: None,
+            listening_until: None,
+            face_poke_at: None,
         };
         app.refresh_models();
         app
@@ -1587,6 +1596,8 @@ impl AiDashboardApp {
                 AppMessage::VoiceListen(idx) => {
                     if let Some(eng) = self.voice.clone() {
                         let tx = self.tx.clone();
+                        self.listening_until =
+                            Some(Instant::now() + std::time::Duration::from_secs(6));
                         self.status = "Listening (5s)...".to_string();
                         self.rt.spawn(async move {
                             let result = eng.listen().await.unwrap_or_default();
@@ -1605,6 +1616,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::VoiceInput(idx, text) => {
+                    self.listening_until = None;
                     if text.trim().is_empty() {
                         self.status = "Heard nothing".to_string();
                     } else if let Some(slot) = self.slots.get_mut(idx) {
@@ -1613,6 +1625,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopSpeak => {
+                    self.speaking_until = None;
                     if let Some(eng) = self.voice.clone() {
                         self.rt.spawn(async move {
                             eng.stop().await;
@@ -1625,6 +1638,10 @@ impl AiDashboardApp {
                 AppMessage::SpeakText(text) => {
                     if let Some(eng) = self.voice.clone() {
                         let text: String = text.chars().take(1000).collect();
+                        // ~14 chars/sec speech; face chatters while it plays.
+                        let secs = (text.chars().count() / 14).clamp(2, 60) as u64;
+                        self.speaking_until =
+                            Some(Instant::now() + std::time::Duration::from_secs(secs));
                         self.status = "Reading message aloud…".to_string();
                         self.rt.spawn(async move {
                             let _ = eng.speak(&text).await;
@@ -1967,7 +1984,9 @@ impl AiDashboardApp {
                                     since_last,
                                     since_asst,
                                 );
-                                crate::ui::avatar::show_face(ui, 24.0, mood);
+                                let accent =
+                                    crate::ui::avatar::accent_for_role(&snapshot[i].2.label());
+                                let _ = crate::ui::avatar::show_face(ui, 24.0, mood, accent);
                             }
                             ui.label(
                                 egui::RichText::new(format!(
@@ -2197,7 +2216,7 @@ impl AiDashboardApp {
         let slot_model = self.slots[f].model.clone();
         let history_depth = self.settings.history_depth.max(1) as usize;
         let slot_role = self.slots[f].role.label();
-        let (face_mood, face_hint) = {
+        let (face_mood, face_hint): (crate::ui::avatar::FaceMood, String) = {
             let c = &self.slots[f].chat;
             let now = chrono::Utc::now();
             let last = c.messages().last();
@@ -2205,26 +2224,81 @@ impl AiDashboardApp {
             let since_asst = last
                 .filter(|m| m.role == "assistant")
                 .map(|m| (now - m.timestamp).num_seconds());
+            let streaming = c.is_streaming();
             let mood = crate::ui::avatar::mood_for(
-                c.is_streaming(),
+                streaming,
                 c.stream_len(),
                 last.map(|m| m.role.as_str()),
                 since_last,
                 since_asst,
             );
             let hint = match mood {
-                crate::ui::avatar::FaceMood::Talking => "talking…",
-                crate::ui::avatar::FaceMood::Thinking => "thinking…",
-                crate::ui::avatar::FaceMood::Happy => "happy!",
-                crate::ui::avatar::FaceMood::Sad => "uh oh…",
-                crate::ui::avatar::FaceMood::Sleepy => "zzz…",
-                crate::ui::avatar::FaceMood::Idle => "idle",
+                crate::ui::avatar::FaceMood::Talking => "talking…".to_string(),
+                crate::ui::avatar::FaceMood::Thinking => "thinking…".to_string(),
+                crate::ui::avatar::FaceMood::Happy => "happy!".to_string(),
+                crate::ui::avatar::FaceMood::Sad => "uh oh…".to_string(),
+                crate::ui::avatar::FaceMood::Sleepy => "zzz…".to_string(),
+                crate::ui::avatar::FaceMood::Idle => "idle".to_string(),
             };
             (mood, hint)
         };
+        // Live overrides: poke > voice > relay > chat mood (streaming chat
+        // mood always wins while tokens flow).
+        let now_i = Instant::now();
+        let poked = self
+            .face_poke_at
+            .map(|t| now_i.duration_since(t).as_secs_f32() < 2.5)
+            .unwrap_or(false);
+        let listening = self
+            .listening_until
+            .map(|u| now_i < u)
+            .unwrap_or(false);
+        let speaking = self
+            .speaking_until
+            .map(|u| now_i < u)
+            .unwrap_or(false);
+        let relay = self.relay_status();
+        let (face_mood, face_hint) = if self.slots[f].chat.is_streaming() {
+            match &relay {
+                Some((pos, order)) => (
+                    face_mood,
+                    format!("relay {}/{} · {}", pos + 1, order.len(), face_hint),
+                ),
+                None => (face_mood, face_hint),
+            }
+        } else if poked {
+            (
+                crate::ui::avatar::FaceMood::Happy,
+                "\u{2665} hey!".to_string(),
+            )
+        } else if listening {
+            (
+                crate::ui::avatar::FaceMood::Thinking,
+                "listening…".to_string(),
+            )
+        } else if speaking {
+            (
+                crate::ui::avatar::FaceMood::Talking,
+                "speaking…".to_string(),
+            )
+        } else {
+            match &relay {
+                Some((pos, order)) => (
+                    crate::ui::avatar::FaceMood::Thinking,
+                    format!("relay {}/{}", pos + 1, order.len()),
+                ),
+                None => (face_mood, face_hint),
+            }
+        };
         ui.horizontal(|ui| {
             if self.settings.show_avatar {
-                crate::ui::avatar::show_face(ui, 56.0, face_mood);
+                let accent = crate::ui::avatar::accent_for_role(&slot_role);
+                let size = self.settings.avatar_size.clamp(40.0, 80.0);
+                let resp = crate::ui::avatar::show_face(ui, size, face_mood, accent)
+                    .on_hover_text("Click to poke");
+                if resp.clicked() {
+                    self.face_poke_at = Some(Instant::now());
+                }
             }
             ui.vertical(|ui| {
             ui.label(

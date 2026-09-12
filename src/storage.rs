@@ -91,10 +91,17 @@ pub struct AppSettings {
     /// Stack-chan face above chat + minis on slot cards. Default on.
     #[serde(default = "default_true")]
     pub show_avatar: bool,
+    /// Big-face diameter in px (40-80). Mini faces stay fixed.
+    #[serde(default = "default_avatar_size")]
+    pub avatar_size: f32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_avatar_size() -> f32 {
+    56.0
 }
 
 fn default_history_depth() -> u32 {
@@ -125,6 +132,7 @@ impl Default for AppSettings {
             allow_remote: false,
             workspace_root: String::new(),
             show_avatar: true,
+            avatar_size: default_avatar_size(),
         }
     }
 }

@@ -49,17 +49,47 @@ pub fn mood_for(
     FaceMood::Idle
 }
 
+/// Ring/pip color per slot role so each model reads at a glance.
+pub fn accent_for_role(label: &str) -> egui::Color32 {
+    if label.contains("Coder") {
+        egui::Color32::from_rgb(0x00, 0xCC, 0x88)
+    } else if label.contains("Researcher") {
+        egui::Color32::from_rgb(0xBB, 0x88, 0xFF)
+    } else if label.contains("Critic") {
+        egui::Color32::from_rgb(0xFF, 0x66, 0x66)
+    } else if label.contains("Planner") {
+        egui::Color32::from_rgb(0xFF, 0xCC, 0x33)
+    } else if label.contains("Writer") {
+        egui::Color32::from_rgb(0xFF, 0x99, 0xCC)
+    } else if label.contains("Custom") {
+        egui::Color32::from_rgb(0x99, 0x99, 0x99)
+    } else {
+        egui::Color32::from_rgb(0x00, 0xAA, 0xFF) // General
+    }
+}
+
 /// Draw the face in a `size x size` square. Animates via ctx time:
 /// blink every ~3.4s, eyes follow the pointer, mouth moves when talking.
-pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+pub fn show_face(
+    ui: &mut egui::Ui,
+    size: f32,
+    mood: FaceMood,
+    accent: egui::Color32,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let p = ui.painter_at(rect);
     let t = ui.ctx().input(|i| i.time);
 
-    // Face plate.
-    let plate = egui::Color32::from_rgb(0xE8, 0xEC, 0xF4);
+    // Face plate: light screen on dark theme, dark screen on light theme.
+    let dark_ui = ui.visuals().dark_mode;
+    let plate = if dark_ui {
+        egui::Color32::from_rgb(0xE8, 0xEC, 0xF4)
+    } else {
+        egui::Color32::from_rgb(0x1E, 0x22, 0x30)
+    };
     let stroke_col = match mood {
-        FaceMood::Idle => egui::Color32::from_rgb(0x00, 0xAA, 0xFF),
+        FaceMood::Idle => accent,
         FaceMood::Thinking => egui::Color32::from_rgb(0xBB, 0x88, 0xFF),
         FaceMood::Talking => egui::Color32::from_rgb(0x00, 0xCC, 0x88),
         FaceMood::Happy => egui::Color32::from_rgb(0xFF, 0xCC, 0x33),
@@ -92,7 +122,11 @@ pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
     let blinking =
         mood == FaceMood::Sleepy || (mood != FaceMood::Happy && phase < 0.12);
 
-    let ink = egui::Color32::from_rgb(0x1A, 0x1A, 0x22);
+    let ink = if dark_ui {
+        egui::Color32::from_rgb(0x1A, 0x1A, 0x22)
+    } else {
+        egui::Color32::from_rgb(0xF0, 0xF2, 0xFA)
+    };
     let cx = rect.center().x;
     let cy = rect.center().y - size * 0.06;
     let ex = size * 0.20;
@@ -222,11 +256,94 @@ pub fn show_face(ui: &mut egui::Ui, size: f32, mood: FaceMood) {
         }
     }
 
+    // Role pip: which job this face is doing.
+    if size >= 24.0 {
+        p.circle(
+            egui::pos2(rect.right() - size * 0.10, rect.bottom() - size * 0.10),
+            (size * 0.055).clamp(1.6, 4.0),
+            accent,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x00, 0x00, 0x00)),
+        );
+    }
+
     // Keep animating while visible: talking/thinking need every frame,
     // idle only needs a wakeup for the next blink.
     if mood == FaceMood::Talking || mood == FaceMood::Thinking {
         ui.ctx().request_repaint();
     } else {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+    }
+    resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_before_first_chunk() {
+        assert_eq!(
+            mood_for(true, 0, None, None, None),
+            FaceMood::Thinking
+        );
+    }
+
+    #[test]
+    fn talking_while_streaming() {
+        assert_eq!(
+            mood_for(true, 12, None, None, None),
+            FaceMood::Talking
+        );
+    }
+
+    #[test]
+    fn sad_on_fresh_system_note() {
+        assert_eq!(
+            mood_for(false, 0, Some("system"), Some(3), None),
+            FaceMood::Sad
+        );
+    }
+
+    #[test]
+    fn happy_on_fresh_reply() {
+        assert_eq!(
+            mood_for(false, 0, Some("assistant"), Some(2), Some(2)),
+            FaceMood::Happy
+        );
+    }
+
+    #[test]
+    fn system_note_beats_happy() {
+        // A block right after a reply still reads as sad.
+        assert_eq!(
+            mood_for(false, 0, Some("system"), Some(1), Some(1)),
+            FaceMood::Sad
+        );
+    }
+
+    #[test]
+    fn sleepy_after_five_idle_minutes() {
+        assert_eq!(
+            mood_for(false, 0, Some("user"), Some(400), Some(400)),
+            FaceMood::Sleepy
+        );
+    }
+
+    #[test]
+    fn idle_by_default() {
+        assert_eq!(mood_for(false, 0, None, None, None), FaceMood::Idle);
+    }
+
+    #[test]
+    fn every_role_has_distinct_accent() {
+        let labels = [
+            "General", "Coder", "Researcher", "Critic", "Planner", "Writer", "Custom: pirate",
+        ];
+        let colors: Vec<_> = labels.iter().map(|l| accent_for_role(l)).collect();
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(colors[i], colors[j], "role {i} vs {j}");
+            }
+        }
     }
 }
