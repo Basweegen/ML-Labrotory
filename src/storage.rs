@@ -49,6 +49,46 @@ impl AuditEntry {
     }
 }
 
+/// An autonomous learned agent capability persisted in the post-quantum vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub prompt_template: String,
+    pub domain_idx: usize,
+    pub reinforcement_score: f32,
+    pub execution_count: u64,
+    pub last_used: Option<DateTime<Utc>>,
+    pub is_built_in: bool,
+}
+
+impl Skill {
+    pub fn sanitize(mut self) -> Self {
+        if self.name.len() > 64 {
+            let mut end = 64;
+            while !self.name.is_char_boundary(end) { end -= 1; }
+            self.name.truncate(end);
+        }
+        if self.description.len() > 500 {
+            let mut end = 500;
+            while !self.description.is_char_boundary(end) { end -= 1; }
+            self.description.truncate(end);
+        }
+        if self.prompt_template.len() > 10_000 {
+            let mut end = 10_000;
+            while !self.prompt_template.is_char_boundary(end) { end -= 1; }
+            self.prompt_template.truncate(end);
+        }
+        if !self.reinforcement_score.is_finite() {
+            self.reinforcement_score = 1.0;
+        } else {
+            self.reinforcement_score = self.reinforcement_score.clamp(0.1, 20.0);
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -284,6 +324,7 @@ pub struct Storage {
     sessions_tree: sled::Tree,
     config_tree: sled::Tree,
     audit_tree: sled::Tree,
+    pub skills_tree: sled::Tree,
     audit_seq: AtomicU64,
     vault: StorageVault,
 }
@@ -320,17 +361,26 @@ impl Storage {
             .path(db_path)
             .cache_capacity(16 * 1024 * 1024) // 16 MiB page cache bounds memory consumption
             .open()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o700));
+        }
         let sessions_tree = db.open_tree("sessions")?;
         let config_tree = db.open_tree("config")?;
         let audit_tree = db.open_tree("audit")?;
-        Ok(Self {
+        let skills_tree = db.open_tree("skills")?;
+        let st = Self {
             _db: db,
             sessions_tree,
             config_tree,
             audit_tree,
+            skills_tree,
             audit_seq: AtomicU64::new(0),
             vault,
-        })
+        };
+        let _ = st.seed_default_skills();
+        Ok(st)
     }
 
     #[allow(dead_code)]
@@ -519,6 +569,126 @@ impl Storage {
         }
     }
 
+    pub fn save_skill(&self, skill: &Skill) -> Result<()> {
+        let key = skill.id.as_bytes().to_vec();
+        let sanitized = skill.clone().sanitize();
+        let raw = bincode::serialize(&sanitized)?;
+        let encrypted = self.vault.encrypt(&raw)?;
+        self.skills_tree.insert(key, encrypted)?;
+        self.skills_tree.flush()?;
+        Ok(())
+    }
+
+    pub fn load_skills(&self) -> Result<Vec<Skill>> {
+        let mut skills = Vec::new();
+        for entry in self.skills_tree.iter() {
+            let (_, value) = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if value.len() > 1024 * 1024 {
+                continue;
+            }
+            let decrypted = match self.vault.decrypt(&value) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            match bincode::deserialize::<Skill>(&decrypted) {
+                Ok(s) => skills.push(s.sanitize()),
+                Err(_) => continue,
+            }
+        }
+        skills.sort_by(|a, b| b.reinforcement_score.partial_cmp(&a.reinforcement_score).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(skills)
+    }
+
+    pub fn delete_skill(&self, id: Uuid) -> Result<()> {
+        self.skills_tree.remove(id.as_bytes())?;
+        self.skills_tree.flush()?;
+        Ok(())
+    }
+
+    pub fn reinforce_skill(&self, id: Uuid, reward_delta: f32) -> Result<Option<Skill>> {
+        let key = id.as_bytes();
+        if let Some(val) = self.skills_tree.get(key)? {
+            let decrypted = self.vault.decrypt(&val)?;
+            let mut skill: Skill = bincode::deserialize(&decrypted)?;
+            skill.reinforcement_score = (skill.reinforcement_score + reward_delta).clamp(0.1, 20.0);
+            skill.execution_count = skill.execution_count.saturating_add(1);
+            skill.last_used = Some(Utc::now());
+            self.save_skill(&skill)?;
+            Ok(Some(skill))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn seed_default_skills(&self) -> Result<()> {
+        if !self.skills_tree.is_empty() {
+            return Ok(());
+        }
+        let defaults = vec![
+            Skill {
+                id: Uuid::new_v4(),
+                name: "vulnerability_scan".to_string(),
+                description: "Deep cyber security inspection for memory unsafety, credential leakage, logic bugs, and injection vectors.".to_string(),
+                prompt_template: "Conduct a rigorous security vulnerability audit of the following code. Identify potential buffer overflows, memory leaks, secret exposure, concurrency flaws, and SSRF tripwires. Provide defensive remediations:".to_string(),
+                domain_idx: 3, // Cyber / Critic
+                reinforcement_score: 5.0,
+                execution_count: 0,
+                last_used: None,
+                is_built_in: true,
+            },
+            Skill {
+                id: Uuid::new_v4(),
+                name: "quantum_cryptanalysis".to_string(),
+                description: "Post-Quantum cryptographic resistance evaluation against Shor's and Grover's quantum search algorithms.".to_string(),
+                prompt_template: "Analyze the cryptographic primitives used in this architecture. Verify AES-256 Grover attack resistance (retaining 128 bits quantum security), Argon2id memory hardness, and post-quantum envelope integrity:".to_string(),
+                domain_idx: 3, // Cyber / Critic
+                reinforcement_score: 4.5,
+                execution_count: 0,
+                last_used: None,
+                is_built_in: true,
+            },
+            Skill {
+                id: Uuid::new_v4(),
+                name: "high_perf_code_optimizer".to_string(),
+                description: "Zero-allocation refactoring, SIMD vectorization, cache locality, and lock-free thread optimization.".to_string(),
+                prompt_template: "Refactor this code for optimal execution throughput. Eliminate unnecessary heap allocations (e.g. using Cow, stack arrays, or pre-allocated buffers), reduce cache misses, and optimize tight loops:".to_string(),
+                domain_idx: 1, // Coder
+                reinforcement_score: 4.0,
+                execution_count: 0,
+                last_used: None,
+                is_built_in: true,
+            },
+            Skill {
+                id: Uuid::new_v4(),
+                name: "swarm_orchestrator".to_string(),
+                description: "Deconstructs complex objectives into specialist agent pipelines using stigmergic ecological niches.".to_string(),
+                prompt_template: "Deconstruct the following high-level objective into an ordered multi-agent swarm pipeline. Specify the specialist domain role, input requirements, and validation gates for each phase:".to_string(),
+                domain_idx: 4, // Planner
+                reinforcement_score: 3.8,
+                execution_count: 0,
+                last_used: None,
+                is_built_in: true,
+            },
+            Skill {
+                id: Uuid::new_v4(),
+                name: "research_synthesizer".to_string(),
+                description: "Deep factual literature synthesis, mathematical analysis, and step-by-step hypothesis verification.".to_string(),
+                prompt_template: "Perform a comprehensive research synthesis on the following concept. Distinguish empirical facts from theoretical models, cite core mathematical principles, and summarize key conclusions:".to_string(),
+                domain_idx: 2, // Researcher
+                reinforcement_score: 3.5,
+                execution_count: 0,
+                last_used: None,
+                is_built_in: true,
+            },
+        ];
+        for skill in defaults {
+            self.save_skill(&skill)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -699,5 +869,47 @@ mod tests {
         assert_eq!(found.model, "deepseek-r1:14b");
         assert_eq!(found.messages.len(), 1);
         assert_eq!(found.messages[0].content, "Evaluate post-quantum key exchange and AES-256 Grover resistance");
+    }
+
+    #[test]
+    fn skills_encrypted_roundtrip_and_reinforce() {
+        let _guard = store_lock();
+        let dir = std::env::temp_dir().join(format!("aidash-test-skills-enc-{}", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
+
+        // Should have 5 seeded default skills
+        let loaded = st.load_skills().expect("load default skills");
+        assert!(loaded.len() >= 5, "expected at least 5 default seeded skills, got {}", loaded.len());
+        assert!(loaded.iter().any(|s| s.name == "vulnerability_scan"));
+
+        let skill_id = Uuid::new_v4();
+        let skill = Skill {
+            id: skill_id,
+            name: "test_adversarial_probe".to_string(),
+            description: "Probe LLM for hallucinations and boundary evasion".to_string(),
+            prompt_template: "Act as an adversarial tester:".to_string(),
+            domain_idx: 3,
+            reinforcement_score: 2.0,
+            execution_count: 0,
+            last_used: None,
+            is_built_in: false,
+        };
+
+        st.save_skill(&skill).expect("save custom skill");
+
+        // Inspect raw sled blob: must have A256 envelope magic
+        let raw = st.skills_tree.get(skill_id.as_bytes()).expect("read sled").expect("found");
+        assert_eq!(&raw[0..4], ENVELOPE_MAGIC);
+
+        // Reinforce skill
+        let updated = st.reinforce_skill(skill_id, 0.5).expect("reinforce").expect("updated");
+        assert_eq!(updated.reinforcement_score, 2.5);
+        assert_eq!(updated.execution_count, 1);
+        assert!(updated.last_used.is_some());
+
+        // Delete skill
+        st.delete_skill(skill_id).expect("delete");
+        let reloaded = st.load_skills().expect("reload");
+        assert!(!reloaded.iter().any(|s| s.id == skill_id));
     }
 }

@@ -7,3 +7,4 @@ pub mod models;
 pub mod neural_viz;
 pub mod relay;
 pub mod settings;
+pub mod skills;

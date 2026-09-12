@@ -210,7 +210,13 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 fn host_is_loopback(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    if host == "localhost" || host == "::1" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
 }
 
 impl OllamaClient {
@@ -412,6 +418,8 @@ mod tests {
         assert!(OllamaClient::new("http://ollama.lan:11434", false).is_err());
         assert!(OllamaClient::new("http://169.254.169.254/", false).is_err());
         assert!(OllamaClient::new("http://example.com/", false).is_err());
+        assert!(OllamaClient::new("http://127.0.0.1.attacker.com:11434", false).is_err());
+        assert!(OllamaClient::new("http://localhost.evil.com:11434", false).is_err());
         assert!(OllamaClient::new("ftp://localhost/x", false).is_err());
         assert!(OllamaClient::new("not a url", false).is_err());
     }

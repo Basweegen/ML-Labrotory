@@ -340,3 +340,108 @@
   - [x] [COMPLETE] Verify 64 unit tests pass cleanly.
   - [x] [COMPLETE] Build optimized release binary.
 
+---
+
+## 13. Phase 1: Full-Suite Security, Vulnerability & Memory Audit (2026-09-12)
+- **Lead Architect:** Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+- **Core Directives & Posture:**
+  - Full-suite security audit across all modules, verifying zero telemetry, Post-Quantum encryption, memory bounds, and defensive safeguards.
+  - Scan for unhandled edge cases, injection vectors, memory leaks, and SSRF vulnerabilities.
+
+- **Vulnerabilities Identified & Remediated:**
+  1. **SSRF Domain Whitelist Bypass in `host_is_loopback` (`src/ollama/api.rs`):**
+     - *Vulnerability:* `host.starts_with("127.")` permitted spoofed hostnames such as `127.0.0.1.attacker.com` to pass loopback validation, enabling potential Server-Side Request Forgery when `allow_remote` was false.
+     - *Remediation:* Replaced prefix matching with strict `std::net::IpAddr::parse`, enforcing `ip.is_loopback()` and exact hostname matches (`localhost`, `::1`). Added test assertions covering `127.0.0.1.attacker.com` and `localhost.evil.com`.
+  2. **Unbounded Secret Scan Buffer Allocation (`src/ui/chat.rs`):**
+     - *Gap:* Multi-megabyte user inputs triggered unconstrained string cloning and Shannon entropy computation in `ConfirmGate::check` prior to truncation.
+     - *Remediation:* Pre-truncated prompt inputs to `MAX_CONTENT_CHARS` (50,000 characters) on valid UTF-8 character boundaries prior to secret pattern matching and entropy evaluation.
+  3. **Strict Sled Database Directory Permissions (`src/storage.rs`):**
+     - *Hardening:* Enforced explicit `0o700` directory permissions on Sled storage directories on Unix upon database initialization.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Audit `src/security.rs` entropy thresholds, pattern matchers, and gate logic.
+  - [x] [COMPLETE] Remediate SSRF domain spoofing vulnerability in `src/ollama/api.rs`.
+  - [x] [COMPLETE] Pre-truncate chat prompts in `src/ui/chat.rs` to bound RAM during secret scanning.
+  - [x] [COMPLETE] Enforce `0o700` directory permissions on Sled databases in `src/storage.rs`.
+  - [x] [COMPLETE] Pass all 64 regression and security unit tests.
+  - [x] [COMPLETE] Mark Phase 1 as COMPLETE.
+
+---
+
+## 14. Phase 2: Unified Command Engine (Terminal CLI & In-Chat Commands) (2026-09-12)
+- **Lead Architect:** Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+- **Core Directives & Posture:**
+  - Build a single unified command syntax and dispatch engine supporting dual execution: headlessly from the shell terminal CLI and interactively within the chat input box.
+  - Support slash commands: `/help`, `/new`, `/clear`, `/model`, `/swarm`, `/skills`, `/audit`, `/threads`, and `/status`.
+
+- **Implementation Details:**
+  1. **Unified Command Engine (`src/commands.rs`):**
+     - Implemented `SlashCommand` and `SkillsCommand` with comprehensive syntax parsing (`SlashCommand::parse` and `SlashCommand::parse_cli_args`).
+     - Supported commands:
+       - `/help` or `/?` — Command reference manual.
+       - `/new` — Reset current chat session and start fresh.
+       - `/clear` — Clear chat history viewport in active slot.
+       - `/model <name>` — Dynamically assign model and trigger background pre-warming (`warm_model`).
+       - `/swarm <prompt>` — Dispatch task into multi-agent Swarm Relay with automated ecological domain classification.
+       - `/skills [list | run <name> | add <name> <desc>]` — Inspect, invoke, or define autonomous skills.
+       - `/audit` — Query recent security audit entries directly from Post-Quantum storage.
+       - `/threads <1-64>` — Dynamically adjust inference thread count for matrix multiplication.
+       - `/status` — Inspect Ollama daemon version, model sizes, memory stats, and optimal thread allocation.
+  2. **Headless Terminal CLI Execution (`src/main.rs`):**
+     - Parsed `std::env::args()` before initializing egui GUI.
+     - Spawns a lightweight single-threaded Tokio runtime to execute commands headlessly with clean terminal output (e.g. `ai-dashboard /status`, `ai-dashboard /help`).
+     - Gracefully handles database file locking (`WouldBlock`) when a GUI instance is already running.
+  3. **In-Chat Slash Command Interception (`src/ui/chat.rs`, `src/ui/app.rs`):**
+     - Intercepts input starting with `'/'` in `ChatPanel::send_message` prior to model invocation.
+     - Emits styled system notice bubbles with command feedback and dispatches state updates (`AppMessage::ModelSelected`, `AppMessage::LaunchSwarmTask`, `AppMessage::SetThreads`, `AppMessage::ShowAudit`, `AppMessage::ShowStatus`, `AppMessage::SkillsCommand`).
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement `src/commands.rs` with parser, manual, and headless executor.
+  - [x] [COMPLETE] Add CLI argument dispatcher in `src/main.rs`.
+  - [x] [COMPLETE] Intercept slash commands in `ChatPanel::send_message` in `src/ui/chat.rs`.
+  - [x] [COMPLETE] Implement `AppMessage` command handlers in `src/ui/app.rs`.
+  - [x] [COMPLETE] Add command unit tests (72 tests passing).
+  - [x] [COMPLETE] Mark Phase 2 as COMPLETE.
+
+---
+
+## 15. Phase 3: Autonomous Self-Learning Skills Engine & Skills Tab (2026-09-12)
+- **Lead Architect:** Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+- **Core Directives & Posture:**
+  - Build the autonomous self-learning capability repository (`src/ui/skills.rs`, `src/storage.rs`) integrated into the swarm stigmergic neural network.
+  - Encrypt all skills at rest using Post-Quantum AES-256-GCM (`StorageVault`), enforcing strict 0o600/0o700 permissions.
+  - Connect skill activations and reinforcement ratings to `ModelProfileNetwork` and `SwarmPheromoneMatrix`.
+
+- **Implementation Details:**
+  1. **Encrypted Skills Vault & Default Capabilities (`src/storage.rs`):**
+     - Implemented `Skill` model and `skills_tree: sled::Tree` in `Storage`.
+     - Seeded 5 core capabilities with pre-configured domain niches:
+       - `vulnerability_scan` (Domain: Cyber/Critic) — Deep static and dynamic vulnerability analysis.
+       - `quantum_cryptanalysis` (Domain: Cyber/Critic) — AES-256 Grover resistance and post-quantum verification.
+       - `high_perf_code_optimizer` (Domain: Coder) — Zero-copy, cache-friendly refactoring.
+       - `swarm_orchestrator` (Domain: Planner) — Decomposing complex tasks into ordered multi-agent pipelines.
+       - `research_synthesizer` (Domain: Researcher) — Rigorous literature and technical synthesis.
+     - Added `save_skill`, `load_skills`, `delete_skill`, `reinforce_skill`, and `seed_default_skills` with automatic payload sanitization.
+  2. **Stigmergic Pheromone & Neural Reinforcement Loop (`src/ui/app.rs`):**
+     - Wired positive reinforcement (`👍 +0.5`) and penalty (`👎 -0.2`) actions directly to `self.network.swarm_pheromones.deposit(domain_idx, slot_idx, reward)`.
+     - Executing a skill deposits stigmergic trail marks, guiding future multi-agent slot selection.
+  3. **Interactive Skills Tab UI (`src/ui/skills.rs`, `src/ui/app.rs`):**
+     - Added `Tab::Skills` (`"⚡ Skills"`) with luxury dark styling.
+     - Implemented domain category filter chips (`[All]`, `[🛡 Cyber/Critic]`, `[💻 Coder]`, `[🔬 Researcher]`, `[📋 Planner]`, `[✍ Writer]`, `[🌐 General]`).
+     - Real-time search query filtering over skill names and descriptions.
+     - Interactive skill cards with reinforcement badges (`⭐ Score`), execution counters (`🎯 Runs`), collapsible prompt templates, and one-click `[⚡ Run Skill]` trigger.
+     - Modal window for creating custom skills with Post-Quantum encryption on save.
+  4. **Verification & Build:**
+     - 73 unit tests passing (`cargo test --bin ai-dashboard`).
+     - Production release binary built and verified (`target/release/ai-dashboard`, 15 MB).
+     - Headless terminal execution verified across all commands (`./start.sh /help`, `./start.sh /status`).
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement `Skill` struct and encrypted `skills_tree` in `src/storage.rs`.
+  - [x] [COMPLETE] Implement `SkillsPanel` in `src/ui/skills.rs`.
+  - [x] [COMPLETE] Add `Tab::Skills` to tab bar and navigation in `src/ui/app.rs`.
+  - [x] [COMPLETE] Connect skill reinforcement to `SwarmPheromoneMatrix` in `src/ui/app.rs`.
+  - [x] [COMPLETE] Pass all 73 test suite unit tests.
+  - [x] [COMPLETE] Build optimized 15 MB release binary.
+  - [x] [COMPLETE] Mark Phase 3 as COMPLETE.
+

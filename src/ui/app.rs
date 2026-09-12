@@ -22,6 +22,7 @@ use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
 use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
+use crate::ui::skills::SkillsPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
@@ -53,6 +54,13 @@ pub enum AppMessage {
     StopStream(usize),
     StopAll,
     Notice(String),
+    LaunchSwarmTask(String),
+    SkillsCommand(usize, crate::commands::SkillsCommand),
+    ShowAudit(usize),
+    SetThreads(u32),
+    ShowStatus(usize),
+    RunSkill { skill_name: String, target_slot: Option<usize> },
+    ReinforceSkill { skill_id: Uuid, reward_delta: f32 },
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -211,6 +219,7 @@ enum Tab {
     Models,
     History,
     Neural,
+    Skills,
     Settings,
 }
 
@@ -224,6 +233,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::History => "History",
             Tab::Neural => "Neural",
+            Tab::Skills => "Skills",
             Tab::Settings => "Settings",
         }
     }
@@ -237,6 +247,7 @@ impl Tab {
             Tab::Models => "🤖",
             Tab::History => "📜",
             Tab::Neural => "🧠",
+            Tab::Skills => "⚡",
             Tab::Settings => "⚙",
         }
     }
@@ -250,6 +261,7 @@ impl Tab {
             Tab::Models,
             Tab::History,
             Tab::Neural,
+            Tab::Skills,
             Tab::Settings,
         ]
     }
@@ -282,6 +294,7 @@ pub struct AiDashboardApp {
     relay: RelayPanel,
     models_panel: ModelsPanel,
     history: HistoryPanel,
+    skills_panel: SkillsPanel,
     settings_panel: SettingsPanel,
     settings: AppSettings,
     storage: Option<Storage>,
@@ -334,6 +347,7 @@ impl AiDashboardApp {
             relay: RelayPanel::new(),
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
+            skills_panel: SkillsPanel::new(),
             settings_panel: SettingsPanel::new(),
             settings,
             storage,
@@ -1301,6 +1315,145 @@ impl AiDashboardApp {
                         self.status = "Voice unavailable — toggle Voice ON first".to_string();
                     }
                 }
+                AppMessage::LaunchSwarmTask(task) => {
+                    self.relay.prompt = task;
+                    self.tab = Tab::Relay;
+                    self.status = "Swarm Relay loaded with task".to_string();
+                }
+                AppMessage::SetThreads(n) => {
+                    self.settings.num_threads = n;
+                    if let Some(st) = self.storage.as_ref() {
+                        let _ = st.save_settings(&self.settings);
+                    }
+                    for slot in &mut self.slots {
+                        slot.chat.num_threads = n;
+                    }
+                    self.status = format!("Inference threads set to {}", n);
+                }
+                AppMessage::ShowAudit(slot_idx) => {
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(entries) = st.load_audit() {
+                            let mut msg = String::from("### 🛡 **Recent Security & Cryptographic Audit Log**\n\n| Timestamp | Event Kind | Detail |\n|---|---|---|\n");
+                            if entries.is_empty() {
+                                msg.push_str("| - | *Clean* | No security incidents or blocked secrets |\n");
+                            } else {
+                                for e in entries.iter().take(15) {
+                                    msg.push_str(&format!("| `{}` | `{}` | {} |\n", e.ts.format("%H:%M:%S"), e.kind, e.detail));
+                                }
+                            }
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                    }
+                }
+                AppMessage::ShowStatus(slot_idx) => {
+                    let mem = crate::resources::system_memory();
+                    let v = self.ollama_version.clone().unwrap_or_else(|| "offline".to_string());
+                    let msg = format!(
+                        "### ⚡ **ML Laboratory System Status**\n\n\
+                         • **Ollama Engine:** `{}`\n\
+                         • **System Memory:** Used `{:.2} GB` / Total `{:.2} GB`\n\
+                         • **Active CPU Inference Threads:** `{}` (optimal: `{}`)\n\
+                         • **Post-Quantum Storage Vault:** `AES-256-GCM (Active)`\n\
+                         • **Active Model Slots:** `{}` slots configured\n",
+                        v,
+                        mem.used_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                        mem.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        self.settings.num_threads,
+                        crate::ollama::api::ChatOptions::optimal_threads(),
+                        self.slots.len()
+                    );
+                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                        slot.chat.push_system_note(msg);
+                    }
+                }
+                AppMessage::SkillsCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::SkillsCommand::List => {
+                            if let Some(st) = self.storage.as_ref() {
+                                if let Ok(skills) = st.load_skills() {
+                                    let mut msg = String::from("### ⚡ **Autonomous Skills Registry**\n\n");
+                                    for s in skills {
+                                        let domain_name = match s.domain_idx {
+                                            1 => "Coder",
+                                            2 => "Researcher",
+                                            3 => "Cyber/Critic",
+                                            4 => "Planner",
+                                            5 => "Writer",
+                                            _ => "General",
+                                        };
+                                        msg.push_str(&format!("• **`{}`** `[{}]` — Score: `{:.2}` (Runs: {})\n  _{}_\n\n",
+                                            s.name, domain_name, s.reinforcement_score, s.execution_count, s.description));
+                                    }
+                                    msg.push_str("To execute: `/skills run <name>` or visit the **⚡ Skills** tab.");
+                                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&msg);
+                                    }
+                                }
+                            }
+                        }
+                        crate::commands::SkillsCommand::Run(name) => {
+                            if let Some(st) = self.storage.as_ref() {
+                                if let Ok(skills) = st.load_skills() {
+                                    if let Some(skill) = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&name)) {
+                                        let _ = st.reinforce_skill(skill.id, 0.1);
+                                        if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                            slot.chat.append_input(&skill.prompt_template);
+                                            slot.chat.push_system_note(&format!("⚡ **Loaded skill `{}`.** Provide your context or hit Send.", skill.name));
+                                        }
+                                    } else if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&format!("⚠ Skill `{}` not found. Type `/skills list` for registered skills.", name));
+                                    }
+                                }
+                            }
+                        }
+                        crate::commands::SkillsCommand::Add { name, description } => {
+                            if let Some(st) = self.storage.as_ref() {
+                                let skill = crate::storage::Skill {
+                                    id: Uuid::new_v4(),
+                                    name: name.clone(),
+                                    description,
+                                    prompt_template: format!("You are an expert specialist performing {}:", name),
+                                    domain_idx: 0,
+                                    reinforcement_score: 1.0,
+                                    execution_count: 0,
+                                    last_used: None,
+                                    is_built_in: false,
+                                };
+                                if st.save_skill(&skill).is_ok() {
+                                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&format!("⚡ **Skill `{}` successfully created and encrypted in vault.**", name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                AppMessage::RunSkill { skill_name, target_slot } => {
+                    let target = target_slot.unwrap_or(self.focused_slot).min(self.slots.len().saturating_sub(1));
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(skills) = st.load_skills() {
+                            if let Some(skill) = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&skill_name)) {
+                                let _ = st.reinforce_skill(skill.id, 0.2);
+                                self.tab = Tab::Chat;
+                                self.focused_slot = target;
+                                if let Some(slot) = self.slots.get_mut(target) {
+                                    slot.chat.append_input(&skill.prompt_template);
+                                    slot.chat.push_system_note(&format!("⚡ **Activated autonomous skill `{}`.**", skill.name));
+                                }
+                            }
+                        }
+                    }
+                }
+                AppMessage::ReinforceSkill { skill_id, reward_delta } => {
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(Some(skill)) = st.reinforce_skill(skill_id, reward_delta) {
+                            self.network.swarm_pheromones.deposit(skill.domain_idx, self.focused_slot, reward_delta);
+                            self.status = format!("Skill '{}' reinforced ({:+.2})", skill.name, reward_delta);
+                        }
+                    }
+                }
             }
         }
     }
@@ -2078,6 +2231,9 @@ impl eframe::App for AiDashboardApp {
                     });
                     ui.add_space(4.0);
                     self.neural_panel.show(ui, &mut self.network);
+                }
+                Tab::Skills => {
+                    self.skills_panel.show(ui, &self.storage, &self.tx, self.focused_slot);
                 }
                 Tab::Compare => {
                     self.show_compare(ui);

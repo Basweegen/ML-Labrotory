@@ -346,10 +346,10 @@ impl ChatPanel {
     }
 
     /// System notice bubble (guard blocks, etc.).
-    pub fn push_system_note(&mut self, content: String) {
+    pub fn push_system_note(&mut self, content: impl Into<String>) {
         self.push_capped(ChatMessage {
             role: "system".to_string(),
-            content,
+            content: content.into(),
             timestamp: chrono::Utc::now(),
         });
     }
@@ -990,10 +990,66 @@ impl ChatPanel {
     ) {
         // Trim the newline Enter inserts before the send triggers (the Enter
         // path bypasses the button's enabled guard).
-        let prompt = self.input.trim().to_string();
+        let mut prompt = self.input.trim().to_string();
         if prompt.is_empty() {
             return;
         }
+        if prompt.len() > Self::MAX_CONTENT_CHARS {
+            let mut end = Self::MAX_CONTENT_CHARS;
+            while !prompt.is_char_boundary(end) { end -= 1; }
+            prompt.truncate(end);
+        }
+
+        // Unified In-Chat Slash Command Interception
+        if prompt.starts_with('/') {
+            match crate::commands::SlashCommand::parse(&prompt) {
+                Ok(Some(cmd)) => {
+                    self.input.clear();
+                    match cmd {
+                        crate::commands::SlashCommand::Help => {
+                            self.push_system_note(crate::commands::SlashCommand::help_manual());
+                        }
+                        crate::commands::SlashCommand::Clear => {
+                            self.clear_chat();
+                            self.push_system_note("⚡ **Chat cleared from viewport.**");
+                        }
+                        crate::commands::SlashCommand::New => {
+                            let _ = tx.send(crate::ui::app::AppMessage::NewChat);
+                            self.push_system_note("⚡ **Started fresh chat session.**");
+                        }
+                        crate::commands::SlashCommand::Model(name) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ModelSelected(name.clone()));
+                            self.push_system_note(&format!("⚡ **Switching model to `{}`** (pre-warming into RAM)...", name));
+                        }
+                        crate::commands::SlashCommand::Swarm(task) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                            self.push_system_note("🧬 **Swarm Relay dispatched.** Switching to Swarm Relay tab...");
+                        }
+                        crate::commands::SlashCommand::Skills(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::SkillsCommand(slot_idx, sub));
+                        }
+                        crate::commands::SlashCommand::Audit => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ShowAudit(slot_idx));
+                        }
+                        crate::commands::SlashCommand::Threads(n) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::SetThreads(n));
+                            self.push_system_note(&format!("⚡ **Inference CPU threads set to {}.**", n));
+                        }
+                        crate::commands::SlashCommand::Status => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ShowStatus(slot_idx));
+                        }
+                    }
+                    return;
+                }
+                Err(err_msg) => {
+                    self.input.clear();
+                    self.push_system_note(&format!("⚠ **Command Error:**\n{}", err_msg));
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+
         if let Err(hits) = self.gate.check(&prompt) {
             self.push_system_note(Self::secret_warning(&hits));
             let _ = tx.send(crate::ui::app::AppMessage::Audit(
