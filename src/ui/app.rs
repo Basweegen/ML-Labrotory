@@ -8,6 +8,7 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 use ndarray::Array1;
+use serde::{Deserialize, Serialize};
 
 use crate::neural::ModelProfileNetwork;
 use crate::ollama::api::{ChatResponse, Model, OllamaClient};
@@ -78,6 +79,12 @@ pub enum AppMessage {
         template: crate::ui::relay::SwarmTemplate,
         prompt: Option<String>,
     },
+    LaunchSwarmDag {
+        preset: Option<crate::swarm::DagPreset>,
+        prompt: Option<String>,
+    },
+    ShowBlackboard,
+    AbortSwarm,
     #[allow(dead_code)]
     SetGuardrailTier(crate::guardrails::GuardrailTier),
     #[allow(dead_code)]
@@ -87,7 +94,7 @@ pub enum AppMessage {
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelRole {
     General,
     Coder,
@@ -419,6 +426,14 @@ impl AiDashboardApp {
             mem_checked: Instant::now(),
             report,
         };
+        if let Some(ref st) = app.storage {
+            if let Ok(Some(saved_dag)) = st.load_swarm_dag() {
+                app.relay.dag = saved_dag;
+            }
+            if let Ok(Some(saved_bb)) = st.load_blackboard() {
+                app.relay.blackboard = saved_bb;
+            }
+        }
         app.refresh_models();
         app
     }
@@ -968,6 +983,19 @@ impl AiDashboardApp {
                                         }
                                     }
                                     crate::commands::SwarmCommand::ListPresets => {}
+                                    crate::commands::SwarmCommand::Dag { preset, prompt } => {
+                                        let dag_preset = preset.as_deref().and_then(crate::swarm::DagPreset::from_id);
+                                        let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmDag {
+                                            preset: dag_preset,
+                                            prompt,
+                                        });
+                                    }
+                                    crate::commands::SwarmCommand::Blackboard => {
+                                        let _ = self.tx.send(crate::ui::app::AppMessage::ShowBlackboard);
+                                    }
+                                    crate::commands::SwarmCommand::Abort => {
+                                        let _ = self.tx.send(crate::ui::app::AppMessage::AbortSwarm);
+                                    }
                                 }
                                 crate::commands::SlashCommand::Skills(sub) => {
                                     let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
@@ -1342,6 +1370,82 @@ impl AiDashboardApp {
                         self.tab = Tab::Editor;
                         self.status = "Imported Swarm code into Editor IDE".to_string();
                         self.audit("relay.import_editor", "editor".to_string());
+                    } else if let Some(rest) = s.strip_prefix("DAG_CHUNK:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            if let Ok(node_id) = parts[0].parse::<usize>() {
+                                self.relay.push_dag_chunk(node_id, parts[1].to_string());
+                            }
+                        }
+                    } else if let Some(rest) = s.strip_prefix("DAG_DONE:") {
+                        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                        if parts.len() >= 3 {
+                            let node_id: usize = parts[0].parse().unwrap_or(0);
+                            let dur: f32 = parts[1].parse().unwrap_or(0.0);
+                            let content = parts[2].to_string();
+
+                            // Complete node and deposit artifact into stigmergic blackboard
+                            self.relay.dag_node_completed(node_id, content, dur);
+
+                            // Stigmergic pheromone deposit in quantum / biological swarm grid
+                            if let Some(node) = self.relay.dag.find_node(node_id) {
+                                let domain_idx = match node.role {
+                                    ModelRole::Planner => 4,
+                                    ModelRole::Coder => 1,
+                                    ModelRole::Critic => 3,
+                                    ModelRole::Researcher => 2,
+                                    ModelRole::Writer => 5,
+                                    _ => 0,
+                                };
+                                let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
+                                self.network.swarm_pheromones.deposit(domain_idx, node_id.min(7), reward);
+                            }
+
+                            // Persist DAG and Blackboard encrypted at rest in local Sled vault
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.save_swarm_dag(&self.relay.dag);
+                                let _ = st.save_blackboard(&self.relay.blackboard);
+                            }
+
+                            // Advance DAG execution by dispatching newly ready nodes
+                            self.relay.dispatch_ready_dag_nodes(
+                                &self.api_client,
+                                &self.tx,
+                                &self.rt,
+                                self.settings.num_threads,
+                            );
+
+                            let node_name = self
+                                .relay
+                                .dag
+                                .find_node(node_id)
+                                .map(|n| n.name.clone())
+                                .unwrap_or_else(|| format!("Node {}", node_id));
+
+                            if self.relay.dag.is_finished() {
+                                self.status = format!(
+                                    "Swarm DAG '{}' successfully completed all nodes!",
+                                    self.relay.dag.preset.label()
+                                );
+                                self.audit(
+                                    "swarm.dag_finished",
+                                    self.relay.dag.preset.label().to_string(),
+                                );
+                            } else {
+                                self.status = format!("Swarm DAG node '{}' completed in {:.1}s", node_name, dur);
+                                self.audit("swarm.dag_node_done", format!("node {} ({:.1}s)", node_id, dur));
+                            }
+                        }
+                    } else if let Some(rest) = s.strip_prefix("DAG_FAIL:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        let node_id: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let err = parts.get(1).unwrap_or(&"Unknown error").to_string();
+                        self.relay.dag_node_failed(node_id, err.clone());
+                        if let Some(st) = self.storage.as_ref() {
+                            let _ = st.save_swarm_dag(&self.relay.dag);
+                        }
+                        self.status = format!("Swarm DAG node {} failed: {}", node_id, err);
+                        self.audit("swarm.dag_node_failed", format!("node {}: {}", node_id, err));
                     } else {
                         self.status = s;
                     }
@@ -1494,6 +1598,44 @@ impl AiDashboardApp {
                     self.tab = Tab::Relay;
                     self.status = format!("Loaded Swarm preset: {}", template.label());
                     self.audit("swarm.preset_launched", template.short_id().to_string());
+                }
+                AppMessage::LaunchSwarmDag { preset, prompt } => {
+                    self.tab = Tab::Relay;
+                    self.relay.swarm_mode = crate::ui::relay::SwarmMode::Dag;
+                    if let Some(p) = preset {
+                        self.relay.dag.apply_preset(p);
+                    }
+                    // Auto-assign models to nodes that don't have one
+                    for node in &mut self.relay.dag.nodes {
+                        if node.model.is_none() {
+                            node.model = crate::ui::relay::RelayPanel::find_best_model_for_role(&node.role, &self.models);
+                        }
+                    }
+                    if let Some(p) = prompt {
+                        self.relay.dag.objective = p;
+                        if self.relay.dag.nodes.iter().all(|n| n.model.is_some()) {
+                            self.relay.start_dag(&self.api_client, &self.tx, &self.rt, self.settings.num_threads);
+                            self.status = format!("Launched Swarm DAG: {}", self.relay.dag.preset.label());
+                        } else {
+                            self.status = format!("Configured Swarm DAG: {} (Assign remaining models to run)", self.relay.dag.preset.label());
+                        }
+                    } else {
+                        self.status = format!("Loaded Swarm DAG preset: {}", self.relay.dag.preset.label());
+                    }
+                    self.audit("swarm.dag_launched", self.relay.dag.preset.label().to_string());
+                }
+                AppMessage::ShowBlackboard => {
+                    self.tab = Tab::Relay;
+                    self.relay.swarm_mode = crate::ui::relay::SwarmMode::Dag;
+                    self.relay.show_blackboard_drawer = true;
+                    self.status = "Swarm Stigmergic Blackboard opened".to_string();
+                    self.audit("swarm.blackboard_opened", "blackboard drawer".to_string());
+                }
+                AppMessage::AbortSwarm => {
+                    self.relay.abort_dag();
+                    self.relay.abort_pipeline();
+                    self.status = "Swarm execution aborted".to_string();
+                    self.audit("swarm.abort", "all nodes and steps aborted".to_string());
                 }
                 AppMessage::SetThreads(n) => {
                     self.settings.num_threads = n;

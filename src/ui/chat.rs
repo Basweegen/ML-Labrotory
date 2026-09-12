@@ -1121,6 +1121,23 @@ impl ChatPanel {
                                 note.push_str("\n*Usage:* `/swarm preset <id> [prompt]` (e.g. `/swarm preset triad Build an auth system`)");
                                 self.push_system_note(&note);
                             }
+                            crate::commands::SwarmCommand::Dag { preset, prompt } => {
+                                let dag_preset = preset.as_deref().and_then(crate::swarm::DagPreset::from_id);
+                                let p_label = dag_preset.map(|p| p.label()).unwrap_or("Diamond Swarm");
+                                let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmDag {
+                                    preset: dag_preset,
+                                    prompt,
+                                });
+                                self.push_system_note(&format!("🕸 **Autonomous Swarm DAG `{}` activated.** Switching to Relay tab...", p_label));
+                            }
+                            crate::commands::SwarmCommand::Blackboard => {
+                                let _ = tx.send(crate::ui::app::AppMessage::ShowBlackboard);
+                                self.push_system_note("🐝 **Opening Stigmergic Blackboard Vault in Relay tab...**");
+                            }
+                            crate::commands::SwarmCommand::Abort => {
+                                let _ = tx.send(crate::ui::app::AppMessage::AbortSwarm);
+                                self.push_system_note("🛑 **Aborting active swarm operations across all nodes.**");
+                            }
                         }
                         crate::commands::SlashCommand::Skills(sub) => {
                             let _ = tx.send(crate::ui::app::AppMessage::SkillsCommand(slot_idx, sub));

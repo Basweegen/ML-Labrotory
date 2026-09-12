@@ -760,6 +760,46 @@ impl Storage {
         }
         Ok(())
     }
+
+    /// Save Swarm DAG graph state encrypted at rest with AES-256-GCM
+    pub fn save_swarm_dag(&self, dag: &crate::swarm::SwarmDag) -> Result<()> {
+        let serialized = bincode::serialize(dag)?;
+        let encrypted = self.vault.encrypt(&serialized)?;
+        self.config_tree.insert("swarm_dag_current", encrypted)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    /// Load Swarm DAG graph state decrypted from the post-quantum vault
+    pub fn load_swarm_dag(&self) -> Result<Option<crate::swarm::SwarmDag>> {
+        if let Some(value) = self.config_tree.get("swarm_dag_current")? {
+            let decrypted = self.vault.decrypt(&value)?;
+            let dag: crate::swarm::SwarmDag = bincode::deserialize(&decrypted)?;
+            Ok(Some(dag))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Save Stigmergic Blackboard memory snapshot encrypted with AES-256-GCM
+    pub fn save_blackboard(&self, blackboard: &crate::swarm::StigmergicBlackboard) -> Result<()> {
+        let serialized = bincode::serialize(blackboard)?;
+        let encrypted = self.vault.encrypt(&serialized)?;
+        self.config_tree.insert("blackboard_current", encrypted)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    /// Load Stigmergic Blackboard memory snapshot decrypted from the vault
+    pub fn load_blackboard(&self) -> Result<Option<crate::swarm::StigmergicBlackboard>> {
+        if let Some(value) = self.config_tree.get("blackboard_current")? {
+            let decrypted = self.vault.decrypt(&value)?;
+            let bb: crate::swarm::StigmergicBlackboard = bincode::deserialize(&decrypted)?;
+            Ok(Some(bb))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1038,5 +1078,48 @@ mod tests {
         assert_eq!(reloaded.chat_split_view_default, true);
         assert_eq!(reloaded.visible_tabs, vec!["Chat", "Editor", "Settings"]);
         assert_eq!(reloaded.tab_order, vec!["Editor", "Chat", "Settings"]);
+    }
+
+    #[test]
+    fn test_encrypted_swarm_dag_and_blackboard_roundtrip() {
+        let _guard = store_lock();
+        let dir = std::env::temp_dir().join(format!("aidash-test-swarm-enc-{}", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
+
+        let mut dag = crate::swarm::SwarmDag::new(crate::swarm::DagPreset::Diamond);
+        dag.objective = "Secure microservices architecture".to_string();
+        dag.mark_completed(0, "Blueprint established".to_string(), 1.8);
+
+        st.save_swarm_dag(&dag).expect("save swarm dag");
+
+        // Inspect raw tree: must be encrypted with AES-256-GCM magic
+        let raw = st.config_tree.get("swarm_dag_current").unwrap().unwrap();
+        assert_eq!(&raw[0..4], ENVELOPE_MAGIC);
+
+        let loaded_dag = st.load_swarm_dag().expect("load swarm dag").expect("dag exists");
+        assert_eq!(loaded_dag.objective, "Secure microservices architecture");
+        assert_eq!(loaded_dag.nodes[0].output, "Blueprint established");
+
+        let mut bb = crate::swarm::StigmergicBlackboard::new();
+        bb.deposit(crate::swarm::BlackboardArtifact::new(
+            0,
+            "Architect",
+            crate::ui::app::ModelRole::Planner,
+            "architecture",
+            "Core Spec",
+            "Interfaces and contracts",
+            2.5,
+            vec!["spec".into()],
+        ));
+
+        st.save_blackboard(&bb).expect("save blackboard");
+
+        let raw_bb = st.config_tree.get("blackboard_current").unwrap().unwrap();
+        assert_eq!(&raw_bb[0..4], ENVELOPE_MAGIC);
+
+        let loaded_bb = st.load_blackboard().expect("load blackboard").expect("bb exists");
+        assert_eq!(loaded_bb.artifacts.len(), 1);
+        assert_eq!(loaded_bb.artifacts[0].title, "Core Spec");
+        assert_eq!(loaded_bb.artifacts[0].author_name, "Architect");
     }
 }

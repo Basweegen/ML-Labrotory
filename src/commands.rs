@@ -19,6 +19,9 @@ pub enum SwarmCommand {
     Dispatch(String),
     Preset { template: String, prompt: Option<String> },
     ListPresets,
+    Dag { preset: Option<String>, prompt: Option<String> },
+    Blackboard,
+    Abort,
 }
 
 /// Project management subcommands
@@ -172,6 +175,21 @@ impl SlashCommand {
                 match first {
                     None => {
                         Err("Usage: /swarm <prompt> OR /swarm preset <template> [prompt]\nPresets: hive, code, research, triad, soc, fullstack, quantum".to_string())
+                    }
+                    Some(word) if word.eq_ignore_ascii_case("dag") => {
+                        let sub_preset = parts.next();
+                        let prompt = parts.collect::<Vec<&str>>().join(" ");
+                        let prompt_opt = if prompt.trim().is_empty() { None } else { Some(prompt) };
+                        Ok(Some(SlashCommand::Swarm(SwarmCommand::Dag {
+                            preset: sub_preset.map(|s| s.to_string()),
+                            prompt: prompt_opt,
+                        })))
+                    }
+                    Some(word) if word.eq_ignore_ascii_case("blackboard") || word.eq_ignore_ascii_case("bb") => {
+                        Ok(Some(SlashCommand::Swarm(SwarmCommand::Blackboard)))
+                    }
+                    Some(word) if word.eq_ignore_ascii_case("abort") || word.eq_ignore_ascii_case("stop") => {
+                        Ok(Some(SlashCommand::Swarm(SwarmCommand::Abort)))
                     }
                     Some(word) if word.eq_ignore_ascii_case("preset") || word.eq_ignore_ascii_case("presets") || word.eq_ignore_ascii_case("list") => {
                         let tmpl = parts.next();
@@ -629,6 +647,39 @@ pub async fn run_headless_cli(cmd: SlashCommand) -> Result<()> {
                 }).await?;
                 println!("\n\nSwarm Turn Complete. Evaluation count: {:?}", resp.eval_count);
             }
+            SwarmCommand::Dag { preset, prompt } => {
+                let p_id = preset.as_deref().unwrap_or("diamond");
+                let dag_preset = crate::swarm::DagPreset::from_id(p_id).unwrap_or(crate::swarm::DagPreset::Diamond);
+                println!("=== Autonomous Swarm DAG: {} ===", dag_preset.label());
+                let prompt_str = prompt.unwrap_or_else(|| "Initialize swarm DAG task".to_string());
+                println!("Objective: {}", prompt_str);
+                let dag = crate::swarm::SwarmDag::new(dag_preset);
+                println!("Topology: {} nodes across dependency levels:", dag.nodes.len());
+                if let Ok(ranks) = dag.topological_ranks() {
+                    for (lvl, nodes) in ranks.iter().enumerate() {
+                        let node_names = nodes
+                            .iter()
+                            .filter_map(|&id| dag.find_node(id))
+                            .map(|n| format!("#{}: {} ({})", n.id, n.name, n.role.label()))
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        println!("  Level {}: {}", lvl, node_names);
+                    }
+                }
+                println!("\nSwarm DAG configured. Launch in ML Laboratory dashboard for live parallel execution.");
+            }
+            SwarmCommand::Blackboard => {
+                println!("=== Stigmergic Blackboard Memory Vault ===");
+                let storage = crate::storage::Storage::new()?;
+                if let Ok(Some(bb)) = storage.load_blackboard() {
+                    println!("{}", bb.export_markdown());
+                } else {
+                    println!("No persistent blackboard snapshot found. Run a Swarm DAG in the dashboard to deposit artifacts.");
+                }
+            }
+            SwarmCommand::Abort => {
+                println!("Swarm abort signal emitted.");
+            }
         }
         SlashCommand::Threads(n) => {
             println!("Setting default inference CPU threads to {}...", n);
@@ -970,6 +1021,21 @@ mod tests {
         assert_eq!(
             SlashCommand::parse("/swarm presets").unwrap(),
             Some(SlashCommand::Swarm(SwarmCommand::ListPresets))
+        );
+        assert_eq!(
+            SlashCommand::parse("/swarm dag diamond Build quantum ring buffer").unwrap(),
+            Some(SlashCommand::Swarm(SwarmCommand::Dag {
+                preset: Some("diamond".to_string()),
+                prompt: Some("Build quantum ring buffer".to_string()),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/swarm blackboard").unwrap(),
+            Some(SlashCommand::Swarm(SwarmCommand::Blackboard))
+        );
+        assert_eq!(
+            SlashCommand::parse("/swarm abort").unwrap(),
+            Some(SlashCommand::Swarm(SwarmCommand::Abort))
         );
         assert!(SlashCommand::parse("/swarm").is_err());
     }

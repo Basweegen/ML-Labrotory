@@ -648,4 +648,62 @@
   - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 19 as COMPLETE.
 
+---
+
+## 20. Phase 1 — Autonomous Multi-Agent DAG Swarm Engine & Stigmergic Blackboard Memory (2026-09-12)
+- **Pre-Implementation Security Scan & Architectural Directives:**
+  - Architected Phase 1 of the 6-phase master expansion:
+    1. **Asynchronous DAG Swarm Engine (`src/swarm/dag.rs`)**:
+       - Kahn's topological sort with cycle detection.
+       - Topological level partitioning (`topological_ranks`) for parallel branch scheduling.
+       - Ready-queue state machine (`Pending` -> `Running` -> `Completed` / `Failed`).
+       - Built-in multi-agent presets: `Diamond Swarm`, `Cyber / SOC Defense Grid`, `Quantum Algorithm Swarm`, `Full-Stack Dev Forge`, `Custom`.
+    2. **Stigmergic Blackboard Memory (`src/swarm/blackboard.rs`)**:
+       - Bio-inspired indirect communication (stigmergy) across agents.
+       - Domain classification (`architecture`, `backend`, `frontend`, `security`, `synthesis`, `cyber`, `quantum`).
+       - Pheromone intensity scoring with temporal evaporation (`evaporate`) and consensus reinforcement (`reinforce`).
+       - Intelligent dependency context assembly (`assemble_context_for_node`) injecting relevant upstream artifacts and domain memories.
+       - Direct Markdown synthesis and export (`export_markdown`).
+    3. **Dual Relay Mode UI (`src/ui/relay.rs`)**:
+       - Mode switcher between `Sequential Chain` and `DAG Swarm Graph`.
+       - High-contrast visual DAG node cards with role badges, domain tags, upstream dependency labels, latency timers, and live token streams.
+       - Slide-out Stigmergic Blackboard Drawer with domain filters, pheromone tags, reinforcement counters, and one-click export.
+    4. **Unified Command Engine & Chat Slash Commands (`src/commands.rs`, `src/ui/chat.rs`)**:
+       - `/swarm dag <preset> [prompt]` for initiating parallel DAG swarm workflows.
+       - `/swarm blackboard` to toggle drawer and inspect stigmergic memory.
+       - `/swarm abort` for immediate graceful termination of all active nodes.
+    5. **Post-Quantum AES-256-GCM Storage Vault (`src/storage.rs`)**:
+       - Encrypted persistence of `SwarmDag` and `StigmergicBlackboard` in local Sled vault under strict `0o600` permissions.
+       - Automatic recovery of DAG and blackboard state on application launch.
+  - Rust 2024 Edition Compatibility: Handled reference binding patterns (`filter(|(_, deg)| **deg == 0)`) cleanly.
+  - Zero telemetry, local loopback (`127.0.0.1:11434`), strict file permissions, and Sean M. Stow copyright header across all files.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 103/103 tests passing (`cargo test --bin ai-dashboard`).
+  - Added dedicated tests:
+    - `test_dag_cycle_detection_and_topological_ranks`
+    - `test_dag_ready_queue_and_dependency_resolution`
+    - `test_all_dag_presets_are_acyclic`
+    - `test_stigmergic_blackboard_deposit_and_query`
+    - `test_stigmergic_reinforce_and_evaporate`
+    - `test_blackboard_context_assembly`
+    - `test_encrypted_swarm_dag_and_blackboard_roundtrip`
+    - `test_dag_execution_lifecycle_and_blackboard_integration`
+  - Production release binary built and verified.
+  - Zero memory leaks, zero network telemetry, strict loopback isolation.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement `src/swarm/dag.rs` with topological sorting, cycle detection, and DAG presets.
+  - [x] [COMPLETE] Implement `src/swarm/blackboard.rs` with stigmergic pheromone decay, reinforcement, and context assembly.
+  - [x] [COMPLETE] Expose `swarm` module in `src/main.rs`.
+  - [x] [COMPLETE] Update `src/storage.rs` with encrypted AES-256-GCM DAG and blackboard persistence.
+  - [x] [COMPLETE] Update `src/ui/relay.rs` with dual mode toggle, DAG node cards, blackboard drawer, and execution engine.
+  - [x] [COMPLETE] Extend `src/commands.rs` with `/swarm dag`, `/swarm blackboard`, `/swarm abort` for CLI and chat.
+  - [x] [COMPLETE] Wire in chat slash commands in `src/ui/chat.rs`.
+  - [x] [COMPLETE] Wire in `AppMessage` handling in `src/ui/app.rs` (`LaunchSwarmDag`, `ShowBlackboard`, `AbortSwarm`, `DAG_CHUNK`, `DAG_DONE`, `DAG_FAIL`) and startup restoration.
+  - [x] [COMPLETE] Run automated tests (103/103 passed).
+  - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Section 20 as COMPLETE.
+
+
 
