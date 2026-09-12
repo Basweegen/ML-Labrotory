@@ -401,6 +401,12 @@ impl AiDashboardApp {
                 self.audit("model.assign_warn", format!("slot {} -> {} ({})", idx + 1, name, e));
             }
         }
+        if let Some(api) = self.api_client.clone() {
+            let warm_name = name;
+            self.rt.spawn(async move {
+                let _ = api.warm_model(&warm_name, Some("30m")).await;
+            });
+        }
         let sizes = self.current_sizes(None);
         self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }

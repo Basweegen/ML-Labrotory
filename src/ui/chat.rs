@@ -233,6 +233,8 @@ pub struct ChatPanel {
     reply_count: u32,
     pub history_depth: usize,
     pub num_threads: u32,
+    cached_stream_segs: Vec<MessageSegment>,
+    stream_dirty: bool,
 }
 
 impl ChatPanel {
@@ -253,6 +255,8 @@ impl ChatPanel {
             reply_count: 0,
             history_depth: 20,
             num_threads: 0,
+            cached_stream_segs: Vec::new(),
+            stream_dirty: false,
         }
     }
 
@@ -286,6 +290,8 @@ impl ChatPanel {
             reply_count: self.reply_count,
             history_depth: self.history_depth,
             num_threads: self.num_threads,
+            cached_stream_segs: Vec::new(),
+            stream_dirty: false,
         }
     }
 
@@ -297,6 +303,8 @@ impl ChatPanel {
         self.messages.shrink_to_fit();
         self.parsed_cache.clear();
         self.parsed_cache.shrink_to_fit();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
         self.input.clear();
         self.revision = self.revision.saturating_add(1);
     }
@@ -395,6 +403,7 @@ impl ChatPanel {
             return;
         }
         self.is_streaming = true;
+        self.stream_dirty = true;
         if self.stream_buf.len() < Self::MAX_CONTENT_CHARS {
             let room = Self::MAX_CONTENT_CHARS - self.stream_buf.len();
             let mut end = clean.len().min(room);
@@ -410,6 +419,8 @@ impl ChatPanel {
         self.stream_seq = self.stream_seq.saturating_add(1);
         self.is_streaming = false;
         self.stream_buf.clear();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
     }
 
     /// Replace chat contents with a stored session (History -> Open in chat).
@@ -514,12 +525,12 @@ impl ChatPanel {
                     });
                 }
                 let total = self.messages.len();
-                if total > 100 {
+                if total > 50 {
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
                         ui.label(
                             egui::RichText::new(format!(
-                                "Showing last 100 of {} messages (older kept for the model, hidden for speed).",
+                                "Showing last 50 of {} messages (older kept for the model, hidden for speed).",
                                 total
                             ))
                             .size(11.0)
@@ -527,7 +538,7 @@ impl ChatPanel {
                         );
                     });
                 }
-                let start = total.saturating_sub(100);
+                let start = total.saturating_sub(50);
                 for i in start..total {
                     let segs: &[MessageSegment] = if i < self.parsed_cache.len() {
                         &self.parsed_cache[i]
@@ -537,13 +548,17 @@ impl ChatPanel {
                     self.show_message(ui, &self.messages[i], segs, tx);
                 }
                 if !self.stream_buf.is_empty() {
+                    if self.stream_dirty || self.cached_stream_segs.is_empty() {
+                        let tmp_content = format!("{}▍", self.stream_buf);
+                        self.cached_stream_segs = parse_segments(&tmp_content);
+                        self.stream_dirty = false;
+                    }
                     let tmp = ChatMessage {
                         role: "assistant".to_string(),
                         content: format!("{}▍", self.stream_buf),
                         timestamp: chrono::Utc::now(),
                     };
-                    let stream_segs = parse_segments(&tmp.content);
-                    self.show_message(ui, &tmp, &stream_segs, tx);
+                    self.show_message(ui, &tmp, &self.cached_stream_segs, tx);
                 }
                 if self.is_streaming && self.stream_buf.is_empty() {
                     ui.horizontal(|ui| {
@@ -912,7 +927,7 @@ impl ChatPanel {
                                 });
                             }
                             MessageSegment::Code { lang, code } => {
-                                let block_id = format!("chat_cb_{}_{}", seg_idx, code.len());
+                                let block_id = format!("chat_cb_{}", seg_idx);
                                 render_code_block(ui, lang, code, &block_id, tx);
                             }
                         }
@@ -1091,7 +1106,7 @@ impl ChatPanel {
                 messages,
                 stream: true,
                 options: Some(ChatOptions::lowram_with_threads(threads_opt)),
-                keep_alive: Some("10m".to_string()),
+                keep_alive: Some("30m".to_string()),
             };
 
             let result = client
@@ -1115,6 +1130,8 @@ impl ChatPanel {
     pub fn handle_response(&mut self, response: Result<ChatResponse>) -> (bool, f32, usize) {
         self.is_streaming = false;
         self.stream_buf.clear();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
         let elapsed = self
             .send_started
             .map(|t| t.elapsed().as_secs_f32())

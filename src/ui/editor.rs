@@ -827,7 +827,7 @@ impl EditorPanel {
                 messages,
                 stream: true,
                 options: Some(options),
-                keep_alive: Some("10m".to_string()),
+                keep_alive: Some("30m".to_string()),
             };
 
             let result = client

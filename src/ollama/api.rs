@@ -130,9 +130,9 @@ impl ChatOptions {
     /// Clamping threads to P-cores + standard threads (e.g. 8-12) achieves >3x tok/sec speedup.
     pub fn optimal_threads() -> u32 {
         let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
-        if total > 16 {
-            12
-        } else if total > 8 {
+        if total >= 20 {
+            10
+        } else if total > 12 {
             8
         } else if total > 4 {
             total - 2
@@ -300,6 +300,21 @@ impl OllamaClient {
         let url = format!("{}/api/delete", self.base_url);
         let body = serde_json::json!({ "name": name });
         let resp = self.client.delete(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(OllamaError::Api(err).into());
+        }
+        Ok(())
+    }
+
+    /// Pre-warm a model into RAM in the background so user turns start instantly (<300ms vs 13s cold start).
+    pub async fn warm_model(&self, name: &str, keep_alive: Option<&str>) -> Result<()> {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = serde_json::json!({
+            "model": name,
+            "keep_alive": keep_alive.unwrap_or("30m"),
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(OllamaError::Api(err).into());

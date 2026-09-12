@@ -813,7 +813,7 @@ impl RelayPanel {
                 ],
                 stream: true,
                 options: Some(options),
-                keep_alive: Some("30s".to_string()),
+                keep_alive: Some("30m".to_string()),
             };
 
             let tx_chunk = tx.clone();
