@@ -4,9 +4,27 @@ use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
 use crate::security::{ConfirmGate, SecretHit};
 use crate::storage::ChatMessage;
+use std::borrow::Cow;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
+
+/// Test if text contains characters that require sanitization.
+/// Scans ASCII control characters (< 0x20, 0x7f) excluding \n, \r, \t,
+/// ANSI escape prefixes (0x1b), and Unicode replacement characters (\u{FFFD}).
+pub fn needs_sanitization(s: &str) -> bool {
+    s.as_bytes().iter().any(|&b| b == 0x1b || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t') || b == 0x7f)
+        || s.contains('\u{FFFD}')
+}
+
+/// Zero-copy sanitization wrapper: returns Cow::Borrowed if no invalid characters exist,
+/// eliminating heap allocation churn for >99% of streaming tokens.
+pub fn sanitize_text_cow<'a>(s: &'a str) -> Cow<'a, str> {
+    if !needs_sanitization(s) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(sanitize_text(s))
+}
 
 /// Strip ANSI escape sequences, replacement characters (\u{FFFD}),
 /// and unprintable control characters, preserving \n, \r, \t.
@@ -214,6 +232,7 @@ pub struct ChatPanel {
     reply_secs_total: f32,
     reply_count: u32,
     pub history_depth: usize,
+    pub num_threads: u32,
 }
 
 impl ChatPanel {
@@ -233,6 +252,7 @@ impl ChatPanel {
             reply_secs_total: 0.0,
             reply_count: 0,
             history_depth: 20,
+            num_threads: 0,
         }
     }
 
@@ -265,6 +285,7 @@ impl ChatPanel {
             reply_secs_total: self.reply_secs_total,
             reply_count: self.reply_count,
             history_depth: self.history_depth,
+            num_threads: self.num_threads,
         }
     }
 
@@ -369,7 +390,7 @@ impl ChatPanel {
         if seq != self.stream_seq || piece.is_empty() {
             return;
         }
-        let clean = sanitize_text(piece);
+        let clean = sanitize_text_cow(piece);
         if clean.is_empty() {
             return;
         }
@@ -1045,6 +1066,7 @@ impl ChatPanel {
 
         let role_prompt = role_prompt.to_string();
         let tx_handle = tx.clone();
+        let num_threads = self.num_threads;
         let h = rt.spawn(async move {
             let mut messages = Vec::new();
             if !role_prompt.trim().is_empty() {
@@ -1063,11 +1085,12 @@ impl ChatPanel {
                 role: "user".to_string(),
                 content: prompt,
             });
+            let threads_opt = if num_threads > 0 { Some(num_threads) } else { None };
             let req = ChatRequest {
                 model: model_name,
                 messages,
                 stream: true,
-                options: Some(ChatOptions::lowram()),
+                options: Some(ChatOptions::lowram_with_threads(threads_opt)),
                 keep_alive: Some("10m".to_string()),
             };
 
@@ -1274,5 +1297,19 @@ mod panel_tests {
             lang: "sh".to_string(),
             code: "echo done".to_string(),
         });
+    }
+
+    #[test]
+    fn test_sanitize_text_cow_zero_alloc() {
+        use std::borrow::Cow;
+        let clean_text = "This is a clean response with newlines\nand tabs\twithout escapes.";
+        let res = sanitize_text_cow(clean_text);
+        assert!(matches!(res, Cow::Borrowed(_)));
+        assert_eq!(res, clean_text);
+
+        let dirty_text = "Hello\x1b[31mRed\x1b[0m world\u{FFFD}!\x07";
+        let res2 = sanitize_text_cow(dirty_text);
+        assert!(matches!(res2, Cow::Owned(_)));
+        assert_eq!(res2, "HelloRed world!");
     }
 }

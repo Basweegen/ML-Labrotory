@@ -549,11 +549,13 @@ impl AiDashboardApp {
         ModelProfileNetwork::new(8, vec![16, 16], 4)
     }
 
-    /// True while anything animates (stream, spinner, pull): deserves a fast tick.
+    /// True while anything animates (stream, spinner, pull, relay, coder): deserves a fast tick.
     fn animating(&self) -> bool {
         self.models_loading
             || self.models_panel.is_busy()
             || self.slots.iter().any(|s| s.chat.is_streaming())
+            || self.relay.is_running
+            || self.editor.coder_is_streaming
     }
 
     /// Drop the trained profiler net and start fresh (weights + loss curve).
@@ -871,6 +873,7 @@ impl AiDashboardApp {
                             compose_system_prompt(&persona, &memory, s)
                         };
                         if let Some(slot) = self.slots.get_mut(idx) {
+                            slot.chat.num_threads = self.settings.num_threads;
                             if slot.chat.send_prompt(
                                 prompt.clone(),
                                 &models,
@@ -1874,6 +1877,7 @@ impl AiDashboardApp {
         ui.add_space(4.0);
         if let Some(slot) = self.slots.get_mut(f) {
             slot.chat.history_depth = history_depth;
+            slot.chat.num_threads = self.settings.num_threads;
             slot.chat.show(
                 ui,
                 &models,
@@ -2093,8 +2097,8 @@ impl eframe::App for AiDashboardApp {
         self.sync_slot_layout();
 
         // Keep the meter/spinners live, but don't burn CPU when idle:
-        // fast tick only while something animates.
-        let tick = if self.animating() { 500 } else { 2000 };
+        // 16ms (60 FPS) tick while something animates or streams tokens; 1000ms when idle.
+        let tick = if self.animating() { 16 } else { 1000 };
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(tick));
         let ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = if self.frame_ms <= 0.0 { ms } else { self.frame_ms * 0.9 + ms * 0.1 };

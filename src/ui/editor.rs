@@ -961,7 +961,7 @@ impl EditorPanel {
         if suggestion_id + 1 != self.suggestion_id || piece.is_empty() {
             return;
         }
-        let clean = crate::ui::chat::sanitize_text(piece);
+        let clean = crate::ui::chat::sanitize_text_cow(piece);
         if clean.is_empty() {
             return;
         }

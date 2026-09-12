@@ -241,6 +241,9 @@ impl QuantumStateLayer {
     }
 }
 
+/// Bounded replay buffer size to prevent memory bloat and slash serialization overhead.
+pub const MAX_EXPERIENCE_BUFFER: usize = 512;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileNetwork {
     pub id: Uuid,
@@ -418,8 +421,8 @@ impl ModelProfileNetwork {
         exp.reward = if exp.reward.is_finite() { exp.reward.clamp(-10.0, 10.0) } else { 0.0 };
         self.experience_buffer.push(exp);
 
-        if self.experience_buffer.len() > 10000 {
-            let overflow = self.experience_buffer.len() - 10000;
+        if self.experience_buffer.len() > MAX_EXPERIENCE_BUFFER {
+            let overflow = self.experience_buffer.len() - MAX_EXPERIENCE_BUFFER;
             self.experience_buffer.drain(0..overflow);
         }
     }
@@ -433,12 +436,11 @@ impl ModelProfileNetwork {
 
         let mut rng = rand::thread_rng();
         let n = self.experience_buffer.len().min(32);
-        let batch: Vec<_> = (0..n)
-            .map(|_| {
-                let i = rng.gen_range(0..self.experience_buffer.len());
-                self.experience_buffer[i].clone()
-            })
-            .collect();
+        let mut batch = Vec::with_capacity(n);
+        for _ in 0..n {
+            let i = rng.gen_range(0..self.experience_buffer.len());
+            batch.push(self.experience_buffer[i].clone());
+        }
         
         let mut weights = self.weights_as_arrays();
         let mut biases = self.biases_as_arrays();
@@ -661,6 +663,10 @@ impl ModelProfileNetwork {
             for trail in row {
                 if !trail.is_finite() || *trail <= 0.0 { *trail = 1.0; }
             }
+        }
+        if self.experience_buffer.len() > MAX_EXPERIENCE_BUFFER {
+            let overflow = self.experience_buffer.len() - MAX_EXPERIENCE_BUFFER;
+            self.experience_buffer.drain(0..overflow);
         }
     }
 }

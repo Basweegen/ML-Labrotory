@@ -142,6 +142,7 @@ pub struct VaultKey(pub [u8; 32]);
 #[derive(Clone)]
 pub struct StorageVault {
     key: VaultKey,
+    cipher: Aes256Gcm,
 }
 
 impl StorageVault {
@@ -153,8 +154,11 @@ impl StorageVault {
             if bytes.len() == 32 {
                 let mut key_arr = [0u8; 32];
                 key_arr.copy_from_slice(&bytes);
+                let cipher = Aes256Gcm::new_from_slice(&key_arr)
+                    .map_err(|e| anyhow::anyhow!("AES-256-GCM initialization failed: {}", e))?;
                 return Ok(Self {
                     key: VaultKey(key_arr),
+                    cipher,
                 });
             }
         }
@@ -192,16 +196,23 @@ impl StorageVault {
             file.flush()?;
         }
 
+        let cipher = Aes256Gcm::new_from_slice(&key_arr)
+            .map_err(|e| anyhow::anyhow!("AES-256-GCM initialization failed: {}", e))?;
+
         Ok(Self {
             key: VaultKey(key_arr),
+            cipher,
         })
     }
 
     /// Construct in-memory vault from explicit key bytes (for testing and ephemeral isolation).
     #[allow(dead_code)]
     pub fn from_key(key_bytes: [u8; 32]) -> Self {
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .expect("Valid 32-byte key for AES-256");
         Self {
             key: VaultKey(key_bytes),
+            cipher,
         }
     }
 
@@ -216,22 +227,22 @@ impl StorageVault {
         argon2
             .hash_password_into(passphrase.as_bytes(), salt, &mut key)
             .map_err(|e| anyhow::anyhow!("Argon2 derivation error: {}", e))?;
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| anyhow::anyhow!("AES-256-GCM initialization failed: {}", e))?;
         Ok(Self {
             key: VaultKey(key),
+            cipher,
         })
     }
 
     /// Encrypt plaintext into Post-Quantum AES-256-GCM envelope:
     /// Format: `b"A256" (4 bytes) || Nonce (12 bytes) || Ciphertext + Tag (N + 16 bytes)`
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key.0)
-            .map_err(|e| anyhow::anyhow!("AES-256-GCM initialization failed: {}", e))?;
-
         let mut nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher
+        let ciphertext = self.cipher
             .encrypt(nonce, plaintext)
             .map_err(|e| anyhow::anyhow!("AES-256-GCM encryption failed: {}", e))?;
 
@@ -248,11 +259,9 @@ impl StorageVault {
         if payload.len() >= ENVELOPE_MAGIC.len() + NONCE_LEN + TAG_LEN
             && &payload[0..ENVELOPE_MAGIC.len()] == ENVELOPE_MAGIC
         {
-            let cipher = Aes256Gcm::new_from_slice(&self.key.0)
-                .map_err(|e| anyhow::anyhow!("AES-256-GCM initialization failed: {}", e))?;
             let nonce = Nonce::from_slice(&payload[ENVELOPE_MAGIC.len()..ENVELOPE_MAGIC.len() + NONCE_LEN]);
             let ciphertext = &payload[ENVELOPE_MAGIC.len() + NONCE_LEN..];
-            let plaintext = cipher
+            let plaintext = self.cipher
                 .decrypt(nonce, ciphertext)
                 .map_err(|_| anyhow::anyhow!("Decryption failed: cryptographic integrity violation or invalid key"))?;
             Ok(plaintext)
@@ -260,6 +269,12 @@ impl StorageVault {
             // Legacy unencrypted plaintext fallback
             Ok(payload.to_vec())
         }
+    }
+
+    /// Access the underlying zeroized cryptographic key container.
+    #[allow(dead_code)]
+    pub fn key(&self) -> &VaultKey {
+        &self.key
     }
 }
 

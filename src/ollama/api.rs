@@ -87,6 +87,13 @@ pub struct ChatOptions {
     /// Number of GPU layers to offload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_gpu: Option<u32>,
+    /// Number of tokens to process in parallel during prompt evaluation.
+    /// Setting to 256 bounds transient RAM usage during context evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_batch: Option<u32>,
+    /// Memory map model weights to allow OS paging instead of full physical RAM allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_mmap: Option<bool>,
 }
 
 impl ChatOptions {
@@ -111,6 +118,8 @@ impl ChatOptions {
             num_ctx: Some(2048),
             num_thread: Some(t),
             num_gpu: None,
+            num_batch: Some(256),
+            use_mmap: Some(true),
         }
     }
 
@@ -225,7 +234,12 @@ impl OllamaClient {
         // Local inference on CPU can take many minutes for a long reply:
         // only the connect phase gets a short timeout, the body streams
         // until Ollama finishes (or the user hits Stop).
+        // TCP nodelay disables Nagle's algorithm, eliminating 10-40ms buffering delays on loopback streaming chunks.
         let client = Client::builder()
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .pool_max_idle_per_host(10)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(1800))
             .build()
@@ -337,13 +351,13 @@ impl OllamaClient {
             let chunk = chunk.map_err(OllamaError::Request)?;
             pending_bytes.extend_from_slice(&chunk);
             while let Some(pos) = pending_bytes.iter().position(|&b| b == b'\n') {
-                let line_bytes: Vec<u8> = pending_bytes.drain(..=pos).collect();
-                if let Ok(line_str) = std::str::from_utf8(&line_bytes) {
+                if let Ok(line_str) = std::str::from_utf8(&pending_bytes[..pos]) {
                     feed_line(line_str, &mut assembled, &mut last, &mut on_chunk)?;
                 } else {
-                    let line_str = String::from_utf8_lossy(&line_bytes);
+                    let line_str = String::from_utf8_lossy(&pending_bytes[..pos]);
                     feed_line(&line_str, &mut assembled, &mut last, &mut on_chunk)?;
                 }
+                pending_bytes.drain(..=pos);
             }
         }
         if !pending_bytes.is_empty() {
@@ -422,13 +436,19 @@ mod tests {
         assert!(opts.num_thread.is_some());
         let threads = opts.num_thread.unwrap();
         assert!(threads >= 1 && threads <= 32);
+        assert_eq!(opts.num_batch, Some(256));
+        assert_eq!(opts.use_mmap, Some(true));
 
         let json = serde_json::to_string(&opts).unwrap();
         assert!(json.contains("\"num_thread\":"));
         assert!(json.contains("\"num_ctx\":2048"));
+        assert!(json.contains("\"num_batch\":256"));
+        assert!(json.contains("\"use_mmap\":true"));
 
         let custom = ChatOptions::lowram_with_threads(Some(6));
         assert_eq!(custom.num_thread, Some(6));
+        assert_eq!(custom.num_batch, Some(256));
+        assert_eq!(custom.use_mmap, Some(true));
     }
 }
 
