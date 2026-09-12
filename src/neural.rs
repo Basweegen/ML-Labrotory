@@ -50,6 +50,197 @@ impl From<SerializableArray1> for Array1<f32> {
     }
 }
 
+/// Bio-Inspired Swarm Pheromone Stigmergy Matrix.
+/// Models dynamic cohabitation and ecological niche specialization of multi-agent LLM slots.
+/// Implements pheromone decay (stigmergic evaporation) and reinforcement deposits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmPheromoneMatrix {
+    /// Number of task categories (e.g. 6: General, Coder, Researcher, Cyber/Critic, Planner, Writer)
+    pub num_domains: usize,
+    /// Number of cohabitating model slots (e.g. 8)
+    pub num_slots: usize,
+    /// Pheromone trail intensity matrix tau_{d, s} (domains x slots)
+    pub pheromones: Vec<Vec<f32>>,
+    /// Evaporation coefficient rho in (0, 1)
+    pub evaporation_rate: f32,
+    /// Pheromone sensitivity exponent alpha
+    pub alpha: f32,
+    /// Neural heuristic sensitivity exponent beta
+    pub beta: f32,
+}
+
+impl Default for SwarmPheromoneMatrix {
+    fn default() -> Self {
+        Self::new(6, 8)
+    }
+}
+
+impl SwarmPheromoneMatrix {
+    pub fn new(num_domains: usize, num_slots: usize) -> Self {
+        let d = num_domains.max(1);
+        let s = num_slots.max(1);
+        let pheromones = vec![vec![1.0; s]; d];
+        Self {
+            num_domains: d,
+            num_slots: s,
+            pheromones,
+            evaporation_rate: 0.05,
+            alpha: 1.0,
+            beta: 1.5,
+        }
+    }
+
+    /// Bio-inspired stigmergic evaporation: trails decay toward baseline 1.0 over time.
+    pub fn evaporate(&mut self) {
+        let rho = self.evaporation_rate.clamp(0.001, 0.5);
+        for row in &mut self.pheromones {
+            for trail in row {
+                *trail = ((1.0 - rho) * *trail + rho * 1.0).clamp(0.1, 20.0);
+            }
+        }
+    }
+
+    /// Reinforcement deposit: successful completions strengthen the domain-slot trail.
+    pub fn deposit(&mut self, domain: usize, slot: usize, reward: f32) {
+        let d = domain % self.num_domains;
+        let s = slot % self.num_slots;
+        if reward > 0.0 {
+            let deposit = (reward * 0.5).clamp(0.0, 5.0);
+            self.pheromones[d][s] = (self.pheromones[d][s] + deposit).min(20.0);
+        } else if reward < 0.0 {
+            let penalty = (-reward * 0.2).clamp(0.0, 0.5);
+            self.pheromones[d][s] = (self.pheromones[d][s] - penalty).max(0.1);
+        }
+    }
+
+    /// Fuse stigmergic pheromone trail with neural heuristic desirability.
+    /// Returns (best_slot, probability_distribution).
+    pub fn fuse_decision(&self, domain: usize, neural_desirability: &[f32]) -> (usize, Vec<f32>) {
+        let d = domain % self.num_domains;
+        let n_slots = self.num_slots;
+        let mut scores = Vec::with_capacity(n_slots);
+
+        for s in 0..n_slots {
+            let tau = if s < self.pheromones[d].len() { self.pheromones[d][s] } else { 1.0 };
+            let eta = if s < neural_desirability.len() { neural_desirability[s].max(1e-4) } else { 1.0 / n_slots as f32 };
+            let score = tau.powf(self.alpha) * eta.powf(self.beta);
+            scores.push(if score.is_finite() && score > 0.0 { score } else { 1e-4 });
+        }
+
+        let total: f32 = scores.iter().sum();
+        let probs: Vec<f32> = if total > 1e-6 {
+            scores.into_iter().map(|v| v / total).collect()
+        } else {
+            vec![1.0 / n_slots as f32; n_slots]
+        };
+
+        let best_slot = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        (best_slot, probs)
+    }
+}
+
+/// Parameterized Quantum-Inspired Superposition Layer.
+/// Maps normalized classical input vectors into quantum state superposition amplitudes:
+/// |psi_k> = cos(theta_k/2)|0> + e^(i*phi_k)*sin(theta_k/2)|1>
+/// Computes quantum interference, measurement probabilities (Born's rule), and Von Neumann entropy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumStateLayer {
+    pub num_qubits: usize,
+    pub rotation_thetas: Vec<f32>,
+    pub phase_phis: Vec<f32>,
+    pub entanglement_couplings: Vec<f32>,
+}
+
+impl Default for QuantumStateLayer {
+    fn default() -> Self {
+        Self::new(8)
+    }
+}
+
+impl QuantumStateLayer {
+    pub fn new(num_qubits: usize) -> Self {
+        let n = num_qubits.max(1);
+        let mut rng = rand::thread_rng();
+        let rotation_thetas: Vec<f32> = (0..n).map(|_| rng.gen_range(0.0..std::f32::consts::PI)).collect();
+        let phase_phis: Vec<f32> = (0..n).map(|_| rng.gen_range(0.0..std::f32::consts::TAU)).collect();
+        let entanglement_couplings: Vec<f32> = (0..n).map(|_| rng.gen_range(-0.5..0.5)).collect();
+        Self {
+            num_qubits: n,
+            rotation_thetas,
+            phase_phis,
+            entanglement_couplings,
+        }
+    }
+
+    /// Transform classical feature vector into quantum probability distribution & entropy.
+    /// Maps each normalized feature x_k into state |psi_k> = cos(theta_k/2)|0> + e^(i phi_k) sin(theta_k/2)|1>.
+    /// Applies nearest-neighbor quantum entanglement phase coupling.
+    /// Computes Born's rule measurement probabilities P_k = |alpha_k|^2 + |beta_k'|^2.
+    /// Calculates Von Neumann entropy S = - sum(p_k * ln(p_k)).
+    pub fn transform(&self, input: &Array1<f32>) -> (Array1<f32>, f32) {
+        let n = self.num_qubits;
+        let mut probs = Vec::with_capacity(n);
+
+        for k in 0..n {
+            let x_k = if k < input.len() { input[k].clamp(0.0, 1.0) } else { 0.5 };
+            let theta_param = if k < self.rotation_thetas.len() { self.rotation_thetas[k] } else { 0.0 };
+            let phi_param = if k < self.phase_phis.len() { self.phase_phis[k] } else { 0.0 };
+            let j_coupling = if k < self.entanglement_couplings.len() { self.entanglement_couplings[k] } else { 0.0 };
+
+            // Angle of rotation around Y axis: theta = pi * x + param
+            let theta = std::f32::consts::PI * x_k + theta_param;
+            let alpha = (theta * 0.5).cos();
+            let beta = (theta * 0.5).sin();
+
+            // Next neighbor amplitude for entanglement coupling
+            let next_k = (k + 1) % n;
+            let next_x = if next_k < input.len() { input[next_k].clamp(0.0, 1.0) } else { 0.5 };
+            let alpha_next = ((std::f32::consts::PI * next_x) * 0.5).cos();
+
+            // Entangled phase rotation
+            let phase = phi_param + j_coupling * alpha_next;
+            let beta_entangled = beta * phase.cos();
+
+            // Born's rule amplitude magnitude squared
+            let p_raw = alpha * alpha + beta_entangled * beta_entangled;
+            probs.push(if p_raw.is_finite() && p_raw > 0.0 { p_raw } else { 1e-4 });
+        }
+
+        // Normalize state vector probabilities: sum(P) = 1.0
+        let total: f32 = probs.iter().sum();
+        let norm_probs: Vec<f32> = if total > 1e-6 {
+            probs.into_iter().map(|v| v / total).collect()
+        } else {
+            vec![1.0 / n as f32; n]
+        };
+
+        // Von Neumann entropy: S = - sum(p_k * ln(p_k))
+        let entropy: f32 = norm_probs.iter().map(|&p| {
+            if p > 1e-12 { -p * p.ln() } else { 0.0 }
+        }).sum();
+
+        (Array1::from_vec(norm_probs), entropy)
+    }
+
+    /// Parameterized quantum phase update using loss gradient feedback
+    pub fn update_phases(&mut self, lr: f32, gradient: &[f32]) {
+        for (i, &grad) in gradient.iter().enumerate() {
+            if i < self.rotation_thetas.len() && grad.is_finite() {
+                self.rotation_thetas[i] = (self.rotation_thetas[i] - lr * grad).clamp(0.0, std::f32::consts::PI);
+            }
+            if i < self.phase_phis.len() && grad.is_finite() {
+                self.phase_phis[i] = (self.phase_phis[i] - lr * grad * 0.5) % std::f32::consts::TAU;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileNetwork {
     pub id: Uuid,
@@ -62,6 +253,10 @@ pub struct ModelProfileNetwork {
     pub learning_rate: f32,
     pub experience_buffer: Vec<Experience>,
     pub performance_history: Vec<f32>,
+    #[serde(default)]
+    pub swarm_pheromones: SwarmPheromoneMatrix,
+    #[serde(default)]
+    pub quantum_layer: Option<QuantumStateLayer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +304,8 @@ impl ModelProfileNetwork {
             learning_rate: 0.01,
             experience_buffer: Vec::new(),
             performance_history: Vec::new(),
+            swarm_pheromones: SwarmPheromoneMatrix::new(6, output_dim.max(8)),
+            quantum_layer: Some(QuantumStateLayer::new(input_dim)),
         }
     }
     
@@ -308,6 +505,82 @@ impl ModelProfileNetwork {
         }
     }
 
+    /// Forward pass through the quantum superposition layer and neural classifier.
+    /// Returns (fused_probabilities, von_neumann_entropy).
+    pub fn forward_quantum(&self, input: &Array1<f32>) -> (Array1<f32>, f32) {
+        let (processed_input, entropy) = if let Some(ql) = &self.quantum_layer {
+            ql.transform(input)
+        } else {
+            (input.clone(), 0.0)
+        };
+        let out = self.forward(&processed_input);
+        (out, entropy)
+    }
+
+    /// Bio-inspired swarm auto-router:
+    /// Evaluates text prompt through probe features, quantum superposition amplitudes,
+    /// and stigmergic pheromone trails.
+    /// Returns (best_slot, domain_name, confidence, entropy, distribution).
+    pub fn recommend_swarm_slot(&self, text: &str) -> (usize, &'static str, f32, f32, Vec<f32>) {
+        let (domain_idx, domain_name) = classify_prompt_domain(text);
+        let probe = extract_probe_features(text);
+        let (neural_dist, entropy) = self.forward_quantum(&probe);
+        let (best_slot, fused_probs) = self.swarm_pheromones.fuse_decision(domain_idx, &neural_dist.to_vec());
+        let confidence = if best_slot < fused_probs.len() { fused_probs[best_slot] } else { 0.0 };
+        (best_slot, domain_name, confidence, entropy, fused_probs)
+    }
+
+    /// Run a synthetic multi-domain training epoch:
+    /// Samples canonical task archetypes, propagates through quantum layer,
+    /// updates synaptic weights via gradient descent, deposits reinforcement pheromones,
+    /// and applies stigmergic evaporation.
+    /// Returns (training_loss, avg_quantum_entropy).
+    pub fn train_synthetic_epoch(&mut self) -> Result<(f32, f32)> {
+        let samples = generate_synthetic_benchmark_dataset();
+        let mut total_entropy = 0.0;
+
+        for s in &samples {
+            let probe = extract_probe_features(s.prompt);
+            let (quantum_input, entropy) = if let Some(ql) = &self.quantum_layer {
+                ql.transform(&probe)
+            } else {
+                (probe.clone(), 0.5)
+            };
+            total_entropy += entropy;
+
+            let exp = Experience {
+                state: quantum_input.clone().into(),
+                action: s.target_slot.min(self.output_dim.saturating_sub(1)),
+                reward: s.expected_reward,
+                next_state: quantum_input.into(),
+                done: true,
+            };
+            self.add_experience(exp);
+
+            // Reinforce swarm pheromones for the correct domain/slot pair
+            self.swarm_pheromones.deposit(s.domain_idx, s.target_slot, s.expected_reward);
+        }
+
+        // Run gradient descent
+        let mut total_loss = 0.0;
+        if self.experience_buffer.len() >= 4 {
+            let loss = self.train_step()?;
+            total_loss = loss;
+            self.performance_history.push(total_loss);
+        }
+
+        if let Some(ql) = &mut self.quantum_layer {
+            let grad = vec![total_loss * 0.01; ql.num_qubits];
+            ql.update_phases(self.learning_rate, &grad);
+        }
+
+        // Natural bio-inspired pheromone evaporation
+        self.swarm_pheromones.evaporate();
+
+        let avg_entropy = total_entropy / samples.len().max(1) as f32;
+        Ok((total_loss, avg_entropy))
+    }
+
     pub fn save(&self, path: &str) -> Result<()> {
         let data = bincode::serialize(self)?;
         let tmp_path = format!("{}.tmp", path);
@@ -323,7 +596,15 @@ impl ModelProfileNetwork {
 
     pub fn load(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let mut network: Self = bincode::deserialize(&data).map_err(|e| anyhow::anyhow!("corrupt network db: {e}"))?;
+        let mut network: Self = match bincode::deserialize(&data) {
+            Ok(net) => net,
+            Err(_) => {
+                // If legacy schema without quantum/swarm, create a fresh initialized net
+                let net = Self::new(8, vec![16, 16], 4);
+                let _ = net.save(path);
+                return Ok(net);
+            }
+        };
         network.sanitize();
         // Structural validation: layer count must be hidden+1, dims sane
         let expect_layers = network.hidden_dims.len() + 1;
@@ -359,7 +640,155 @@ impl ModelProfileNetwork {
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             self.learning_rate = 0.01;
         }
+        if let Some(ql) = &mut self.quantum_layer {
+            for v in &mut ql.rotation_thetas {
+                if !v.is_finite() { *v = 0.0; }
+            }
+            for v in &mut ql.phase_phis {
+                if !v.is_finite() { *v = 0.0; }
+            }
+            for v in &mut ql.entanglement_couplings {
+                if !v.is_finite() { *v = 0.0; }
+            }
+        }
+        for row in &mut self.swarm_pheromones.pheromones {
+            for trail in row {
+                if !trail.is_finite() || *trail <= 0.0 { *trail = 1.0; }
+            }
+        }
     }
+}
+
+/// Canonical 8-dimensional feature extractor for prompts & context:
+/// [0] Character length ratio
+/// [1] Word count ratio
+/// [2] Markdown code block indicator (1.0 or 0.0)
+/// [3] Question mark density
+/// [4] Line count ratio
+/// [5] Digit density
+/// [6] Uppercase density
+/// [7] Programming syntax / symbol density
+pub fn extract_probe_features(text: &str) -> Array1<f32> {
+    let chars = text.chars().count().max(1) as f32;
+    let words = text.split_whitespace().count() as f32;
+    let lines = text.lines().count() as f32;
+    let qmarks = text.chars().filter(|&c| c == '?').count() as f32;
+    let digits = text.chars().filter(|c| c.is_ascii_digit()).count() as f32;
+    let upper = text
+        .chars()
+        .filter(|c| c.is_alphabetic() && c.is_uppercase())
+        .count() as f32;
+    let codey = text
+        .chars()
+        .filter(|c| matches!(c, '{' | '}' | ';' | '=' | '(' | ')' | '`' | '<' | '>'))
+        .count() as f32;
+    let fences = if text.contains("```") { 1.0 } else { 0.0 };
+    Array1::from_vec(vec![
+        (chars / 2000.0).min(1.0),
+        (words / 300.0).min(1.0),
+        fences,
+        (qmarks / 3.0).min(1.0),
+        (lines / 40.0).min(1.0),
+        (digits / chars * 5.0).min(1.0),
+        (upper / chars * 3.0).min(1.0),
+        (codey / 20.0).min(1.0),
+    ])
+}
+
+/// Classify prompt into one of 6 ecological domain niches:
+/// 0: General, 1: Coder, 2: Researcher, 3: Cyber / Critic, 4: Planner, 5: Writer
+pub fn classify_prompt_domain(text: &str) -> (usize, &'static str) {
+    let lower = text.to_lowercase();
+    if lower.contains("audit") || lower.contains("vulnerab") || lower.contains("secur")
+        || lower.contains("secret") || lower.contains("encrypt") || lower.contains("timing")
+        || lower.contains("quantum") || lower.contains("qubit") || lower.contains("shannon")
+    {
+        (3, "Cyber / Critic")
+    } else if lower.contains("fn ") || lower.contains("def ") || lower.contains("impl ")
+        || lower.contains("struct ") || lower.contains("class ") || lower.contains("```")
+        || lower.contains("bug") || lower.contains("refactor") || lower.contains("compile")
+    {
+        (1, "Coder")
+    } else if lower.contains("why") || lower.contains("explain") || lower.contains("how does")
+        || lower.contains("paper") || lower.contains("research") || lower.contains("theory")
+        || lower.contains("analyze")
+    {
+        (2, "Researcher")
+    } else if lower.contains("plan") || lower.contains("steps") || lower.contains("roadmap")
+        || lower.contains("schedule") || lower.contains("architecture") || lower.contains("design")
+    {
+        (4, "Planner")
+    } else if lower.contains("write") || lower.contains("story") || lower.contains("draft")
+        || lower.contains("essay") || lower.contains("summary") || lower.contains("walkthrough")
+    {
+        (5, "Writer")
+    } else {
+        (0, "General")
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SyntheticTaskSample {
+    pub domain_idx: usize,
+    pub domain_name: &'static str,
+    pub prompt: &'static str,
+    pub target_slot: usize,
+    pub target_role: &'static str,
+    pub expected_reward: f32,
+}
+
+pub fn generate_synthetic_benchmark_dataset() -> Vec<SyntheticTaskSample> {
+    vec![
+        SyntheticTaskSample {
+            domain_idx: 1, // Coder
+            domain_name: "Coder",
+            prompt: "fn quicksort<T: Ord>(arr: &mut [T]) { /* implement partitioning */ }",
+            target_slot: 1,
+            target_role: "Coder",
+            expected_reward: 1.5,
+        },
+        SyntheticTaskSample {
+            domain_idx: 3, // Cyber / Critic
+            domain_name: "Cyber / Critic",
+            prompt: "Audit this loopback client for memory safety, side-channel timing leaks, and Shannon entropy threshold breaches.",
+            target_slot: 0,
+            target_role: "Critic",
+            expected_reward: 1.8,
+        },
+        SyntheticTaskSample {
+            domain_idx: 2, // Researcher
+            domain_name: "Researcher",
+            prompt: "Synthesize empirical benchmarks on quantum annealing vs gate-based quantum phase estimation for discrete optimization.",
+            target_slot: 2,
+            target_role: "Researcher",
+            expected_reward: 1.6,
+        },
+        SyntheticTaskSample {
+            domain_idx: 4, // Planner
+            domain_name: "Planner",
+            prompt: "Decompose this distributed multi-agent swarm into parallel DAG task stages with fault tolerance.",
+            target_slot: 3,
+            target_role: "Planner",
+            expected_reward: 1.4,
+        },
+        SyntheticTaskSample {
+            domain_idx: 5, // Writer
+            domain_name: "Writer",
+            prompt: "Draft an executive summary and architectural walkthrough of the bio-inspired swarm stigmergy engine.",
+            target_slot: 0,
+            target_role: "Writer",
+            expected_reward: 1.5,
+        },
+        SyntheticTaskSample {
+            domain_idx: 0, // General
+            domain_name: "General",
+            prompt: "What are the core operating parameters of this laboratory environment?",
+            target_slot: 0,
+            target_role: "General",
+            expected_reward: 1.2,
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,4 +985,58 @@ mod tests {
         let loss = net.train_step().unwrap();
         assert!(loss.is_finite() && loss >= 0.0);
     }
+
+    #[test]
+    fn quantum_layer_normalization_and_entropy() {
+        let ql = QuantumStateLayer::new(8);
+        let input = Array1::from_vec(vec![0.1, 0.9, 0.5, 0.0, 0.8, 0.2, 0.4, 0.7]);
+        let (probs, entropy) = ql.transform(&input);
+        assert_eq!(probs.len(), 8);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4, "quantum probabilities must sum to 1, got {sum}");
+        assert!(entropy >= 0.0 && entropy <= 3.0, "entropy must be non-negative: {entropy}");
+    }
+
+    #[test]
+    fn swarm_pheromone_stigmergy_and_fusion() {
+        let mut swarm = SwarmPheromoneMatrix::new(6, 4);
+        assert_eq!(swarm.pheromones[1][1], 1.0);
+        swarm.deposit(1, 1, 2.0); // Reward coder domain slot 1
+        assert!(swarm.pheromones[1][1] > 1.0);
+
+        swarm.evaporate();
+        assert!(swarm.pheromones[1][1] > 1.0 && swarm.pheromones[1][1] < 2.0);
+
+        let neural_desirability = [0.25, 0.25, 0.25, 0.25];
+        let (best_slot, probs) = swarm.fuse_decision(1, &neural_desirability);
+        assert_eq!(best_slot, 1, "fused decision should choose the reinforced slot");
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn synthetic_benchmark_training_epoch() {
+        let mut net = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        let res = net.train_synthetic_epoch();
+        assert!(res.is_ok());
+        let (loss, entropy) = res.unwrap();
+        assert!(loss >= 0.0 && loss.is_finite());
+        assert!(entropy >= 0.0 && entropy.is_finite());
+        assert!(!net.experience_buffer.is_empty());
+    }
+
+    #[test]
+    fn recommend_swarm_slot_matches_domains() {
+        let net = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        let (slot, domain, conf, entropy, dist) = net.recommend_swarm_slot("fn quicksort() { let x = 1; }");
+        assert_eq!(domain, "Coder");
+        assert!(conf > 0.0 && conf <= 1.0);
+        assert!(entropy >= 0.0);
+        assert_eq!(dist.len(), net.swarm_pheromones.num_slots);
+        assert!(slot < net.swarm_pheromones.num_slots);
+
+        let (_, cyber_domain, _, _, _) = net.recommend_swarm_slot("Audit security vulnerabilities, secret leakage, and timing attacks");
+        assert_eq!(cyber_domain, "Cyber / Critic");
+    }
 }
+

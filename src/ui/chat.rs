@@ -530,6 +530,32 @@ impl ChatPanel {
 
         ui.separator();
 
+        let trimmed_input = self.input.trim();
+        if !trimmed_input.is_empty() && trimmed_input.len() >= 6 {
+            let (domain_idx, domain_name) = crate::neural::classify_prompt_domain(trimmed_input);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("🐝 Swarm Router:")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0xff, 0xcc, 0x00))
+                );
+                let badge = match domain_idx {
+                    1 => "💻 Coder",
+                    2 => "🔬 Researcher",
+                    3 => "🛡️ Cyber / Critic",
+                    4 => "📋 Planner",
+                    5 => "✍️ Writer",
+                    _ => "🌐 General",
+                };
+                ui.label(
+                    egui::RichText::new(format!("{badge} ({domain_name})"))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x00, 0xee, 0xff))
+                );
+            });
+            ui.add_space(2.0);
+        }
+
         ui.add_space(4.0);
         // Full-width field on its own row; Send/Stop share a right-aligned
         // row beneath it. (Side by side proved unworkable: in a horizontal

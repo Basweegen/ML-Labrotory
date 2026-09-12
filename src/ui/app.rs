@@ -611,9 +611,22 @@ impl AiDashboardApp {
             done: true,
         });
         self.network.update_performance(reward);
+        let domain_idx = match role_idx {
+            1 => 1, // Coder
+            2 => 2, // Researcher
+            3 => 3, // Critic / Cyber
+            4 => 4, // Planner
+            5 => 5, // Writer
+            _ => 0, // General
+        };
+        self.network.swarm_pheromones.deposit(domain_idx, idx, reward);
         if self.network.experience_buffer.len() >= 4 {
             if let Ok(loss) = self.network.train_step() {
                 if loss.is_finite() && loss > 0.0 {
+                    if let Some(ql) = &mut self.network.quantum_layer {
+                        let grad = vec![loss * 0.01; ql.num_qubits];
+                        ql.update_phases(self.network.learning_rate, &grad);
+                    }
                     self.neural_panel.add_training_loss(loss);
                     self.neural_panel.last_loss = Some(loss);
                     let path = Self::network_path().to_string_lossy().to_string();
@@ -2024,7 +2037,7 @@ impl eframe::App for AiDashboardApp {
                         }
                     });
                     ui.add_space(4.0);
-                    self.neural_panel.show(ui, &self.network);
+                    self.neural_panel.show(ui, &mut self.network);
                 }
                 Tab::Compare => {
                     self.show_compare(ui);

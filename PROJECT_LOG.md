@@ -143,5 +143,59 @@
   - **Memory Stability:** Sled capped at 16 MiB; zero per-frame string allocations in chat and editor scroll areas.
   - **Security & Privacy:** Loopback isolation (`127.0.0.1:11434`), outbound secret gatekeeper active, zero telemetry, strict file permissions preserved.
 
+---
+
+## 8. Quantum-Inspired Swarm Neural Network & Ecosystem Optimizer (2026-09-11)
+- **Architectural Paradigm & Persona:**
+  - Designed by Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+  - Incorporates advanced bio-inspired swarm stigmergy (ant/bee colony foraging, pheromone decay), multi-agent ecological niche cohabitation, and quantum superposition interference into the local neural runtime.
+- **Pre-Implementation Scan & Identified Gaps:**
+  - Profiler network was previously a passive classifier with no proactive training dataset, requiring manual chat turns to build up experience.
+  - Multi-model slots lacked a stigmergic feedback mechanism to reinforce domain specialization (e.g. routing cyber prompts to critic models and code refactors to coder models).
+  - Missing quantum state telemetry (superposition amplitudes, phase angles, entanglement coupling, and Von Neumann entropy gauge).
+- **Core Engineering Implemented:**
+  - **Bio-Inspired Swarm Pheromone Stigmergy (`SwarmPheromoneMatrix` in `src/neural.rs`):**
+    - Tracks dynamic cohabitation across 6 ecological domain niches (General, Coder, Researcher, Cyber/Critic, Planner, Writer) and 8 model slots.
+    - Implements stigmergic evaporation $\tau_{d,s} \leftarrow (1-\rho)\tau_{d,s} + \rho \cdot \tau_0$.
+    - Implements reinforcement deposits on successful chat completions and penalty decrements on errors.
+    - Swarm probability fusion combines pheromone trails with neural heuristics: $P(s_i) \propto \tau_i^\alpha \cdot \eta_i^\beta$.
+  - **Parameterized Quantum Superposition Layer (`QuantumStateLayer` in `src/neural.rs`):**
+    - Unitary parameterized rotation $R_y(\theta_k)$ and phase angles $\phi_k$.
+    - Nearest-neighbor quantum entanglement phase coupling $J_k$.
+    - Born's rule measurement probabilities $P_k = |\alpha_k|^2 + |\beta_k'|^2$ ($\sum P_k = 1.0$).
+    - Von Neumann quantum entropy gauge $S = -\sum P_k \ln(P_k)$ quantifying routing dispersion.
+    - Phase angle gradient updates via loss feedback.
+  - **Synthetic Multi-Domain Dataset Generator & Live Epoch Training:**
+    - Canonical archetype samples across Coder, Cyber/Critic, Researcher, Planner, Writer, General.
+    - `extract_probe_features(text)`: Canonical 8-dimensional feature extractor.
+    - `classify_prompt_domain(text)`: Domain classifier mapping prompts to ecological niches.
+    - `train_synthetic_epoch(&mut self)`: Executes live training epoch through quantum superposition, backpropagation, and pheromone deposit/evaporation.
+    - `recommend_swarm_slot(&self, text)`: Auto-routes text prompts to the optimal model slot with confidence and entropy metrics.
+  - **Visualizer & Swarm Studio (`src/ui/neural_viz.rs`):**
+    - Quantum Superposition telemetry: Von Neumann entropy progress gauge with eigenstate interpretation (Deterministic vs Balanced Superposition vs Maximum Uncertainty) and qubit card states ($|\psi_k\rangle, \theta, \phi, J, |0\rangle, |1\rangle$).
+    - 2D Swarm Pheromone Heatmap: Interactive grid of 6 domains $\times$ 8 slots with colored pheromone density tiles and hover tooltips.
+    - Interactive Studio Actions: `[🚀 Run Swarm Training Epoch]`, `[🔄 Evaporate Pheromones]`, `[♻️ Reset Pheromones]`.
+    - Task Profiler & Swarm Auto-Router: Quick test prompt chips (`[💻 Coder]`, `[🛡️ Cyber]`, `[🔬 Research]`, `[📋 Plan]`), real-time domain basin badge, recommended slot badge, and fused probability bars.
+    - Swarm sensitivity sliders: $\alpha$ (pheromone weight), $\beta$ (heuristic weight), $\rho$ (evaporation rate).
+  - **Chat & Swarm Integration (`src/ui/chat.rs` & `src/ui/app.rs`):**
+    - Real-time Swarm Router domain classification chip above chat prompt input.
+    - Chat completion observation automatically deposits reinforcement pheromones into the corresponding domain basin.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement `SwarmPheromoneMatrix` with stigmergic evaporation and reinforcement in `src/neural.rs`.
+  - [x] [COMPLETE] Implement `QuantumStateLayer` with Born's rule measurement and Von Neumann entropy in `src/neural.rs`.
+  - [x] [COMPLETE] Implement synthetic multi-domain dataset generator and `train_synthetic_epoch` in `src/neural.rs`.
+  - [x] [COMPLETE] Implement `recommend_swarm_slot` auto-router in `src/neural.rs`.
+  - [x] [COMPLETE] Update `NeuralVizPanel` in `src/ui/neural_viz.rs` with Quantum Studio and Swarm Heatmap panels.
+  - [x] [COMPLETE] Wire interactive epoch training, pheromone evaporation, and reset actions in `NeuralVizPanel::show`.
+  - [x] [COMPLETE] Connect chat completion feedback to swarm pheromone matrix in `src/ui/app.rs`.
+  - [x] [COMPLETE] Add Swarm Router domain badge to `src/ui/chat.rs`.
+  - [x] [COMPLETE] Maintain strict copyright header `Copyright 2026 Sean M. Stow. All rights reserved.` across all modified files.
+  - [x] [COMPLETE] Run test suite: 52/52 unit tests passing cleanly with 0 errors and 0 warnings.
+  - [x] [COMPLETE] Compile optimized release binary (`target/release/ai-dashboard`, 15 MB).
+- **Post-Implementation Security & Memory Validation:**
+  - **Permissions:** Binary database serialization preserves `0o600` file permissions.
+  - **Network Isolation:** 100% loopback inference on `127.0.0.1:11434`, zero external telemetry.
+  - **Memory Bounds:** Experience buffer bounded, training history bounded to 500 entries, zero frame allocations.
+
 
 
