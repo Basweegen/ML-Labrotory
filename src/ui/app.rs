@@ -1129,7 +1129,19 @@ impl AiDashboardApp {
                             let dur: f32 = parts[1].parse().unwrap_or(0.0);
                             let content = parts[2].to_string();
                             self.relay.step_completed(step_idx, content, dur);
-                            self.relay.advance_or_finish(&self.api_client, &self.tx, &self.rt);
+                            if let Some(step) = self.relay.steps.get(step_idx) {
+                                let domain_idx = match step.role {
+                                    ModelRole::Planner => 4,
+                                    ModelRole::Coder => 1,
+                                    ModelRole::Critic => 3,
+                                    ModelRole::Researcher => 2,
+                                    ModelRole::Writer => 5,
+                                    _ => 0,
+                                };
+                                let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
+                                self.network.swarm_pheromones.deposit(domain_idx, step_idx.min(7), reward);
+                            }
+                            self.relay.advance_or_finish(&self.api_client, &self.tx, &self.rt, self.settings.num_threads);
                             self.status = format!("Swarm step {} completed in {:.1}s", step_idx + 1, dur);
                             self.audit("relay.step_done", format!("step {} ({:.1}s)", step_idx + 1, dur));
                         }
@@ -1140,6 +1152,17 @@ impl AiDashboardApp {
                         self.relay.step_failed(step_idx, err.clone());
                         self.status = format!("Swarm step {} failed: {}", step_idx + 1, err);
                         self.audit("relay.step_failed", format!("step {}: {}", step_idx + 1, err));
+                    } else if let Some(rest) = s.strip_prefix("CHAT_IMPORT:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        let target_slot: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let content = parts.get(1).unwrap_or(&"").to_string();
+                        if let Some(slot) = self.slots.get_mut(target_slot) {
+                            slot.chat.push_assistant_message(format!("**[Swarm Relay Consensus Output]**\n\n{}", content));
+                            self.tab = Tab::Chat;
+                            self.focused_slot = target_slot;
+                            self.status = format!("Imported Swarm output into Slot {}", target_slot + 1);
+                            self.audit("relay.import_chat", format!("slot {}", target_slot + 1));
+                        }
                     } else {
                         self.status = s;
                     }
@@ -1968,6 +1991,7 @@ impl eframe::App for AiDashboardApp {
                         &self.api_client,
                         &self.tx,
                         &self.rt,
+                        self.settings.num_threads,
                     );
                 }
                 Tab::Models => {

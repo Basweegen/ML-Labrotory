@@ -582,7 +582,10 @@ impl ModelProfileNetwork {
     }
 
     pub fn save(&self, path: &str) -> Result<()> {
-        let data = bincode::serialize(self)?;
+        let raw = bincode::serialize(self)?;
+        let key_path = std::path::Path::new(path).with_file_name("vault.key");
+        let vault = crate::storage::StorageVault::load_or_create(&key_path)?;
+        let data = vault.encrypt(&raw)?;
         let tmp_path = format!("{}.tmp", path);
         std::fs::write(&tmp_path, &data)?;
         #[cfg(unix)]
@@ -595,7 +598,10 @@ impl ModelProfileNetwork {
     }
 
     pub fn load(path: &str) -> Result<Self> {
-        let data = std::fs::read(path)?;
+        let raw = std::fs::read(path)?;
+        let key_path = std::path::Path::new(path).with_file_name("vault.key");
+        let vault = crate::storage::StorageVault::load_or_create(&key_path)?;
+        let data = vault.decrypt(&raw)?;
         let mut network: Self = match bincode::deserialize(&data) {
             Ok(net) => net,
             Err(_) => {
@@ -1037,6 +1043,32 @@ mod tests {
 
         let (_, cyber_domain, _, _, _) = net.recommend_swarm_slot("Audit security vulnerabilities, secret leakage, and timing attacks");
         assert_eq!(cyber_domain, "Cyber / Critic");
+    }
+
+    #[test]
+    fn neural_encrypted_at_rest_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("aidash-neural-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("neural.bin").to_string_lossy().to_string();
+
+        let mut net = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        net.swarm_pheromones.deposit(1, 2, 5.0);
+        net.save(&path).expect("save neural network");
+
+        // Inspect raw disk bytes to ensure AES-256-GCM envelope magic b"A256"
+        let raw = std::fs::read(&path).expect("read raw bytes");
+        assert_eq!(&raw[0..4], crate::storage::ENVELOPE_MAGIC, "saved network must be AES-256 encrypted");
+
+        // Load network back and verify weights & pheromones
+        let loaded = ModelProfileNetwork::load(&path).expect("load neural network");
+        assert_eq!(loaded.swarm_pheromones.pheromones[1][2], net.swarm_pheromones.pheromones[1][2]);
+        assert_eq!(loaded.input_dim, 8);
+        assert_eq!(loaded.output_dim, 4);
+
+        let input = Array1::from_vec(vec![0.5; 8]);
+        let out = loaded.forward(&input);
+        let sum: f32 = out.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4);
     }
 }
 

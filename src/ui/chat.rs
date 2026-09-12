@@ -325,6 +325,15 @@ impl ChatPanel {
         });
     }
 
+    /// Push an assistant message (e.g. imported from Swarm Relay).
+    pub fn push_assistant_message(&mut self, content: String) {
+        self.push_capped(ChatMessage {
+            role: "assistant".to_string(),
+            content,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
     fn secret_warning(hits: &[SecretHit]) -> String {
         let mut lines = vec![format!(
             "Blocked: looks like {} secret{} — resend unchanged within 60s to override:",
