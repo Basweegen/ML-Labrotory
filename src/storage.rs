@@ -170,6 +170,7 @@ pub fn default_tab_order() -> Vec<String> {
         "Models".to_string(),
         "History".to_string(),
         "Neural".to_string(),
+        "Learning".to_string(),
         "Skills".to_string(),
         "Tools".to_string(),
         "Settings".to_string(),

@@ -3,6 +3,7 @@ use anyhow::Result;
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // Serializable wrappers for ndarray types
@@ -241,6 +242,356 @@ impl QuantumStateLayer {
     }
 }
 
+/// Individual memory slot in the Associative Memory Network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySlot {
+    pub id: usize,
+    pub key: Vec<f32>,
+    pub value: Vec<f32>,
+    pub domain: String,
+    pub label: String,
+    pub access_count: u32,
+    pub retention_score: f32, // 0.0 to 3.0; strengthened on attention, decays over time
+    pub last_accessed_timestamp: u64,
+}
+
+/// Bio-inspired Associative Memory Network with soft-attention content addressing.
+/// Implements key-value storage, least-recently-used / lowest-retention slot replacement,
+/// and memory consolidation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssociativeMemoryNetwork {
+    pub capacity: usize,
+    pub key_dim: usize,
+    pub value_dim: usize,
+    pub slots: Vec<MemorySlot>,
+    pub temperature: f32,
+    pub decay_rate: f32,
+    pub total_reads: u64,
+    pub total_writes: u64,
+    pub last_attention_weights: Vec<f32>,
+    pub last_query_domain: Option<String>,
+}
+
+impl Default for AssociativeMemoryNetwork {
+    fn default() -> Self {
+        Self::new(32, 8, 8)
+    }
+}
+
+impl AssociativeMemoryNetwork {
+    pub fn new(capacity: usize, key_dim: usize, value_dim: usize) -> Self {
+        let cap = capacity.max(8);
+        let mut net = Self {
+            capacity: cap,
+            key_dim,
+            value_dim,
+            slots: Vec::with_capacity(cap),
+            temperature: 0.5,
+            decay_rate: 0.05,
+            total_reads: 0,
+            total_writes: 0,
+            last_attention_weights: Vec::new(),
+            last_query_domain: None,
+        };
+        net.seed_canonical_archetypes();
+        net
+    }
+
+    /// Seeds canonical task archetypes representing the 6 primary AI ecosystem domains
+    pub fn seed_canonical_archetypes(&mut self) {
+        let archetypes = [
+            (
+                "General",
+                "Broad conversational, multi-domain problem solving & query dispatch",
+                vec![0.2, 0.1, 0.5, 0.1, 0.2, 0.0, 0.0, 0.1],
+                vec![0.7, 0.1, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0],
+            ),
+            (
+                "Coder",
+                "High-performance systems programming, memory safety & compiler optimization",
+                vec![0.6, 0.3, 0.8, 0.2, 0.7, 0.1, 0.16, 0.42],
+                vec![0.1, 0.8, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "Researcher",
+                "Deep technical analysis, literature synthesis & factual verification",
+                vec![0.8, 0.5, 0.9, 0.4, 0.85, 0.2, 0.33, 0.78],
+                vec![0.1, 0.0, 0.8, 0.1, 0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "Cyber/Critic",
+                "Vulnerability inspection, post-quantum crypto analysis & threat auditing",
+                vec![0.5, 0.2, 0.7, 0.1, 0.5, 0.3, 0.50, 0.91],
+                vec![0.0, 0.0, 0.1, 0.8, 0.1, 0.0, 0.0, 0.0],
+            ),
+            (
+                "Planner",
+                "Swarm orchestration, DAG task decomposition & dependency resolution",
+                vec![0.4, 0.2, 0.6, 0.15, 0.4, 0.4, 0.66, 0.25],
+                vec![0.1, 0.0, 0.0, 0.0, 0.8, 0.1, 0.0, 0.0],
+            ),
+            (
+                "Writer",
+                "Architectural documentation, security advisory drafting & reporting",
+                vec![0.7, 0.4, 0.8, 0.3, 0.8, 0.5, 0.83, 0.55],
+                vec![0.1, 0.0, 0.0, 0.0, 0.1, 0.8, 0.0, 0.0],
+            ),
+        ];
+
+        for (domain, label, key, value) in archetypes {
+            let mut k = key;
+            k.resize(self.key_dim, 0.0);
+            let mut v = value;
+            v.resize(self.value_dim, 0.0);
+            self.slots.push(MemorySlot {
+                id: self.slots.len(),
+                key: k,
+                value: v,
+                domain: domain.to_string(),
+                label: label.to_string(),
+                access_count: 1,
+                retention_score: 1.0,
+                last_accessed_timestamp: 0,
+            });
+        }
+    }
+
+    /// Content-addressable soft-attention read head.
+    /// Computes dot-product similarity against memory keys scaled by temperature and sqrt(d),
+    /// applies Softmax to generate attention distribution, and retrieves weighted memory vector.
+    pub fn read(&mut self, query: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        self.total_reads += 1;
+        if self.slots.is_empty() {
+            return (vec![0.0; self.value_dim], vec![]);
+        }
+
+        let temp = self.temperature.clamp(0.05, 5.0);
+        let scale = (self.key_dim.max(1) as f32).sqrt() * temp;
+
+        let mut raw_scores = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            let mut dot = 0.0;
+            let len = query.len().min(slot.key.len());
+            for i in 0..len {
+                dot += query[i] * slot.key[i];
+            }
+            raw_scores.push(dot / scale);
+        }
+
+        let max_score = raw_scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp_scores: Vec<f32> = raw_scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f32 = exp_scores.iter().sum();
+
+        let attn_weights: Vec<f32> = if sum_exp > 1e-6 {
+            exp_scores.iter().map(|&e| e / sum_exp).collect()
+        } else {
+            vec![1.0 / self.slots.len() as f32; self.slots.len()]
+        };
+
+        // Compute retrieved value as linear combination of values weighted by attention
+        let mut retrieved = vec![0.0; self.value_dim];
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            let w = attn_weights[i];
+            if w > 0.05 {
+                slot.access_count = slot.access_count.saturating_add(1);
+                slot.retention_score = (slot.retention_score + 0.1 * w).min(3.0);
+            }
+            for (j, &val) in slot.value.iter().enumerate().take(self.value_dim) {
+                retrieved[j] += w * val;
+            }
+        }
+
+        self.last_attention_weights = attn_weights.clone();
+        (retrieved, attn_weights)
+    }
+
+    /// Writes or updates an experience vector in the memory network.
+    /// If at capacity, overwrites the least-retained memory slot.
+    pub fn write(&mut self, key: &[f32], value: &[f32], domain: &str, label: &str, reward: f32) {
+        self.total_writes += 1;
+        let mut padded_key = key.to_vec();
+        padded_key.resize(self.key_dim, 0.0);
+        let mut padded_val = value.to_vec();
+        padded_val.resize(self.value_dim, 0.0);
+
+        // Check if an existing slot matches closely (cosine similarity > 0.96)
+        let mut closest_idx = None;
+        let mut max_sim = 0.0;
+        for (idx, slot) in self.slots.iter().enumerate() {
+            let mut dot = 0.0;
+            let mut norm_q = 0.0;
+            let mut norm_k = 0.0;
+            for i in 0..self.key_dim {
+                let q_i = padded_key[i];
+                let k_i = slot.key[i];
+                dot += q_i * k_i;
+                norm_q += q_i * q_i;
+                norm_k += k_i * k_i;
+            }
+            let denom = (norm_q.sqrt() * norm_k.sqrt()).max(1e-6);
+            let sim = dot / denom;
+            if sim > max_sim {
+                max_sim = sim;
+                closest_idx = Some(idx);
+            }
+        }
+
+        if max_sim > 0.96 {
+            if let Some(idx) = closest_idx {
+                let slot = &mut self.slots[idx];
+                for j in 0..self.value_dim {
+                    slot.value[j] = 0.7 * slot.value[j] + 0.3 * padded_val[j];
+                }
+                slot.retention_score = (slot.retention_score + 0.2 * reward.max(0.1)).min(3.0);
+                slot.access_count = slot.access_count.saturating_add(1);
+                return;
+            }
+        }
+
+        // If at capacity, find slot with lowest retention score (excluding canonical archetypes 0..6)
+        if self.slots.len() >= self.capacity {
+            let min_slot_idx = self
+                .slots
+                .iter()
+                .enumerate()
+                .skip(6.min(self.slots.len()))
+                .min_by(|a, b| a.1.retention_score.partial_cmp(&b.1.retention_score).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(self.slots.len().saturating_sub(1));
+
+            if min_slot_idx < self.slots.len() {
+                self.slots[min_slot_idx] = MemorySlot {
+                    id: min_slot_idx,
+                    key: padded_key,
+                    value: padded_val,
+                    domain: domain.to_string(),
+                    label: label.to_string(),
+                    access_count: 1,
+                    retention_score: 1.0 + reward.max(0.0) * 0.5,
+                    last_accessed_timestamp: 0,
+                };
+                return;
+            }
+        }
+
+        let new_id = self.slots.len();
+        self.slots.push(MemorySlot {
+            id: new_id,
+            key: padded_key,
+            value: padded_val,
+            domain: domain.to_string(),
+            label: label.to_string(),
+            access_count: 1,
+            retention_score: 1.0 + reward.max(0.0) * 0.5,
+            last_accessed_timestamp: 0,
+        });
+    }
+
+    /// Memory consolidation: applies temporal decay to retention scores while preserving archetypes.
+    pub fn consolidate(&mut self) {
+        let decay = self.decay_rate.clamp(0.001, 0.5);
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            let min_floor = if i < 6 { 0.5 } else { 0.05 };
+            slot.retention_score = (slot.retention_score * (1.0 - decay)).max(min_floor);
+        }
+    }
+
+    /// Resets all memory slots back to canonical archetypes.
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.total_reads = 0;
+        self.total_writes = 0;
+        self.last_attention_weights.clear();
+        self.last_query_domain = None;
+        self.seed_canonical_archetypes();
+    }
+}
+
+/// Available Machine Learning Optimizers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptimizerType {
+    Adam,
+    Momentum,
+    RmsProp,
+    Sgd,
+}
+
+impl OptimizerType {
+    pub fn label(self) -> &'static str {
+        match self {
+            OptimizerType::Adam => "Adam (Adaptive Moments)",
+            OptimizerType::Momentum => "SGD with Momentum",
+            OptimizerType::RmsProp => "RMSProp",
+            OptimizerType::Sgd => "Standard SGD",
+        }
+    }
+
+    pub fn all() -> [OptimizerType; 4] {
+        [
+            OptimizerType::Adam,
+            OptimizerType::Momentum,
+            OptimizerType::RmsProp,
+            OptimizerType::Sgd,
+        ]
+    }
+}
+
+/// Optimizer Configuration & Hyperparameter Setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizerConfig {
+    pub optimizer_type: OptimizerType,
+    pub learning_rate: f32,
+    pub momentum: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub epsilon: f32,
+    pub weight_decay: f32,
+    pub batch_size: usize,
+    pub auto_train: bool,
+}
+
+impl Default for OptimizerConfig {
+    fn default() -> Self {
+        Self {
+            optimizer_type: OptimizerType::Adam,
+            learning_rate: 0.005,
+            momentum: 0.9,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            weight_decay: 0.0001,
+            batch_size: 16,
+            auto_train: true,
+        }
+    }
+}
+
+/// Synaptic weight statistics for an individual layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerStats {
+    pub layer_index: usize,
+    pub name: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub param_count: usize,
+    pub mean: f32,
+    pub std_dev: f32,
+    pub min: f32,
+    pub max: f32,
+    pub l2_norm: f32,
+    pub sparsity: f32,
+}
+
+/// Benchmark evaluation metrics over canonical domain tasks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkMetrics {
+    pub test_loss: f32,
+    pub accuracy: f32,
+    pub avg_entropy: f32,
+    pub memory_retrieval_confidence: f32,
+    pub domain_accuracies: Vec<(String, f32)>,
+}
+
 /// Bounded replay buffer size to prevent memory bloat and slash serialization overhead.
 pub const MAX_EXPERIENCE_BUFFER: usize = 512;
 
@@ -260,6 +611,20 @@ pub struct ModelProfileNetwork {
     pub swarm_pheromones: SwarmPheromoneMatrix,
     #[serde(default)]
     pub quantum_layer: Option<QuantumStateLayer>,
+    #[serde(default)]
+    pub memory_network: AssociativeMemoryNetwork,
+    #[serde(default)]
+    pub optimizer_config: OptimizerConfig,
+    #[serde(default)]
+    pub opt_m_weights: Vec<SerializableArray2>,
+    #[serde(default)]
+    pub opt_v_weights: Vec<SerializableArray2>,
+    #[serde(default)]
+    pub opt_m_biases: Vec<SerializableArray1>,
+    #[serde(default)]
+    pub opt_v_biases: Vec<SerializableArray1>,
+    #[serde(default)]
+    pub opt_step: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,8 +638,8 @@ pub struct Experience {
 
 impl ModelProfileNetwork {
     pub fn new(input_dim: usize, hidden_dims: Vec<usize>, output_dim: usize) -> Self {
-        let mut weights = Vec::new();
-        let mut biases = Vec::new();
+        let mut weights: Vec<SerializableArray2> = Vec::new();
+        let mut biases: Vec<SerializableArray1> = Vec::new();
         let mut prev_dim = input_dim;
         
         let mut rng = rand::thread_rng();
@@ -296,6 +661,19 @@ impl ModelProfileNetwork {
         weights.push(w.into());
         biases.push(b.into());
         
+        let mut opt_m_weights = Vec::new();
+        let mut opt_v_weights = Vec::new();
+        for w in &weights {
+            opt_m_weights.push(Array2::zeros((w.rows, w.cols)).into());
+            opt_v_weights.push(Array2::zeros((w.rows, w.cols)).into());
+        }
+        let mut opt_m_biases = Vec::new();
+        let mut opt_v_biases = Vec::new();
+        for b in &biases {
+            opt_m_biases.push(Array1::zeros(b.data.len()).into());
+            opt_v_biases.push(Array1::zeros(b.data.len()).into());
+        }
+
         Self {
             id: Uuid::new_v4(),
             name: "ModelProfileNN".to_string(),
@@ -304,11 +682,18 @@ impl ModelProfileNetwork {
             output_dim,
             weights,
             biases,
-            learning_rate: 0.01,
+            learning_rate: 0.005,
             experience_buffer: Vec::new(),
             performance_history: Vec::new(),
             swarm_pheromones: SwarmPheromoneMatrix::new(6, output_dim.max(8)),
             quantum_layer: Some(QuantumStateLayer::new(input_dim)),
+            memory_network: AssociativeMemoryNetwork::new(32, input_dim, input_dim),
+            optimizer_config: OptimizerConfig::default(),
+            opt_m_weights,
+            opt_v_weights,
+            opt_m_biases,
+            opt_v_biases,
+            opt_step: 0,
         }
     }
     
@@ -428,30 +813,44 @@ impl ModelProfileNetwork {
     }
 
     pub fn train_step(&mut self) -> Result<f32> {
-        // Small-batch friendly: sample with replacement so training starts
-        // after a handful of turns instead of waiting for 32.
         if self.experience_buffer.len() < 4 {
             return Ok(0.0);
         }
 
+        let batch_size = self.optimizer_config.batch_size.clamp(4, 64).min(self.experience_buffer.len());
         let mut rng = rand::thread_rng();
-        let n = self.experience_buffer.len().min(32);
-        let mut batch = Vec::with_capacity(n);
-        for _ in 0..n {
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
             let i = rng.gen_range(0..self.experience_buffer.len());
             batch.push(self.experience_buffer[i].clone());
         }
-        
+
         let mut weights = self.weights_as_arrays();
         let mut biases = self.biases_as_arrays();
+        let num_layers = weights.len();
+        if num_layers == 0 {
+            return Ok(0.0);
+        }
+
+        let mut grad_weights: Vec<Array2<f32>> = weights
+            .iter()
+            .map(|w| Array2::zeros(w.dim()))
+            .collect();
+        let mut grad_biases: Vec<Array1<f32>> = biases
+            .iter()
+            .map(|b| Array1::zeros(b.len()))
+            .collect();
+
         let mut total_loss = 0.0;
-        
+        let mut valid_samples = 0;
+
         for exp in &batch {
             let state: Array1<f32> = exp.state.clone().into();
             let (prediction, acts) = self.forward_with_activations(&state);
-            if prediction.len() != self.output_dim || acts.len() != weights.len() + 1 {
-                continue; // corrupt entry / shape mismatch -> skip, don't poison weights
+            if prediction.len() != self.output_dim || acts.len() != num_layers + 1 {
+                continue;
             }
+
             let action = exp.action.min(self.output_dim.saturating_sub(1));
             let mut target = prediction.clone();
             target[action] = exp.reward.clamp(-10.0, 10.0);
@@ -459,35 +858,173 @@ impl ModelProfileNetwork {
             let diff = &prediction - &target;
             let loss: f32 = diff.mapv(|v| if v.is_finite() { v * v } else { 0.0 }).sum();
             total_loss += if loss.is_finite() { loss } else { 0.0 };
+            valid_samples += 1;
 
-            // Gradient of MSE wrt logits-softmax output (approx): 2*(pred - target)/n
-            let n = self.output_dim.max(1) as f32;
-            let grad = diff.mapv(|v| {
-                if v.is_finite() { (2.0 * v / n).clamp(-1.0, 1.0) } else { 0.0 }
+            // Output gradient
+            let n_out = self.output_dim.max(1) as f32;
+            let mut delta: Array1<f32> = diff.mapv(|v| {
+                if v.is_finite() { (2.0 * v / n_out).clamp(-2.0, 2.0) } else { 0.0 }
             });
-            let lr = if self.learning_rate.is_finite() { self.learning_rate.clamp(1e-6, 0.1) } else { 0.01 };
 
-            // Correct: last-layer input is the last hidden activation, not raw state
-            let last_idx = weights.len() - 1;
-            let hidden = &acts[acts.len() - 2];
-            let (rows, cols) = weights[last_idx].dim();
-            for i in 0..rows.min(self.output_dim).min(grad.len()) {
-                for j in 0..cols.min(hidden.len()) {
-                    let h = if hidden[j].is_finite() { hidden[j].clamp(-1.0, 1.0) } else { 0.0 };
-                    let delta = lr * grad[i] * h;
-                    if delta.is_finite() {
-                        weights[last_idx][[i, j]] -= delta;
+            // Backpropagate through layers in reverse
+            for l in (0..num_layers).rev() {
+                let a_prev = &acts[l];
+                let (rows, cols) = weights[l].dim();
+
+                for r in 0..rows.min(delta.len()) {
+                    let d = delta[r];
+                    for c in 0..cols.min(a_prev.len()) {
+                        let a = if a_prev[c].is_finite() { a_prev[c] } else { 0.0 };
+                        grad_weights[l][[r, c]] += d * a;
+                    }
+                    if r < grad_biases[l].len() {
+                        grad_biases[l][r] += d;
                     }
                 }
-                if i < biases[last_idx].len() && grad[i].is_finite() {
-                    biases[last_idx][i] -= lr * grad[i];
+
+                if l > 0 {
+                    let mut delta_prev = Array1::zeros(cols);
+                    for c in 0..cols {
+                        let mut sum = 0.0;
+                        for r in 0..rows.min(delta.len()) {
+                            sum += weights[l][[r, c]] * delta[r];
+                        }
+                        let relu_deriv = if a_prev[c] > 0.0 { 1.0 } else { 0.0 };
+                        delta_prev[c] = (sum * relu_deriv).clamp(-2.0, 2.0);
+                    }
+                    delta = delta_prev;
+                }
+            }
+
+            // Write rewarded experience to Associative Memory Network
+            if exp.reward > 0.5 {
+                let domain_idx = exp.action % 6;
+                let domain_tag = match domain_idx {
+                    1 => "Coder",
+                    2 => "Researcher",
+                    3 => "Cyber/Critic",
+                    4 => "Planner",
+                    5 => "Writer",
+                    _ => "General",
+                };
+                self.memory_network.write(
+                    &state.to_vec(),
+                    &prediction.to_vec(),
+                    domain_tag,
+                    "rewarded_experience",
+                    exp.reward,
+                );
+            }
+        }
+
+        if valid_samples == 0 {
+            return Ok(0.0);
+        }
+
+        let scale = 1.0 / valid_samples as f32;
+        self.opt_step += 1;
+        let opt_cfg = self.optimizer_config.clone();
+        let lr = self.learning_rate.clamp(1e-6, 0.5);
+        let lambda = opt_cfg.weight_decay.clamp(0.0, 0.05);
+
+        // Ensure optimizer momentum/velocity buffers match weights
+        if self.opt_m_weights.len() != num_layers {
+            self.opt_m_weights = weights.iter().map(|w| Array2::zeros(w.dim()).into()).collect();
+            self.opt_v_weights = weights.iter().map(|w| Array2::zeros(w.dim()).into()).collect();
+            self.opt_m_biases = biases.iter().map(|b| Array1::zeros(b.len()).into()).collect();
+            self.opt_v_biases = biases.iter().map(|b| Array1::zeros(b.len()).into()).collect();
+        }
+
+        let mut opt_m_w: Vec<Array2<f32>> = self.opt_m_weights.iter().map(|w| w.clone().into()).collect();
+        let mut opt_v_w: Vec<Array2<f32>> = self.opt_v_weights.iter().map(|w| w.clone().into()).collect();
+        let mut opt_m_b: Vec<Array1<f32>> = self.opt_m_biases.iter().map(|b| b.clone().into()).collect();
+        let mut opt_v_b: Vec<Array1<f32>> = self.opt_v_biases.iter().map(|b| b.clone().into()).collect();
+
+        // Apply optimizer update step
+        for l in 0..num_layers {
+            let (rows, cols) = weights[l].dim();
+
+            for r in 0..rows {
+                for c in 0..cols {
+                    let mut g = grad_weights[l][[r, c]] * scale + lambda * weights[l][[r, c]];
+                    if !g.is_finite() { g = 0.0; }
+                    g = g.clamp(-5.0, 5.0);
+
+                    let delta_w = match opt_cfg.optimizer_type {
+                        OptimizerType::Adam => {
+                            let b1 = opt_cfg.beta1;
+                            let b2 = opt_cfg.beta2;
+                            opt_m_w[l][[r, c]] = b1 * opt_m_w[l][[r, c]] + (1.0 - b1) * g;
+                            opt_v_w[l][[r, c]] = b2 * opt_v_w[l][[r, c]] + (1.0 - b2) * g * g;
+                            let step = self.opt_step as f32;
+                            let m_hat = opt_m_w[l][[r, c]] / (1.0 - b1.powf(step)).max(1e-7);
+                            let v_hat = opt_v_w[l][[r, c]] / (1.0 - b2.powf(step)).max(1e-7);
+                            lr * m_hat / (v_hat.sqrt() + opt_cfg.epsilon)
+                        }
+                        OptimizerType::Momentum => {
+                            let mu = opt_cfg.momentum;
+                            opt_m_w[l][[r, c]] = mu * opt_m_w[l][[r, c]] + lr * g;
+                            opt_m_w[l][[r, c]]
+                        }
+                        OptimizerType::RmsProp => {
+                            let gamma = 0.9;
+                            opt_v_w[l][[r, c]] = gamma * opt_v_w[l][[r, c]] + (1.0 - gamma) * g * g;
+                            lr * g / (opt_v_w[l][[r, c]].sqrt() + opt_cfg.epsilon)
+                        }
+                        OptimizerType::Sgd => lr * g,
+                    };
+
+                    if delta_w.is_finite() {
+                        weights[l][[r, c]] -= delta_w;
+                    }
+                }
+            }
+
+            for r in 0..biases[l].len() {
+                let mut g = grad_biases[l][r] * scale;
+                if !g.is_finite() { g = 0.0; }
+                g = g.clamp(-5.0, 5.0);
+
+                let delta_b = match opt_cfg.optimizer_type {
+                    OptimizerType::Adam => {
+                        let b1 = opt_cfg.beta1;
+                        let b2 = opt_cfg.beta2;
+                        opt_m_b[l][r] = b1 * opt_m_b[l][r] + (1.0 - b1) * g;
+                        opt_v_b[l][r] = b2 * opt_v_b[l][r] + (1.0 - b2) * g * g;
+                        let step = self.opt_step as f32;
+                        let m_hat = opt_m_b[l][r] / (1.0 - b1.powf(step)).max(1e-7);
+                        let v_hat = opt_v_b[l][r] / (1.0 - b2.powf(step)).max(1e-7);
+                        lr * m_hat / (v_hat.sqrt() + opt_cfg.epsilon)
+                    }
+                    OptimizerType::Momentum => {
+                        let mu = opt_cfg.momentum;
+                        opt_m_b[l][r] = mu * opt_m_b[l][r] + lr * g;
+                        opt_m_b[l][r]
+                    }
+                    OptimizerType::RmsProp => {
+                        let gamma = 0.9;
+                        opt_v_b[l][r] = gamma * opt_v_b[l][r] + (1.0 - gamma) * g * g;
+                        lr * g / (opt_v_b[l][r].sqrt() + opt_cfg.epsilon)
+                    }
+                    OptimizerType::Sgd => lr * g,
+                };
+
+                if delta_b.is_finite() {
+                    biases[l][r] -= delta_b;
                 }
             }
         }
-        
+
         self.update_weights(weights, biases);
-        
-        Ok(total_loss / batch.len() as f32)
+        self.opt_m_weights = opt_m_w.into_iter().map(|w| w.into()).collect();
+        self.opt_v_weights = opt_v_w.into_iter().map(|w| w.into()).collect();
+        self.opt_m_biases = opt_m_b.into_iter().map(|b| b.into()).collect();
+        self.opt_v_biases = opt_v_b.into_iter().map(|b| b.into()).collect();
+
+        // Memory network consolidation
+        self.memory_network.consolidate();
+
+        Ok(total_loss / valid_samples as f32)
     }
 
     pub fn update_performance(&mut self, reward: f32) {
@@ -532,6 +1069,156 @@ impl ModelProfileNetwork {
         (best_slot, domain_name, confidence, entropy, fused_probs)
     }
 
+    /// Evaluates prompt with full Memory Network soft-attention, Quantum layer, and Swarm Pheromones.
+    /// Returns (best_slot, domain_name, confidence, entropy, distribution, retrieved_memory, attention_weights).
+    pub fn query_with_memory(
+        &mut self,
+        text: &str,
+    ) -> (usize, &'static str, f32, f32, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let (domain_idx, domain_name) = classify_prompt_domain(text);
+        let probe = extract_probe_features(text);
+        let (mem_val, mem_attn) = self.memory_network.read(&probe.to_vec());
+        self.memory_network.last_query_domain = Some(domain_name.to_string());
+
+        // Modulate probe features with retrieved memory vector
+        let mut modulated_probe = probe.clone();
+        for i in 0..modulated_probe.len().min(mem_val.len()) {
+            modulated_probe[i] = 0.8 * modulated_probe[i] + 0.2 * mem_val[i];
+        }
+
+        let (neural_dist, entropy) = self.forward_quantum(&modulated_probe);
+        let (best_slot, fused_probs) = self.swarm_pheromones.fuse_decision(domain_idx, &neural_dist.to_vec());
+        let confidence = if best_slot < fused_probs.len() { fused_probs[best_slot] } else { 0.0 };
+
+        (best_slot, domain_name, confidence, entropy, fused_probs, mem_val, mem_attn)
+    }
+
+    /// Computes synaptic weight statistics (mean, std dev, min, max, L2 norm, sparsity) across all layers.
+    pub fn compute_synapse_stats(&self) -> (usize, Vec<LayerStats>) {
+        let weights = self.weights_as_arrays();
+        let mut total_params = 0;
+        let mut layer_stats = Vec::with_capacity(weights.len());
+
+        for (idx, w) in weights.iter().enumerate() {
+            let (rows, cols) = w.dim();
+            let count = rows * cols;
+            total_params += count;
+
+            let mut sum = 0.0;
+            let mut sum_sq = 0.0;
+            let mut min_val = f32::INFINITY;
+            let mut max_val = f32::NEG_INFINITY;
+            let mut zero_count = 0;
+
+            for &val in w.iter() {
+                if val.is_finite() {
+                    sum += val;
+                    sum_sq += val * val;
+                    if val < min_val { min_val = val; }
+                    if val > max_val { max_val = val; }
+                    if val.abs() < 1e-4 { zero_count += 1; }
+                }
+            }
+
+            let mean = if count > 0 { sum / count as f32 } else { 0.0 };
+            let variance = if count > 1 {
+                ((sum_sq - sum * sum / count as f32) / (count - 1) as f32).max(0.0)
+            } else {
+                0.0
+            };
+            let std_dev = variance.sqrt();
+            let l2_norm = sum_sq.sqrt();
+            let sparsity = if count > 0 { zero_count as f32 / count as f32 } else { 0.0 };
+
+            let name = if idx == 0 {
+                format!("Input [{}] -> Hidden 0 [{}]", cols, rows)
+            } else if idx + 1 == weights.len() {
+                format!("Hidden {} [{}] -> Output [{}]", idx - 1, cols, rows)
+            } else {
+                format!("Hidden {} [{}] -> Hidden {} [{}]", idx - 1, cols, idx, rows)
+            };
+
+            layer_stats.push(LayerStats {
+                layer_index: idx,
+                name,
+                rows,
+                cols,
+                param_count: count,
+                mean,
+                std_dev,
+                min: if min_val.is_finite() { min_val } else { 0.0 },
+                max: if max_val.is_finite() { max_val } else { 0.0 },
+                l2_norm,
+                sparsity,
+            });
+        }
+
+        (total_params, layer_stats)
+    }
+
+    /// Evaluates the model profile and memory network against canonical benchmark probes.
+    /// Computes test loss, prediction accuracy, average entropy, and memory confidence.
+    pub fn evaluate_benchmark(&self) -> BenchmarkMetrics {
+        let samples = generate_synthetic_benchmark_dataset();
+        let mut total_loss = 0.0;
+        let mut correct = 0;
+        let mut total_entropy = 0.0;
+        let mut total_mem_conf = 0.0;
+        let mut domain_counts: HashMap<String, (usize, usize)> = HashMap::new();
+
+        for s in &samples {
+            let probe = extract_probe_features(s.prompt);
+            let (pred, entropy) = self.forward_quantum(&probe);
+            total_entropy += entropy;
+
+            let mut dot_sum: f32 = 0.0;
+            for slot in &self.memory_network.slots {
+                let dot: f32 = probe.iter().zip(slot.key.iter()).map(|(&a, &b)| a * b).sum();
+                dot_sum = dot_sum.max(dot.abs());
+            }
+            total_mem_conf += dot_sum.min(1.0);
+
+            let chosen_action = pred
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            let is_correct = chosen_action == s.target_slot;
+            if is_correct {
+                correct += 1;
+            }
+
+            let entry = domain_counts.entry(s.domain_name.to_string()).or_insert((0, 0));
+            entry.0 += 1;
+            if is_correct {
+                entry.1 += 1;
+            }
+
+            let mut target = pred.clone();
+            target[s.target_slot.min(self.output_dim.saturating_sub(1))] = s.expected_reward;
+            let diff = &pred - &target;
+            total_loss += diff.mapv(|v| v * v).sum();
+        }
+
+        let n = samples.len().max(1) as f32;
+        let mut domain_accuracies = Vec::new();
+        for (dom, (tot, corr)) in domain_counts {
+            let acc = if tot > 0 { corr as f32 / tot as f32 } else { 0.0 };
+            domain_accuracies.push((dom, acc));
+        }
+        domain_accuracies.sort_by(|a, b| a.0.cmp(&b.0));
+
+        BenchmarkMetrics {
+            test_loss: total_loss / n,
+            accuracy: correct as f32 / n,
+            avg_entropy: total_entropy / n,
+            memory_retrieval_confidence: total_mem_conf / n,
+            domain_accuracies,
+        }
+    }
+
     /// Run a synthetic multi-domain training epoch:
     /// Samples canonical task archetypes, propagates through quantum layer,
     /// updates synaptic weights via gradient descent, deposits reinforcement pheromones,
@@ -558,6 +1245,15 @@ impl ModelProfileNetwork {
                 done: true,
             };
             self.add_experience(exp);
+
+            // Reinforce memory network with canonical archetype
+            self.memory_network.write(
+                &probe.to_vec(),
+                &s.prompt.as_bytes().iter().take(self.memory_network.value_dim).map(|&b| b as f32 / 255.0).collect::<Vec<_>>(),
+                s.domain_name,
+                s.target_role,
+                s.expected_reward,
+            );
 
             // Reinforce swarm pheromones for the correct domain/slot pair
             self.swarm_pheromones.deposit(s.domain_idx, s.target_slot, s.expected_reward);
@@ -1076,5 +1772,85 @@ mod tests {
         let sum: f32 = out.iter().sum();
         assert!((sum - 1.0).abs() < 1e-4);
     }
+
+    #[test]
+    fn test_associative_memory_network_read_write_and_decay() {
+        let mut mem = AssociativeMemoryNetwork::new(16, 8, 8);
+        assert_eq!(mem.slots.len(), 6, "pre-seeded with 6 domain archetypes");
+
+        let probe = vec![0.1, 0.9, 0.2, 0.1, 0.1, 0.3, 0.1, 0.2];
+        let (read_vec, weights) = mem.read(&probe);
+        assert_eq!(read_vec.len(), 8);
+        assert_eq!(weights.len(), 6);
+        let w_sum: f32 = weights.iter().sum();
+        assert!((w_sum - 1.0).abs() < 1e-4, "attention weights must sum to 1.0, got {w_sum}");
+
+        // Highest weight should correspond to Coder (slot 1)
+        assert!(weights[1] > weights[0]);
+
+        // Write new memory slot
+        let key = vec![0.1, 0.1, 0.9, 0.2, 0.1, 0.1, 0.1, 0.8];
+        let val = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        mem.write(&key, &val, "Cyber / Critic", "Audit secret leakage", 1.0);
+        assert_eq!(mem.slots.len(), 7);
+
+        // Decay retention via consolidation
+        mem.consolidate();
+        assert!(mem.slots[0].retention_score <= 3.0);
+    }
+
+    #[test]
+    fn test_adam_optimizer_multi_layer_backprop() {
+        let mut net = ModelProfileNetwork::new(8, vec![16, 16], 4);
+        net.optimizer_config.optimizer_type = OptimizerType::Adam;
+        net.optimizer_config.learning_rate = 0.05;
+        net.optimizer_config.weight_decay = 0.0001;
+
+        let target_state = Array1::from_vec(vec![0.5; 8]);
+        for _ in 0..16 {
+            net.add_experience(Experience {
+                state: target_state.clone().into(),
+                action: 2,
+                reward: 1.0,
+                next_state: target_state.clone().into(),
+                done: true,
+            });
+        }
+
+        let first_loss = net.train_step().unwrap();
+        assert!(first_loss.is_finite() && first_loss >= 0.0);
+
+        // Train multiple steps
+        let mut final_loss = first_loss;
+        for _ in 0..10 {
+            for _ in 0..8 {
+                net.add_experience(Experience {
+                    state: target_state.clone().into(),
+                    action: 2,
+                    reward: 1.0,
+                    next_state: target_state.clone().into(),
+                    done: true,
+                });
+            }
+            final_loss = net.train_step().unwrap();
+        }
+        assert!(final_loss.is_finite());
+
+        // Check synapse stats
+        let (param_count, layer_stats) = net.compute_synapse_stats();
+        assert!(param_count > 0);
+        assert_eq!(layer_stats.len(), 3); // 2 hidden + 1 output
+        for st in &layer_stats {
+            assert!(st.l2_norm >= 0.0);
+            assert!(st.sparsity >= 0.0 && st.sparsity <= 100.0);
+        }
+
+        // Check benchmark evaluation
+        let bench = net.evaluate_benchmark();
+        assert!(bench.test_loss.is_finite());
+        assert!(bench.accuracy >= 0.0 && bench.accuracy <= 100.0);
+        assert!(bench.memory_retrieval_confidence >= 0.0);
+    }
 }
+
 

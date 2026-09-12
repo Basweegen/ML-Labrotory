@@ -25,6 +25,7 @@ use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::tools_panel::ToolsPanel;
+use crate::ui::learning::LearningPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
@@ -258,6 +259,7 @@ pub enum Tab {
     Models,
     History,
     Neural,
+    Learning,
     Skills,
     Tools,
     Settings,
@@ -273,6 +275,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::History => "History",
             Tab::Neural => "Neural",
+            Tab::Learning => "Learning",
             Tab::Skills => "Skills",
             Tab::Tools => "Tools",
             Tab::Settings => "Settings",
@@ -288,6 +291,7 @@ impl Tab {
             Tab::Models => "🤖",
             Tab::History => "📜",
             Tab::Neural => "🧠",
+            Tab::Learning => "📈",
             Tab::Skills => "⚡",
             Tab::Tools => "🛠",
             Tab::Settings => "⚙",
@@ -303,6 +307,7 @@ impl Tab {
             "Models" => Some(Tab::Models),
             "History" => Some(Tab::History),
             "Neural" => Some(Tab::Neural),
+            "Learning" | "Learning Algorithm" => Some(Tab::Learning),
             "Skills" => Some(Tab::Skills),
             "Tools" => Some(Tab::Tools),
             "Settings" => Some(Tab::Settings),
@@ -323,6 +328,7 @@ impl Tab {
             Tab::Models,
             Tab::History,
             Tab::Neural,
+            Tab::Learning,
             Tab::Skills,
             Tab::Tools,
             Tab::Settings,
@@ -362,6 +368,7 @@ pub struct AiDashboardApp {
     skills_panel: SkillsPanel,
     tools_panel: ToolsPanel,
     settings_panel: SettingsPanel,
+    learning_panel: LearningPanel,
     settings: AppSettings,
     storage: Option<Storage>,
     neural_panel: NeuralVizPanel,
@@ -374,10 +381,13 @@ pub struct AiDashboardApp {
 impl AiDashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let storage = Storage::new().ok();
-        let settings = storage
+        let mut settings = storage
             .as_ref()
             .and_then(|s| s.load_settings().ok())
             .unwrap_or_default();
+        if !settings.visible_tabs.iter().any(|v| v == "Learning") {
+            settings.visible_tabs.push("Learning".to_string());
+        }
         apply_luxury_visuals(&cc.egui_ctx, &settings.theme);
         let rt = Runtime::new().expect("tokio runtime");
         let (tx, rx) = mpsc::channel();
@@ -418,6 +428,7 @@ impl AiDashboardApp {
             skills_panel: SkillsPanel::new(),
             tools_panel: ToolsPanel::new(),
             settings_panel: SettingsPanel::new(),
+            learning_panel: LearningPanel::new(),
             settings,
             storage,
             neural_panel: NeuralVizPanel::new(),
@@ -706,20 +717,36 @@ impl AiDashboardApp {
             state: ctx.clone().into(),
             action,
             reward,
-            next_state: ctx.into(),
+            next_state: ctx.clone().into(),
             done: true,
         });
         self.network.update_performance(reward);
-        let domain_idx = match role_idx {
-            1 => 1, // Coder
-            2 => 2, // Researcher
-            3 => 3, // Critic / Cyber
-            4 => 4, // Planner
-            5 => 5, // Writer
-            _ => 0, // General
+        let (domain_idx, domain_label) = match role_idx {
+            1 => (1, "Coder"),
+            2 => (2, "Researcher"),
+            3 => (3, "Cyber / Critic"),
+            4 => (4, "Planner"),
+            5 => (5, "Writer"),
+            _ => (0, "General"),
         };
         self.network.swarm_pheromones.deposit(domain_idx, idx, reward);
-        if self.network.experience_buffer.len() >= 4 {
+
+        if ok && reward > 0.5 {
+            let val = vec![
+                if ok { 1.0 } else { 0.0 },
+                (elapsed / 60.0).min(1.0),
+                (resp_chars as f32 / 10_000.0).min(1.0),
+                role_idx as f32 / 6.0,
+                idx as f32 / 8.0,
+                reward.min(2.0),
+                0.8,
+                1.0,
+            ];
+            let label = format!("{}: slot #{} ({} chars, {:.1}s)", domain_label, idx, resp_chars, elapsed);
+            self.network.memory_network.write(ctx.as_slice().unwrap_or(&[]), &val, domain_label, &label, reward);
+        }
+
+        if self.network.optimizer_config.auto_train && self.network.experience_buffer.len() >= 4 {
             if let Ok(loss) = self.network.train_step() {
                 if loss.is_finite() && loss > 0.0 {
                     if let Some(ql) = &mut self.network.quantum_layer {
@@ -1459,18 +1486,54 @@ impl AiDashboardApp {
                                 // Complete node and deposit artifact into stigmergic blackboard
                                 self.relay.dag_node_completed(node_id, content, dur);
 
-                                // Stigmergic pheromone deposit in quantum / biological swarm grid
+                                // Stigmergic pheromone deposit and memory network write
                                 if let Some(node) = self.relay.dag.find_node(node_id) {
-                                    let domain_idx = match node.role {
-                                        ModelRole::Planner => 4,
-                                        ModelRole::Coder => 1,
-                                        ModelRole::Critic => 3,
-                                        ModelRole::Researcher => 2,
-                                        ModelRole::Writer => 5,
-                                        _ => 0,
+                                    let (domain_idx, domain_label) = match node.role {
+                                        ModelRole::Planner => (4, "Planner"),
+                                        ModelRole::Coder => (1, "Coder"),
+                                        ModelRole::Critic => (3, "Cyber / Critic"),
+                                        ModelRole::Researcher => (2, "Researcher"),
+                                        ModelRole::Writer => (5, "Writer"),
+                                        _ => (0, "General"),
                                     };
                                     let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
                                     self.network.swarm_pheromones.deposit(domain_idx, node_id.min(7), reward);
+
+                                    // Formulate probe and memory vector from completed task
+                                    let probe = crate::neural::extract_probe_features(&node.directive);
+                                    let val = vec![
+                                        1.0,
+                                        (dur / 60.0).min(1.0),
+                                        (node.output.len() as f32 / 10_000.0).min(1.0),
+                                        domain_idx as f32 / 6.0,
+                                        (node_id as f32 / 8.0).min(1.0),
+                                        reward.min(2.0),
+                                        1.0,
+                                        0.9,
+                                    ];
+                                    let label = format!("{}: DAG Node #{} '{}'", domain_label, node_id, node.name);
+                                    self.network.memory_network.write(probe.as_slice().unwrap_or(&[]), &val, domain_label, &label, reward);
+
+                                    // Add to experience buffer for neural learning
+                                    self.network.add_experience(crate::neural::Experience {
+                                        state: probe.clone().into(),
+                                        action: domain_idx.min(self.network.output_dim.saturating_sub(1)),
+                                        reward,
+                                        next_state: probe.into(),
+                                        done: true,
+                                    });
+
+                                    // Auto-train if enabled
+                                    if self.network.optimizer_config.auto_train && self.network.experience_buffer.len() >= 4 {
+                                        if let Ok(loss) = self.network.train_step() {
+                                            if loss.is_finite() && loss > 0.0 {
+                                                self.neural_panel.add_training_loss(loss);
+                                                self.neural_panel.last_loss = Some(loss);
+                                                let path = Self::network_path().to_string_lossy().to_string();
+                                                let _ = self.network.save(&path);
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // Persist DAG and Blackboard encrypted at rest in local Sled vault
@@ -3267,6 +3330,9 @@ impl eframe::App for AiDashboardApp {
                     });
                     ui.add_space(4.0);
                     self.neural_panel.show(ui, &mut self.network);
+                }
+                Tab::Learning => {
+                    self.learning_panel.show(ui, &mut self.network, &self.models, &self.tx);
                 }
                 Tab::Skills => {
                     self.skills_panel.show(ui, &self.storage, &self.tx, self.focused_slot);
