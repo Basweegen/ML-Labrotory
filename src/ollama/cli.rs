@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
@@ -14,17 +15,10 @@ pub struct CliModel {
     pub digest: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CliListResponse {
-    pub models: Vec<CliModel>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error("Command failed: {0}")]
     Command(String),
-    #[error("Parse error: {0}")]
-    Parse(String),
 }
 
 pub struct OllamaCli {
@@ -65,7 +59,7 @@ impl OllamaCli {
 
     pub async fn list_models(&self) -> Result<Vec<CliModel>> {
         let output = Command::new(&self.ollama_path)
-            .args(["list", "--json"])
+            .arg("list")
             .output()
             .await
             .map_err(|e| CliError::Command(e.to_string()))?;
@@ -76,9 +70,27 @@ impl OllamaCli {
         }
 
         let text = String::from_utf8_lossy(&output.stdout);
-        let response: CliListResponse = serde_json::from_str(&text)
-            .map_err(|e| CliError::Parse(e.to_string()))?;
-        Ok(response.models)
+        let mut models = Vec::new();
+        for line in text.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0].to_string();
+                let digest = parts[1].to_string();
+                let size = if parts.len() >= 4 {
+                    format!("{} {}", parts[2], parts[3])
+                } else {
+                    parts[2].to_string()
+                };
+                let modified = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default();
+                models.push(CliModel {
+                    name,
+                    size,
+                    modified,
+                    digest,
+                });
+            }
+        }
+        Ok(models)
     }
 
     pub async fn pull_model(

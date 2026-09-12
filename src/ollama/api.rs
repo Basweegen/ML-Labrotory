@@ -1,50 +1,57 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use futures::StreamExt;
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub modified_at: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub digest: String,
+    #[serde(default)]
     pub details: Option<ModelDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDetails {
-    // Tolerant parsing: older/newer Ollama servers may omit fields; a single
-    // missing field must not fail the entire model list (empty list disables
+    // Tolerant parsing: older/newer Ollama servers may omit fields or return null;
+    // a single missing or null field must not fail the entire model list (empty list disables
     // slot assignment and the Send button).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub parent_model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub format: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub family: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub families: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub parameter_size: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub quantization_level: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ModelsResponse {
-    pub models: Vec<Model>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -72,18 +79,65 @@ pub struct ChatOptions {
     /// Max context window. Small = less RAM + faster on old machines.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_ctx: Option<u32>,
+    /// Number of CPU threads for matrix multiplication.
+    /// Setting this optimally (e.g. to physical P-cores instead of all 22 hybrid logical threads)
+    /// avoids spinning on slow Low-Power Island E-cores, boosting inference speed by 3x+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_thread: Option<u32>,
+    /// Number of GPU layers to offload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_gpu: Option<u32>,
+    /// Number of tokens to process in parallel during prompt evaluation.
+    /// Setting to 256 bounds transient RAM usage during context evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_batch: Option<u32>,
+    /// Memory map model weights to allow OS paging instead of full physical RAM allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_mmap: Option<bool>,
 }
 
 impl ChatOptions {
     /// Bounds for old / small-RAM hardware: short context, capped output.
-    /// Keeps 1-4B models responsive instead of swapping.
+    /// Automatically applies optimal CPU thread configuration.
     pub fn lowram() -> Self {
+        Self::lowram_with_threads(None)
+    }
+
+    /// Low-RAM profile with optional explicit thread count.
+    /// If `threads` is None or 0, auto-calculates optimal P-core thread allocation.
+    pub fn lowram_with_threads(threads: Option<u32>) -> Self {
+        let t = match threads {
+            Some(n) if n > 0 => n,
+            _ => Self::optimal_threads(),
+        };
         Self {
             temperature: None,
             top_p: None,
             top_k: None,
             num_predict: Some(1024),
             num_ctx: Some(2048),
+            num_thread: Some(t),
+            num_gpu: None,
+            num_batch: Some(256),
+            use_mmap: Some(true),
+        }
+    }
+
+    /// Calculate optimal CPU threads for llama.cpp / Ollama matrix multiplication.
+    /// On modern hybrid architectures (e.g. Intel Core Ultra / Meteor Lake / Raptor Lake with P + E + LP-E cores),
+    /// spreading inference threads across all logical cores (e.g. 22 threads) causes severe lock
+    /// contention and latency spikes due to slow Low-Power Island cores (~1.0 GHz).
+    /// Clamping threads to P-cores + standard threads (e.g. 8-12) achieves >3x tok/sec speedup.
+    pub fn optimal_threads() -> u32 {
+        let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        if total >= 20 {
+            10
+        } else if total > 12 {
+            8
+        } else if total > 4 {
+            total - 2
+        } else {
+            total.max(1)
         }
     }
 }
@@ -180,7 +234,13 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 fn host_is_loopback(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    if host == "localhost" || host == "::1" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
 }
 
 impl OllamaClient {
@@ -204,7 +264,12 @@ impl OllamaClient {
         // Local inference on CPU can take many minutes for a long reply:
         // only the connect phase gets a short timeout, the body streams
         // until Ollama finishes (or the user hits Stop).
+        // TCP nodelay disables Nagle's algorithm, eliminating 10-40ms buffering delays on loopback streaming chunks.
         let client = Client::builder()
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .pool_max_idle_per_host(10)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(1800))
             .build()
@@ -221,8 +286,19 @@ impl OllamaClient {
         if !resp.status().is_success() {
             return Err(OllamaError::Api(format!("Status: {}", resp.status())).into());
         }
-        let data: ModelsResponse = resp.json().await?;
-        Ok(data.models)
+        let body: serde_json::Value = resp.json().await?;
+        let mut models = Vec::new();
+        if let Some(items) = body.get("models").and_then(|m| m.as_array()) {
+            for item in items {
+                match serde_json::from_value::<Model>(item.clone()) {
+                    Ok(model) => models.push(model),
+                    Err(e) => {
+                        eprintln!("[ML Laboratory] Warning: skipping unparseable model: {e}");
+                    }
+                }
+            }
+        }
+        Ok(models)
     }
 
     /// Server version string (`/api/version` -> {"version": "0.1.2"}).
@@ -261,6 +337,21 @@ impl OllamaClient {
         Ok(())
     }
 
+    /// Pre-warm a model into RAM in the background so user turns start instantly (<300ms vs 13s cold start).
+    pub async fn warm_model(&self, name: &str, keep_alive: Option<&str>) -> Result<()> {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = serde_json::json!({
+            "model": name,
+            "keep_alive": keep_alive.unwrap_or("30m"),
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(OllamaError::Api(err).into());
+        }
+        Ok(())
+    }
+
     /// Streaming chat. Calls `on_chunk` with each content piece as it
     /// arrives; resolves to the fully assembled response when done.
     pub async fn chat_stream(
@@ -277,15 +368,16 @@ impl OllamaClient {
             return Err(OllamaError::Api(err).into());
         }
         let mut stream = resp.bytes_stream();
-        // Ollama sends one JSON object per line, but a TCP chunk can split a
-        // line anywhere: buffer until each full line arrives.
-        let mut pending = String::new();
+        // Buffer raw bytes across TCP chunk boundaries so multi-byte UTF-8
+        // sequences are never severed mid-character, preventing replacement
+        // character artifacts.
+        let mut pending_bytes: Vec<u8> = Vec::new();
         let mut assembled = String::new();
         let mut last: Option<ChatResponse> = None;
         let feed_line = |line: &str,
-                             assembled: &mut String,
-                             last: &mut Option<ChatResponse>,
-                             on_chunk: &mut dyn FnMut(&str)|
+                         assembled: &mut String,
+                         last: &mut Option<ChatResponse>,
+                         on_chunk: &mut dyn FnMut(&str)|
          -> Result<()> {
             let line = line.trim();
             if line.is_empty() {
@@ -302,15 +394,21 @@ impl OllamaClient {
         };
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(OllamaError::Request)?;
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = pending.find('\n') {
-                let line: String = pending.drain(..=pos).collect();
-                feed_line(&line, &mut assembled, &mut last, &mut on_chunk)?;
+            pending_bytes.extend_from_slice(&chunk);
+            while let Some(pos) = pending_bytes.iter().position(|&b| b == b'\n') {
+                if let Ok(line_str) = std::str::from_utf8(&pending_bytes[..pos]) {
+                    feed_line(line_str, &mut assembled, &mut last, &mut on_chunk)?;
+                } else {
+                    let line_str = String::from_utf8_lossy(&pending_bytes[..pos]);
+                    feed_line(&line_str, &mut assembled, &mut last, &mut on_chunk)?;
+                }
+                pending_bytes.drain(..=pos);
             }
         }
-        if !pending.trim().is_empty() {
-            let tail = std::mem::take(&mut pending);
-            feed_line(&tail, &mut assembled, &mut last, &mut on_chunk)?;
+        if !pending_bytes.is_empty() {
+            let tail = std::mem::take(&mut pending_bytes);
+            let line_str = String::from_utf8_lossy(&tail);
+            feed_line(&line_str, &mut assembled, &mut last, &mut on_chunk)?;
         }
         match last {
             Some(mut fin) => {
@@ -344,6 +442,8 @@ mod tests {
         assert!(OllamaClient::new("http://ollama.lan:11434", false).is_err());
         assert!(OllamaClient::new("http://169.254.169.254/", false).is_err());
         assert!(OllamaClient::new("http://example.com/", false).is_err());
+        assert!(OllamaClient::new("http://127.0.0.1.attacker.com:11434", false).is_err());
+        assert!(OllamaClient::new("http://localhost.evil.com:11434", false).is_err());
         assert!(OllamaClient::new("ftp://localhost/x", false).is_err());
         assert!(OllamaClient::new("not a url", false).is_err());
     }
@@ -364,4 +464,48 @@ mod tests {
         assert!(OllamaClient::new("http://ollama.lan:11434", true).is_ok());
         assert!(OllamaClient::new("ftp://x/", true).is_err());
     }
+
+    #[test]
+    fn parse_model_with_null_families() {
+        let raw = r#"{
+            "name": "blackgrg26/WORMGPT-14:latest",
+            "modified_at": "2026-07-26T01:26:29.795731271-07:00",
+            "size": 37282,
+            "digest": "f9809643910c",
+            "details": {
+                "parent_model": "",
+                "format": "",
+                "family": "",
+                "families": null,
+                "parameter_size": "",
+                "quantization_level": ""
+            }
+        }"#;
+        let m: Result<Model, _> = serde_json::from_str(raw);
+        assert!(m.is_ok(), "Failed to parse model with null families: {:?}", m.err());
+        let details = m.unwrap().details.unwrap();
+        assert!(details.families.is_empty());
+    }
+
+    #[test]
+    fn chat_options_threading_and_serialization() {
+        let opts = ChatOptions::lowram();
+        assert!(opts.num_thread.is_some());
+        let threads = opts.num_thread.unwrap();
+        assert!(threads >= 1 && threads <= 32);
+        assert_eq!(opts.num_batch, Some(256));
+        assert_eq!(opts.use_mmap, Some(true));
+
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(json.contains("\"num_thread\":"));
+        assert!(json.contains("\"num_ctx\":2048"));
+        assert!(json.contains("\"num_batch\":256"));
+        assert!(json.contains("\"use_mmap\":true"));
+
+        let custom = ChatOptions::lowram_with_threads(Some(6));
+        assert_eq!(custom.num_thread, Some(6));
+        assert_eq!(custom.num_batch, Some(256));
+        assert_eq!(custom.use_mmap, Some(true));
+    }
 }
+

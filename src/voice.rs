@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;

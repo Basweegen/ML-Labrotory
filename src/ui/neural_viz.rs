@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use crate::neural::ModelProfileNetwork;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use egui_plot::{Line, Plot, PlotPoints};
@@ -11,11 +12,19 @@ pub struct NeuralVizPanel {
     pub max_history_len: usize,
     pub show_weights: bool,
     pub show_architecture: bool,
+    pub show_quantum: bool,
+    pub show_swarm: bool,
     pub selected_layer: usize,
     pub weight_hovered: Option<(usize, usize, usize)>, // (layer, row, col)
     pub last_loss: Option<f32>,
+    pub last_entropy: Option<f32>,
+    pub sim_status: String,
     pub profile_input: String,
     pub profile_result: Option<Vec<f32>>,
+    pub profile_best_slot: Option<usize>,
+    pub profile_domain: Option<String>,
+    pub profile_confidence: Option<f32>,
+    pub profile_entropy: Option<f32>,
 }
 
 impl Default for NeuralVizPanel {
@@ -25,11 +34,19 @@ impl Default for NeuralVizPanel {
             max_history_len: 500,
             show_weights: true,
             show_architecture: true,
+            show_quantum: true,
+            show_swarm: true,
             selected_layer: 0,
             weight_hovered: None,
             last_loss: None,
+            last_entropy: None,
+            sim_status: String::new(),
             profile_input: String::new(),
             profile_result: None,
+            profile_best_slot: None,
+            profile_domain: None,
+            profile_confidence: None,
+            profile_entropy: None,
         }
     }
 }
@@ -46,20 +63,79 @@ impl NeuralVizPanel {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, network: &ModelProfileNetwork) {
+    pub fn show(&mut self, ui: &mut egui::Ui, network: &mut ModelProfileNetwork) {
         ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new("Neural Network Visualization").size(22.0).color(Color32::from_rgb(0x00, 0xaa, 0xff)));
+            ui.heading(
+                egui::RichText::new("🧠 Neural Network & Swarm Ecosystem")
+                    .size(20.0)
+                    .color(Color32::from_rgb(0x00, 0xee, 0xff))
+                    .strong(),
+            );
             ui.add_space(16.0);
-            ui.checkbox(&mut self.show_architecture, "Architecture");
-            ui.checkbox(&mut self.show_weights, "Weight Heatmaps");
+            ui.checkbox(&mut self.show_architecture, "📐 Architecture");
+            ui.checkbox(&mut self.show_weights, "🔥 Weight Heatmaps");
+            ui.checkbox(&mut self.show_quantum, "⚛️ Quantum State");
+            ui.checkbox(&mut self.show_swarm, "🐝 Swarm Stigmergy");
+        });
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            if ui
+                .button(egui::RichText::new("🚀 Run Swarm Training Epoch").color(Color32::from_rgb(0x00, 0xff, 0xcc)).strong())
+                .on_hover_text("Execute a multi-domain synthetic training epoch through quantum superposition layer, update synaptic weights, deposit reinforcement pheromones, and evaporate stigmergic trails")
+                .clicked()
+            {
+                match network.train_synthetic_epoch() {
+                    Ok((loss, entropy)) => {
+                        self.add_training_loss(loss);
+                        self.last_loss = Some(loss);
+                        self.last_entropy = Some(entropy);
+                        self.sim_status = format!("Epoch complete: Loss = {:.5} | Von Neumann S = {:.4} nats", loss, entropy);
+                    }
+                    Err(e) => {
+                        self.sim_status = format!("Epoch error: {}", e);
+                    }
+                }
+            }
+
+            if ui
+                .button(egui::RichText::new("🔄 Evaporate Pheromones").color(Color32::from_rgb(0xff, 0xaa, 0x00)))
+                .on_hover_text("Apply stigmergic evaporation (decay) across all domain-slot pheromone trails")
+                .clicked()
+            {
+                network.swarm_pheromones.evaporate();
+                self.sim_status = "Stigmergic evaporation applied to pheromone matrix.".to_string();
+            }
+
+            if ui
+                .button(egui::RichText::new("♻️ Reset Pheromones").color(Color32::from_rgb(0xaa, 0xaa, 0xaa)))
+                .on_hover_text("Reset all pheromone trail intensities to baseline 1.0")
+                .clicked()
+            {
+                for row in &mut network.swarm_pheromones.pheromones {
+                    for trail in row {
+                        *trail = 1.0;
+                    }
+                }
+                self.sim_status = "Swarm pheromone matrix reset to uniform baseline (1.0).".to_string();
+            }
+
+            if !self.sim_status.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(&self.sim_status).size(11.0).color(Color32::from_rgb(0x88, 0xcc, 0x88)));
+            }
         });
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
+
         ui.label(
             egui::RichText::new(format!(
-                "Experience buffer: {} samples (train step every 4).",
-                network.experience_buffer.len()
+                "Experience buffer: {} samples | Learning Rate: {:.4} | Quantum Dim: {} qubits | Swarm Domains: {}",
+                network.experience_buffer.len(),
+                network.learning_rate,
+                network.quantum_layer.as_ref().map(|q| q.num_qubits).unwrap_or(0),
+                network.swarm_pheromones.num_domains,
             ))
             .size(12.0)
             .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
@@ -70,6 +146,20 @@ impl NeuralVizPanel {
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(16.0);
+
+        if self.show_quantum {
+            self.render_quantum_panel(ui, network);
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+        }
+
+        if self.show_swarm {
+            self.render_swarm_panel(ui, network);
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+        }
 
         if self.show_architecture {
             self.render_architecture(ui, network);
@@ -412,7 +502,7 @@ impl NeuralVizPanel {
         }
     }
 
-    fn render_bias_heatmap(&self, ui: &mut egui::Ui, vector: &ndarray::Array1<f32>, _id: &str) {
+    fn render_bias_heatmap(&self, ui: &mut egui::Ui, vector: &Array1<f32>, _id: &str) {
         let len = vector.len();
         if len == 0 {
             ui.label("Empty bias vector");
@@ -622,58 +712,351 @@ impl NeuralVizPanel {
     }
 }
 impl NeuralVizPanel {
-    /// Interactive probe: encode free text into the profiler's 8-dim feature
-    /// space and show the live network's output distribution. Outputs are
-    /// argmax indices, not model names — the net learns which response
-    /// pattern fits, not which model. Random until chat turns accumulate.
+    fn render_quantum_panel(&mut self, ui: &mut egui::Ui, network: &ModelProfileNetwork) {
+        ui.label(
+            egui::RichText::new("⚛️ Quantum Superposition & Entropy Layer")
+                .size(18.0)
+                .color(Color32::from_rgb(0x00, 0xee, 0xff))
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Parameterized Unitary Rotation Gates Ry(θ)·Rz(φ) with Nearest-Neighbor Phase Entanglement J_k. \
+                 Born's rule measurement probabilities P_k = |α_k|² + |β'_k|² and Von Neumann entropy S = -Σ P_k ln(P_k)."
+            )
+            .size(11.0)
+            .color(Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+        );
+        ui.add_space(8.0);
+
+        if let Some(ql) = &network.quantum_layer {
+            // Quantum state entropy gauge
+            let max_s = (ql.num_qubits as f32).ln().max(0.1);
+            let current_s = self.last_entropy.unwrap_or(0.0);
+            let s_ratio = (current_s / max_s).clamp(0.0, 1.0);
+
+            let (gauge_label, gauge_color) = if current_s < 0.5 {
+                ("Converged / Deterministic Eigenstate (Low Dispersion)", Color32::from_rgb(0x00, 0xcc, 0x88))
+            } else if current_s < 1.5 {
+                ("Balanced Superposition (Optimal Exploration / Exploitation)", Color32::from_rgb(0x00, 0xaa, 0xff))
+            } else {
+                ("High Superposition / Maximum Uncertainty", Color32::from_rgb(0xff, 0xaa, 0x00))
+            };
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Von Neumann Entropy (S):").size(13.0).color(Color32::WHITE).strong());
+                ui.label(egui::RichText::new(format!("{:.4} / {:.4} nats", current_s, max_s)).size(13.0).color(gauge_color).strong());
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("[{}]", gauge_label)).size(11.0).color(gauge_color));
+            });
+            ui.add(
+                egui::ProgressBar::new(s_ratio)
+                    .desired_width(ui.available_width().min(600.0))
+                    .show_percentage(),
+            );
+
+            ui.add_space(8.0);
+
+            // Qubits table / card grid
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for k in 0..ql.num_qubits {
+                        let theta = if k < ql.rotation_thetas.len() { ql.rotation_thetas[k] } else { 0.0 };
+                        let phi = if k < ql.phase_phis.len() { ql.phase_phis[k] } else { 0.0 };
+                        let coupling = if k < ql.entanglement_couplings.len() { ql.entanglement_couplings[k] } else { 0.0 };
+
+                        // Born's amplitude approximation for |0> and |1>
+                        let prob_zero = (theta * 0.5).cos().powi(2).clamp(0.0, 1.0);
+                        let prob_one = (1.0 - prob_zero).clamp(0.0, 1.0);
+
+                        egui::Frame::group(ui.style())
+                            .fill(Color32::from_rgb(0x10, 0x18, 0x27))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(0x1e, 0x2d, 0x48)))
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("|ψ_{}⟩", k))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(0x00, 0xee, 0xff))
+                                            .strong(),
+                                    );
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("θ: {:.2} rad", theta))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(0xcc, 0xcc, 0xcc)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("φ: {:.2} rad", phi))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(0xcc, 0xcc, 0xcc)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("J: {:.2}", coupling))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(0x88, 0x88, 0xaa)),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("|0⟩: {:.0}%", prob_zero * 100.0))
+                                            .size(9.0)
+                                            .color(Color32::from_rgb(0x00, 0xcc, 0x88)),
+                                    );
+                                    ui.add(
+                                        egui::ProgressBar::new(prob_zero)
+                                            .desired_width(70.0)
+                                            .desired_height(4.0),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("|1⟩: {:.0}%", prob_one * 100.0))
+                                            .size(9.0)
+                                            .color(Color32::from_rgb(0xff, 0xaa, 0x00)),
+                                    );
+                                    ui.add(
+                                        egui::ProgressBar::new(prob_one)
+                                            .desired_width(70.0)
+                                            .desired_height(4.0),
+                                    );
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+        } else {
+            ui.label(egui::RichText::new("Quantum layer not initialized for this network.").color(Color32::from_rgb(0x88, 0x88, 0x88)));
+        }
+    }
+
+    fn render_swarm_panel(&mut self, ui: &mut egui::Ui, network: &mut ModelProfileNetwork) {
+        ui.label(
+            egui::RichText::new("🐝 Multi-Agent Swarm Stigmergy & Cohabitation Matrix")
+                .size(18.0)
+                .color(Color32::from_rgb(0xff, 0xcc, 0x00))
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Stigmergic pheromone trails (τ_{d, s}) across 6 ecological niches and model slots. \
+                 Decision fusion combines pheromone trails with neural heuristics: P(s) ∝ τ^α · η^β."
+            )
+            .size(11.0)
+            .color(Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+        );
+        ui.add_space(8.0);
+
+        // Hyperparameter sliders
+        ui.horizontal(|ui| {
+            ui.label("Pheromone Weight (α):");
+            ui.add(egui::Slider::new(&mut network.swarm_pheromones.alpha, 0.1..=3.0).text(""));
+            ui.add_space(16.0);
+            ui.label("Heuristic Weight (β):");
+            ui.add(egui::Slider::new(&mut network.swarm_pheromones.beta, 0.1..=3.0).text(""));
+            ui.add_space(16.0);
+            ui.label("Evaporation Rate (ρ):");
+            ui.add(egui::Slider::new(&mut network.swarm_pheromones.evaporation_rate, 0.01..=0.30).text(""));
+        });
+        ui.add_space(8.0);
+
+        // Domain names
+        let domain_labels = [
+            (0, "🌐 General"),
+            (1, "💻 Coder"),
+            (2, "🔬 Researcher"),
+            (3, "🛡️ Cyber / Critic"),
+            (4, "📋 Planner"),
+            (5, "✍️ Writer"),
+        ];
+
+        let num_slots = network.swarm_pheromones.num_slots;
+        let num_domains = network.swarm_pheromones.num_domains.min(domain_labels.len());
+
+        egui::Grid::new("swarm_pheromone_heatmap_grid")
+            .num_columns(num_slots + 1)
+            .spacing([8.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                // Header row
+                ui.label(egui::RichText::new("Ecological Niche \\ Slot").size(12.0).color(Color32::from_rgb(0x00, 0xaa, 0xff)).strong());
+                for s in 0..num_slots {
+                    ui.label(egui::RichText::new(format!("Slot {}", s)).size(11.0).color(Color32::WHITE).strong());
+                }
+                ui.end_row();
+
+                // Rows
+                for (d, label) in domain_labels.iter().take(num_domains) {
+                    ui.label(egui::RichText::new(*label).size(12.0).color(Color32::from_rgb(0xdd, 0xdd, 0xdd)));
+                    for s in 0..num_slots {
+                        let tau = if *d < network.swarm_pheromones.pheromones.len()
+                            && s < network.swarm_pheromones.pheromones[*d].len()
+                        {
+                            network.swarm_pheromones.pheromones[*d][s]
+                        } else {
+                            1.0
+                        };
+
+                        // Color map: baseline is 1.0. Lower (<1.0) fades to blue-gray, higher (>1.0) brightens to gold/amber
+                        let norm = ((tau - 0.5) / 4.0).clamp(0.0, 1.0);
+                        let bg_color = if tau >= 1.0 {
+                            let t = ((tau - 1.0) / 4.0).clamp(0.0, 1.0);
+                            Color32::from_rgb(
+                                (30.0 + t * 200.0) as u8,
+                                (40.0 + t * 160.0) as u8,
+                                (20.0 + (1.0 - t) * 30.0) as u8,
+                            )
+                        } else {
+                            Color32::from_rgb(
+                                20,
+                                (25.0 + norm * 30.0) as u8,
+                                (45.0 + norm * 35.0) as u8,
+                            )
+                        };
+
+                        let text_color = if tau > 2.0 {
+                            Color32::WHITE
+                        } else if tau >= 1.0 {
+                            Color32::from_rgb(0xff, 0xdd, 0x88)
+                        } else {
+                            Color32::from_rgb(0x88, 0x99, 0xaa)
+                        };
+
+                        let (rect, response) = ui.allocate_exact_size(Vec2::new(54.0, 24.0), Sense::hover());
+                        ui.painter().rect_filled(rect, 3.0, bg_color);
+                        ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)), egui::StrokeKind::Inside);
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{:.2}", tau),
+                            egui::FontId::proportional(11.0),
+                            text_color,
+                        );
+
+                        response.on_hover_text(format!(
+                            "Niche: {}\nSlot: {}\nPheromone trail τ = {:.4}\nReinforced through successful tasks in this domain basin",
+                            label, s, tau
+                        ));
+                    }
+                    ui.end_row();
+                }
+            });
+    }
+
+    /// Interactive probe & auto-router: encode free text into the profiler's 8-dim feature
+    /// space, quantum superposition interference, and swarm stigmergy to recommend the optimal slot.
     fn show_profiler(&mut self, ui: &mut egui::Ui, network: &ModelProfileNetwork) {
-        ui.label(egui::RichText::new("Task Profiler").size(18.0).color(Color32::from_rgb(0x00, 0xaa, 0xff)).strong());
+        ui.label(
+            egui::RichText::new("🧬 Task Profiler & Swarm Auto-Router")
+                .size(18.0)
+                .color(Color32::from_rgb(0x00, 0xaa, 0xff))
+                .strong(),
+        );
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(format!(
-            "Live read-out of the profiler net ({} turn{} of experience).",
-            network.experience_buffer.len(),
-            if network.experience_buffer.len() == 1 { "" } else { "s" }
-        )).size(11.0).color(Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.label(
+            egui::RichText::new(
+                "Probe free text into 8-dim canonical feature space, quantum superposition interference, and swarm stigmergy to determine optimal cohabitation slot."
+            )
+            .size(11.0)
+            .color(Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(6.0);
+
+        // Quick test chips
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Quick Test:").size(11.0).color(Color32::from_rgb(0xaa, 0xaa, 0xaa)));
+            if ui.small_button("💻 Coder").on_hover_text("Insert Rust code prompt").clicked() {
+                self.profile_input = "fn quicksort<T: Ord>(arr: &mut [T]) { /* partition logic */ }".to_string();
+            }
+            if ui.small_button("🛡️ Cyber").on_hover_text("Insert security audit prompt").clicked() {
+                self.profile_input = "Perform a side-channel timing attack audit on the AES-256 GCM key schedule".to_string();
+            }
+            if ui.small_button("🔬 Research").on_hover_text("Insert research query").clicked() {
+                self.profile_input = "Explain the quantum decoherence mechanisms in trapped-ion quantum computers".to_string();
+            }
+            if ui.small_button("📋 Plan").on_hover_text("Insert architecture planning prompt").clicked() {
+                self.profile_input = "Plan the phased migration architecture for zero-trust microservices".to_string();
+            }
+        });
         ui.add_space(4.0);
+
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.profile_input)
-                    .desired_width(200.0)
-                    .hint_text("Describe a task, e.g. debug this borrow error"),
+                    .desired_width(360.0)
+                    .hint_text("Describe a task, e.g. Audit AES-256 timing channels or write Rust parser"),
             );
-            let go = ui.button("Profile").clicked()
+            let go = ui.button(egui::RichText::new("🧬 Route & Profile").color(Color32::from_rgb(0x00, 0xff, 0xcc)).strong()).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+
             if go && !self.profile_input.trim().is_empty() {
-                let feats = Self::profile_features(&self.profile_input);
-                let input = Array1::from_vec(feats.to_vec());
-                let out = network.forward(&input);
-                self.profile_result = Some(out.to_vec());
+                let (best_slot, domain_name, confidence, entropy, probs) = network.recommend_swarm_slot(&self.profile_input);
+                self.profile_best_slot = Some(best_slot);
+                self.profile_domain = Some(domain_name.to_string());
+                self.profile_confidence = Some(confidence);
+                self.profile_entropy = Some(entropy);
+                self.profile_result = Some(probs);
+                self.last_entropy = Some(entropy);
             }
         });
+
+        if let (Some(slot), Some(domain), Some(conf), Some(entropy)) = (
+            self.profile_best_slot,
+            &self.profile_domain,
+            self.profile_confidence,
+            self.profile_entropy,
+        ) {
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(0x0a, 0x14, 0x24))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(0x1b, 0x3a, 0x60)))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🎯 Domain Basin:").size(12.0).color(Color32::from_rgb(0x88, 0xaa, 0xcc)));
+                        ui.label(egui::RichText::new(domain).size(13.0).color(Color32::from_rgb(0x00, 0xee, 0xff)).strong());
+
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new("🐝 Recommended Slot:").size(12.0).color(Color32::from_rgb(0x88, 0xaa, 0xcc)));
+                        ui.label(egui::RichText::new(format!("★ Slot {}", slot)).size(14.0).color(Color32::from_rgb(0xff, 0xcc, 0x00)).strong());
+
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new("Fused Confidence:").size(12.0).color(Color32::from_rgb(0x88, 0xaa, 0xcc)));
+                        ui.label(egui::RichText::new(format!("{:.1}%", conf * 100.0)).size(13.0).color(Color32::from_rgb(0x00, 0xff, 0x88)).strong());
+
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new("Quantum Entropy S:").size(12.0).color(Color32::from_rgb(0x88, 0xaa, 0xcc)));
+                        ui.label(egui::RichText::new(format!("{:.3} nats", entropy)).size(13.0).color(Color32::from_rgb(0xcc, 0xaa, 0xff)));
+                    });
+                });
+        }
+
         if let Some(probs) = self.profile_result.clone() {
-            ui.add_space(4.0);
-            let best = probs
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            ui.add_space(6.0);
+            let best = self.profile_best_slot.unwrap_or(0);
             for (i, p) in probs.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!(
-                        "out {}{}",
-                        i,
-                        if i == best { " ★" } else { "" }
-                    ))
-                    .size(12.0)
-                    .color(if i == best {
-                        Color32::from_rgb(0xff, 0xaa, 0x00)
+                    let is_best = i == best;
+                    let label = if is_best {
+                        format!("★ Slot {} (Recommended)", i)
                     } else {
-                        Color32::from_rgb(0xaa, 0xaa, 0xaa)
-                    }));
+                        format!("  Slot {}", i)
+                    };
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(12.0)
+                            .color(if is_best {
+                                Color32::from_rgb(0xff, 0xcc, 0x00)
+                            } else {
+                                Color32::from_rgb(0xaa, 0xaa, 0xaa)
+                            }),
+                    );
                     ui.add(
                         egui::ProgressBar::new(p.clamp(0.0, 1.0))
-                            .desired_width(220.0)
+                            .desired_width(240.0)
                             .show_percentage(),
                     );
                 });
@@ -685,6 +1068,7 @@ impl NeuralVizPanel {
     /// Heuristic 8-dim probe features. Same spirit as the training-time
     /// features in observe_chat: cheap text statistics, all clamped to
     /// [0, 1] so a novel input can't blow up the forward pass.
+    #[allow(dead_code)]
     fn profile_features(text: &str) -> [f32; 8] {
         let chars = text.chars().count().max(1) as f32;
         let words = text.split_whitespace().count() as f32;
@@ -736,5 +1120,36 @@ mod tests {
         assert_eq!(out.len(), 4);
         let sum: f32 = out.iter().sum();
         assert!((sum - 1.0).abs() < 1e-4, "softmax must sum to 1, got {sum}");
+    }
+
+    #[test]
+    fn panel_default_state_and_history_loss() {
+        let mut panel = NeuralVizPanel::new();
+        assert!(panel.show_quantum);
+        assert!(panel.show_swarm);
+        assert!(panel.show_weights);
+        assert!(panel.show_architecture);
+        assert_eq!(panel.training_history.len(), 0);
+
+        // Verify history queue capacity bounding
+        for i in 0..600 {
+            panel.add_training_loss(i as f32 * 0.01);
+        }
+        assert_eq!(panel.training_history.len(), 500);
+        let first = *panel.training_history.front().unwrap();
+        assert!((first - 1.00).abs() < 1e-3);
+    }
+
+    #[test]
+    fn panel_recommendation_and_profiler_routing() {
+        let net = ModelProfileNetwork::new(8, vec![16, 16], 8);
+        let (slot, domain, conf, entropy, probs) = net.recommend_swarm_slot("Audit AES-256 side-channel timing attack");
+        assert_eq!(domain, "Cyber / Critic");
+        assert!(slot < 8);
+        assert!(conf > 0.0 && conf <= 1.0);
+        assert!(entropy.is_finite() && entropy >= 0.0);
+        assert_eq!(probs.len(), 8);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4, "prob distribution must sum to 1.0");
     }
 }

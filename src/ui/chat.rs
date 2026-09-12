@@ -1,16 +1,265 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use anyhow::Result;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, OllamaClient, ChatResponse};
 use crate::security::{ConfirmGate, SecretHit};
 use crate::storage::ChatMessage;
-use std::cell::{Cell, RefCell};
+use std::borrow::Cow;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
+/// Test if text contains characters that require sanitization.
+/// Scans ASCII control characters (< 0x20, 0x7f) excluding \n, \r, \t,
+/// ANSI escape prefixes (0x1b), and Unicode replacement characters (\u{FFFD}).
+pub fn needs_sanitization(s: &str) -> bool {
+    s.as_bytes().iter().any(|&b| b == 0x1b || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t') || b == 0x7f)
+        || s.contains('\u{FFFD}')
+}
+
+/// Zero-copy sanitization wrapper: returns Cow::Borrowed if no invalid characters exist,
+/// eliminating heap allocation churn for >99% of streaming tokens.
+pub fn sanitize_text_cow<'a>(s: &'a str) -> Cow<'a, str> {
+    if !needs_sanitization(s) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(sanitize_text(s))
+}
+
+/// Strip ANSI escape sequences, replacement characters (\u{FFFD}),
+/// and unprintable control characters, preserving \n, \r, \t.
+pub fn sanitize_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // ANSI escape sequence: \x1b[ ... letter
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                while let Some(&next_ch) = chars.peek() {
+                    chars.next();
+                    if next_ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        if ch == '\u{FFFD}' {
+            continue;
+        }
+        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageSegment {
+    Text(String),
+    Think(String),
+    Code { lang: String, code: String },
+}
+
+/// Helper that splits text with markdown code blocks into Text and Code segments.
+fn parse_text_and_code(input: &str) -> Vec<MessageSegment> {
+    let mut segments = Vec::new();
+    let mut rest = input;
+
+    while let Some(start_idx) = rest.find("```") {
+        let before = &rest[..start_idx];
+        if !before.is_empty() {
+            segments.push(MessageSegment::Text(before.to_string()));
+        }
+
+        let after_fence = &rest[start_idx + 3..];
+        if let Some(nl_pos) = after_fence.find('\n') {
+            let lang = after_fence[..nl_pos].trim().to_string();
+            let code_content = &after_fence[nl_pos + 1..];
+            if let Some(end_idx) = code_content.find("```") {
+                let code = code_content[..end_idx].trim_matches('\n').to_string();
+                segments.push(MessageSegment::Code { lang, code });
+                rest = &code_content[end_idx + 3..];
+            } else {
+                // In-progress / unclosed code block (e.g. while streaming)
+                let code = code_content.trim_matches('\n').to_string();
+                segments.push(MessageSegment::Code { lang, code });
+                rest = "";
+                break;
+            }
+        } else {
+            // Started fence and language name, but no newline yet (e.g. "```rust")
+            let lang = after_fence.trim().to_string();
+            segments.push(MessageSegment::Code { lang, code: String::new() });
+            rest = "";
+            break;
+        }
+    }
+
+    if !rest.is_empty() {
+        segments.push(MessageSegment::Text(rest.to_string()));
+    }
+
+    segments
+}
+
+/// Parse full message into Text, Think, and Code segments.
+pub fn parse_segments(content: &str) -> Vec<MessageSegment> {
+    let mut segments = Vec::new();
+    let mut rest = content;
+
+    while let Some(think_start) = rest.find("<think>") {
+        let before_think = &rest[..think_start];
+        if !before_think.is_empty() {
+            segments.extend(parse_text_and_code(before_think));
+        }
+
+        let after_think_tag = &rest[think_start + 7..];
+        if let Some(think_end) = after_think_tag.find("</think>") {
+            let think_content = after_think_tag[..think_end].trim();
+            if !think_content.is_empty() {
+                segments.push(MessageSegment::Think(think_content.to_string()));
+            }
+            rest = &after_think_tag[think_end + 8..];
+        } else {
+            // Active unclosed think block (streaming)
+            let think_content = after_think_tag.trim();
+            if !think_content.is_empty() {
+                segments.push(MessageSegment::Think(think_content.to_string()));
+            }
+            rest = "";
+            break;
+        }
+    }
+
+    if !rest.is_empty() {
+        segments.extend(parse_text_and_code(rest));
+    }
+
+    segments
+}
+
+/// High-contrast, beautifully styled code block frame with language badge,
+/// copy to clipboard, and one-click transfer to the IDE Editor tab.
+pub fn render_code_block(
+    ui: &mut egui::Ui,
+    lang: &str,
+    code: &str,
+    block_id: &str,
+    tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+) {
+    ui.add_space(4.0);
+    let frame = egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(0x0a, 0x0f, 0x1d))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x2d, 0x48)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 8));
+
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let display_lang = if lang.trim().is_empty() {
+                "CODE".to_string()
+            } else {
+                lang.trim().to_uppercase()
+            };
+            ui.label(
+                egui::RichText::new(format!("💻 {}", display_lang))
+                    .size(11.0)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let is_shell = matches!(lang.trim().to_lowercase().as_str(), "bash" | "sh" | "shell" | "zsh");
+                if is_shell {
+                    let run_btn = ui.small_button(
+                        egui::RichText::new("⚡ Run")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x34, 0xd3, 0x99)),
+                    ).on_hover_text("Execute shell command directly in the IDE Terminal Dock");
+                    if run_btn.clicked() {
+                        let _ = tx.send(crate::ui::app::AppMessage::TerminalRun(code.to_string()));
+                    }
+                    ui.add_space(6.0);
+                }
+
+                let send_btn = ui.small_button(
+                    egui::RichText::new("📝 Send to Editor")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0xa5, 0xb4, 0xfc)),
+                ).on_hover_text("Open this code block in the IDE / Editor tab");
+                if send_btn.clicked() {
+                    let _ = tx.send(crate::ui::app::AppMessage::ChatToEditor(
+                        code.to_string(),
+                        lang.to_string(),
+                    ));
+                }
+
+                ui.add_space(6.0);
+                let copy_btn = ui.small_button(
+                    egui::RichText::new("📋 Copy")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                ).on_hover_text("Copy code to clipboard");
+                if copy_btn.clicked() {
+                    ui.ctx().copy_text(code.to_string());
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        egui::ScrollArea::horizontal()
+            .id_salt(block_id)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(code)
+                            .monospace()
+                            .size(12.5)
+                            .color(egui::Color32::from_rgb(0xec, 0xf0, 0xf8)),
+                    )
+                );
+            });
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("🛠 Quick Tools:").size(10.0).color(egui::Color32::from_rgb(0x77, 0x88, 0x99)));
+            let edit_chip = ui.small_button(egui::RichText::new("Gedit").size(10.0));
+            if edit_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "editor".to_string(),
+                    args: None,
+                });
+            }
+            let code_chip = ui.small_button(egui::RichText::new("VS Code").size(10.0));
+            if code_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "code".to_string(),
+                    args: None,
+                });
+            }
+            let hex_chip = ui.small_button(egui::RichText::new("Hexdump").size(10.0));
+            if hex_chip.clicked() {
+                let _ = tx.send(crate::ui::app::AppMessage::RunTool {
+                    id: "hexdump".to_string(),
+                    args: None,
+                });
+            }
+        });
+    });
+    ui.add_space(4.0);
+}
+
 pub struct ChatPanel {
-    input: String,
+    pub input: String,
     messages: Vec<ChatMessage>,
+    parsed_cache: Vec<Vec<MessageSegment>>,
     is_streaming: bool,
     voice_enabled: bool,
     revision: u64,
@@ -22,11 +271,9 @@ pub struct ChatPanel {
     reply_secs_total: f32,
     reply_count: u32,
     pub history_depth: usize,
-    /// Parsed ```code fences per message, rebuilt only when `revision`
-    /// changes. Reparsing up to 100 bubbles every frame was the dominant
-    /// CPU cost in long chats; now each edit parses once.
-    block_cache: RefCell<Vec<Vec<(String, String)>>>,
-    block_cache_rev: Cell<u64>,
+    pub num_threads: u32,
+    cached_stream_segs: Vec<MessageSegment>,
+    stream_dirty: bool,
 }
 
 impl ChatPanel {
@@ -34,6 +281,7 @@ impl ChatPanel {
         Self {
             input: String::new(),
             messages: Vec::new(),
+            parsed_cache: Vec::new(),
             is_streaming: false,
             voice_enabled: false,
             revision: 0,
@@ -45,8 +293,9 @@ impl ChatPanel {
             reply_secs_total: 0.0,
             reply_count: 0,
             history_depth: 20,
-            block_cache: RefCell::new(Vec::new()),
-            block_cache_rev: Cell::new(0),
+            num_threads: 0,
+            cached_stream_segs: Vec::new(),
+            stream_dirty: false,
         }
     }
 
@@ -63,6 +312,11 @@ impl ChatPanel {
         Self {
             input: String::new(),
             messages: self.messages.clone(),
+            parsed_cache: if self.parsed_cache.len() == self.messages.len() {
+                self.parsed_cache.clone()
+            } else {
+                self.messages.iter().map(|m| parse_segments(&m.content)).collect()
+            },
             is_streaming: false,
             voice_enabled: self.voice_enabled,
             revision: 0,
@@ -74,9 +328,9 @@ impl ChatPanel {
             reply_secs_total: self.reply_secs_total,
             reply_count: self.reply_count,
             history_depth: self.history_depth,
-            block_cache: RefCell::new(Vec::new()),
-            // Mismatched on purpose: first render rebuilds for the carried messages.
-            block_cache_rev: Cell::new(self.revision.wrapping_add(1)),
+            num_threads: self.num_threads,
+            cached_stream_segs: Vec::new(),
+            stream_dirty: false,
         }
     }
 
@@ -86,6 +340,10 @@ impl ChatPanel {
         self.reply_count = 0;
         self.messages.clear();
         self.messages.shrink_to_fit();
+        self.parsed_cache.clear();
+        self.parsed_cache.shrink_to_fit();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
         self.input.clear();
         self.revision = self.revision.saturating_add(1);
     }
@@ -94,7 +352,14 @@ impl ChatPanel {
         if self.messages.len() >= Self::MAX_MESSAGES {
             let overflow = self.messages.len() - Self::MAX_MESSAGES + 1;
             self.messages.drain(0..overflow);
+            if self.parsed_cache.len() >= overflow {
+                self.parsed_cache.drain(0..overflow);
+            } else {
+                self.parsed_cache.clear();
+            }
         }
+        let segs = parse_segments(&msg.content);
+        self.parsed_cache.push(segs);
         self.messages.push(msg);
         self.revision = self.revision.saturating_add(1);
     }
@@ -126,9 +391,18 @@ impl ChatPanel {
     }
 
     /// System notice bubble (guard blocks, etc.).
-    pub fn push_system_note(&mut self, content: String) {
+    pub fn push_system_note(&mut self, content: impl Into<String>) {
         self.push_capped(ChatMessage {
             role: "system".to_string(),
+            content: content.into(),
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
+    /// Push an assistant message (e.g. imported from Swarm Relay).
+    pub fn push_assistant_message(&mut self, content: String) {
+        self.push_capped(ChatMessage {
+            role: "assistant".to_string(),
             content,
             timestamp: chrono::Utc::now(),
         });
@@ -174,14 +448,19 @@ impl ChatPanel {
         if seq != self.stream_seq || piece.is_empty() {
             return;
         }
+        let clean = sanitize_text_cow(piece);
+        if clean.is_empty() {
+            return;
+        }
         self.is_streaming = true;
+        self.stream_dirty = true;
         if self.stream_buf.len() < Self::MAX_CONTENT_CHARS {
             let room = Self::MAX_CONTENT_CHARS - self.stream_buf.len();
-            let mut end = piece.len().min(room);
-            while !piece.is_char_boundary(end) {
+            let mut end = clean.len().min(room);
+            while !clean.is_char_boundary(end) {
                 end -= 1;
             }
-            self.stream_buf.push_str(&piece[..end]);
+            self.stream_buf.push_str(&clean[..end]);
         }
     }
 
@@ -190,13 +469,20 @@ impl ChatPanel {
         self.stream_seq = self.stream_seq.saturating_add(1);
         self.is_streaming = false;
         self.stream_buf.clear();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
     }
 
     /// Replace chat contents with a stored session (History -> Open in chat).
     pub fn load_messages(&mut self, msgs: Vec<ChatMessage>) {
         let start = msgs.len().saturating_sub(Self::MAX_MESSAGES);
         self.messages = msgs[start..].to_vec();
+        self.parsed_cache = self.messages.iter().map(|m| parse_segments(&m.content)).collect();
         self.revision = self.revision.saturating_add(1);
+    }
+
+    pub fn voice_enabled(&self) -> bool {
+        self.voice_enabled
     }
 
     pub fn set_voice_enabled(&mut self, enabled: bool) {
@@ -215,6 +501,78 @@ impl ChatPanel {
         self.input.push_str(t);
     }
 
+    /// Message list view that can be embedded in split view columns or full view.
+    pub fn show_message_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        max_height: f32,
+    ) {
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if self.messages.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("No messages yet - pick a model above, then type below.")
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                }
+                let total = self.messages.len();
+                if total > 50 {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Showing last 50 of {} messages (older kept for the model, hidden for speed).",
+                                total
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                }
+                let start = total.saturating_sub(50);
+                for i in start..total {
+                    let segs: &[MessageSegment] = if i < self.parsed_cache.len() {
+                        &self.parsed_cache[i]
+                    } else {
+                        &[]
+                    };
+                    self.show_message(ui, &self.messages[i], segs, tx);
+                }
+                if !self.stream_buf.is_empty() {
+                    if self.stream_dirty || self.cached_stream_segs.is_empty() {
+                        let tmp_content = format!("{}▍", self.stream_buf);
+                        self.cached_stream_segs = parse_segments(&tmp_content);
+                        self.stream_dirty = false;
+                    }
+                    let tmp = ChatMessage {
+                        role: "assistant".to_string(),
+                        content: format!("{}▍", self.stream_buf),
+                        timestamp: chrono::Utc::now(),
+                    };
+                    self.show_message(ui, &tmp, &self.cached_stream_segs, tx);
+                }
+                if self.is_streaming && self.stream_buf.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("Thinking...")
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                }
+            });
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -225,6 +583,7 @@ impl ChatPanel {
         slot_idx: usize,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        dual_run_mode: bool,
     ) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -277,78 +636,55 @@ impl ChatPanel {
         // overflow the reserve.
         let input_reserve = 170.0 * ui.ctx().zoom_factor();
         let list_h = (ui.available_height() - input_reserve).max(80.0);
-        egui::ScrollArea::vertical()
-            .max_height(list_h)
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                if self.messages.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("No messages yet - pick a model above, then type below.")
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
-                        );
-                    });
-                }
-                let total = self.messages.len();
-                if total > 100 {
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Showing last 100 of {} messages (older kept for the model, hidden for speed).",
-                                total
-                            ))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
-                        );
-                    });
-                }
-                let start = total.saturating_sub(100);
-                for i in start..total {
-                    let blocks = self.cached_blocks(i);
-                    self.show_message(ui, &self.messages[i], tx, &blocks);
-                }
-                if !self.stream_buf.is_empty() {
-                    let tmp = ChatMessage {
-                        role: "assistant".to_string(),
-                        content: format!("{}▍", self.stream_buf),
-                        timestamp: chrono::Utc::now(),
-                    };
-                    let tmp_blocks = Self::code_blocks(&tmp.content);
-                    self.show_message(ui, &tmp, tx, &tmp_blocks);
-                }
-                if self.is_streaming && self.stream_buf.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        ui.spinner();
-                        ui.label(
-                            egui::RichText::new("Thinking...")
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
-                        );
-                    });
-                }
-            });
+        self.show_message_list(ui, tx, list_h);
 
         ui.separator();
-
         ui.add_space(4.0);
-        // Full-width field on its own row; Send/Stop share a right-aligned
-        // row beneath it. (Side by side proved unworkable: in a horizontal
-        // row both the multiline field and the button column expand to full
-        // width, so they wrapped unpredictably.)
+
+        // Explicit ID salt prevents widget ID shifts during live typing
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.input)
+                .id_salt(format!("chat_input_textedit_slot_{}", slot_idx))
                 .desired_rows(3)
                 .desired_width(f32::INFINITY)
-                .hint_text("Type your message... (Enter to send, Shift+Enter for newline)")
+                .hint_text(if dual_run_mode {
+                    "Type your message for ALL active models... (Enter to send to both, Shift+Enter for newline)"
+                } else {
+                    "Type your message... (Enter to send, Shift+Enter for newline)"
+                })
                 .font(egui::TextStyle::Body),
         );
+
+        let trimmed_input = self.input.trim().to_string();
+        let domain_info = if !trimmed_input.is_empty() && trimmed_input.len() >= 6 {
+            Some(crate::neural::classify_prompt_domain(&trimmed_input))
+        } else {
+            None
+        };
+
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            if let Some((domain_idx, domain_name)) = domain_info {
+                ui.label(
+                    egui::RichText::new("🐝 Swarm Router:")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0xff, 0xcc, 0x00))
+                );
+                let badge = match domain_idx {
+                    1 => "💻 Coder",
+                    2 => "🔬 Researcher",
+                    3 => "🛡️ Cyber / Critic",
+                    4 => "📋 Planner",
+                    5 => "✍️ Writer",
+                    _ => "🌐 General",
+                };
+                ui.label(
+                    egui::RichText::new(format!("{badge} ({domain_name})"))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x00, 0xee, 0xff))
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let need_model = selected_model.is_none();
                 let need_link = api_client.is_none();
@@ -364,6 +700,8 @@ impl ChatPanel {
                     "Send (pick model ^)"
                 } else if need_link {
                     "Send (no Ollama link)"
+                } else if dual_run_mode {
+                    "⚡ Send to Both (Enter)"
                 } else {
                     "Send (Enter)"
                 };
@@ -377,10 +715,16 @@ impl ChatPanel {
                         .fill(fill)
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x44, 0xaa, 0xff)))
                         .corner_radius(egui::CornerRadius::same(6))
-                        .min_size(egui::vec2(112.0, 34.0))
+                        .min_size(egui::vec2(130.0, 34.0))
                 ).on_hover_text("Send message (Enter to send, Shift+Enter for newline)");
                 if send_btn.clicked() {
-                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                    if dual_run_mode {
+                        if let Some(prompt) = self.take_broadcast() {
+                            let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                        }
+                    } else {
+                        self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                    }
                 }
                 ui.add_space(4.0);
                 let ask_btn = ui
@@ -451,13 +795,20 @@ impl ChatPanel {
             });
             // Enter sends while the field has focus (multiline keeps focus on
             // Enter, so lost_focus() never fires for it). Shift+Enter = newline.
+            // Exclude ctrl modifier so Ctrl+Enter triggers broadcast!
             let send_triggered = ui.input(|i| {
-                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift && !i.modifiers.ctrl
             }) && response.has_focus()
                 && !self.input.trim().is_empty()
                 && !self.is_streaming;
             if send_triggered {
-                self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                if dual_run_mode {
+                    if let Some(prompt) = self.take_broadcast() {
+                        let _ = tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                    }
+                } else {
+                    self.send_message(_models, selected_model, role_prompt, slot_idx, api_client, tx, rt);
+                }
             }
             // Ctrl+Enter broadcasts the field to every slot (Enter alone sends here).
             let broadcast_triggered = ui.input(|i| {
@@ -583,50 +934,12 @@ impl ChatPanel {
         }
     }
 
-    /// Split ```fences into (lang, code) blocks.
-    fn code_blocks(content: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let mut rest = content;
-        while let Some(s) = rest.find("```") {
-            let after = &rest[s + 3..];
-            let (lang, code_start) = match after.find('\n') {
-                Some(i) => (after[..i].trim().to_string(), &after[i + 1..]),
-                None => (String::new(), after),
-            };
-            match code_start.find("```") {
-                Some(e) => {
-                    out.push((lang, code_start[..e].trim_matches('\n').to_string()));
-                    rest = &code_start[e + 3..];
-                }
-                None => break,
-            }
-        }
-        out
-    }
-
-    /// Fence blocks for message `idx`, parsed at most once per edit.
-    fn cached_blocks(&self, idx: usize) -> Vec<(String, String)> {
-        if self.block_cache_rev.get() != self.revision {
-            let mut cache = Vec::with_capacity(self.messages.len());
-            for m in &self.messages {
-                cache.push(if m.content.contains("```") {
-                    Self::code_blocks(&m.content)
-                } else {
-                    Vec::new()
-                });
-            }
-            self.block_cache.replace(cache);
-            self.block_cache_rev.set(self.revision);
-        }
-        self.block_cache.borrow().get(idx).cloned().unwrap_or_default()
-    }
-
     fn show_message(
         &self,
         ui: &mut egui::Ui,
         msg: &ChatMessage,
+        segments: &[MessageSegment],
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
-        blocks: &[(String, String)],
     ) {
         let is_user = msg.role == "user";
         // Light-theme aware: hardcoded dark fills + white text turn
@@ -677,6 +990,21 @@ impl ChatPanel {
         } else {
             "Assistant"
         };
+        let fallback_segs;
+        let actual_segs = if segments.is_empty() && !msg.content.is_empty() {
+            fallback_segs = parse_segments(&msg.content);
+            &fallback_segs[..]
+        } else {
+            segments
+        };
+        let code_blocks: Vec<(&str, &str)> = actual_segs
+            .iter()
+            .filter_map(|s| match s {
+                MessageSegment::Code { lang, code } => Some((lang.as_str(), code.as_str())),
+                _ => None,
+            })
+            .collect();
+
         ui.with_layout(egui::Layout::top_down(align), |ui| {
             ui.add_space(4.0);
             egui::Frame::NONE
@@ -699,56 +1027,47 @@ impl ChatPanel {
                                 .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
                         );
                     });
-                    if blocks.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&msg.content)
-                                .size(13.0)
-                                .color(body),
-                        );
-                    } else {
-                        let mut rest = msg.content.as_str();
-                        let mut bi = 0usize;
-                        while let Some(s) = rest.find("```") {
-                            let before = rest[..s].trim();
-                            if !before.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(before)
-                                        .size(13.0)
-                                        .color(body),
-                                );
-                            }
-                            if bi < blocks.len() {
-                                let (lang, code) = &blocks[bi];
-                                if !lang.is_empty() {
+
+                    for (seg_idx, seg) in actual_segs.iter().enumerate() {
+                        match seg {
+                            MessageSegment::Text(t) => {
+                                if !t.is_empty() {
                                     ui.label(
-                                        egui::RichText::new(lang.clone())
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+                                        egui::RichText::new(t)
+                                            .size(13.0)
+                                            .color(egui::Color32::WHITE),
                                     );
                                 }
-                                egui::ScrollArea::horizontal().show(ui, |ui| {
-                                    ui.code(code.clone());
+                            }
+                            MessageSegment::Think(th) => {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new("💭 Thought Process")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                                )
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    egui::Frame::NONE
+                                        .fill(egui::Color32::from_rgb(0x13, 0x18, 0x24))
+                                        .corner_radius(egui::CornerRadius::same(4))
+                                        .inner_margin(egui::Margin::same(6))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(th)
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
+                                                    .italics(),
+                                            );
+                                        });
                                 });
-                                bi += 1;
                             }
-                            let after = &rest[s + 3..];
-                            match after.find("```") {
-                                Some(e) => rest = &after[e + 3..],
-                                None => {
-                                    rest = "";
-                                    break;
-                                }
+                            MessageSegment::Code { lang, code } => {
+                                let block_id = format!("chat_cb_{}", seg_idx);
+                                render_code_block(ui, lang, code, &block_id, tx);
                             }
-                        }
-                        let tail = rest.trim();
-                        if !tail.is_empty() {
-                            ui.label(
-                                egui::RichText::new(tail)
-                                    .size(13.0)
-                                    .color(body),
-                            );
                         }
                     }
+
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -767,10 +1086,10 @@ impl ChatPanel {
                                 );
                             }
                         }
-                        if !is_user && msg.role == "assistant" && !blocks.is_empty() {
+                        if !is_user && msg.role == "assistant" && !code_blocks.is_empty() {
                             if ui.small_button("Copy code").clicked() {
-                                if let Some((_, code)) = blocks.iter().max_by_key(|(_, c)| c.len()) {
-                                    ui.ctx().copy_text(code.clone());
+                                if let Some((_, code)) = code_blocks.iter().max_by_key(|(_, c)| c.len()) {
+                                    ui.ctx().copy_text((*code).to_string());
                                 }
                             }
                             if ui
@@ -779,11 +1098,11 @@ impl ChatPanel {
                                 .clicked()
                             {
                                 if let Some((lang, code)) =
-                                    blocks.iter().max_by_key(|(_, c)| c.len())
+                                    code_blocks.iter().max_by_key(|(_, c)| c.len())
                                 {
                                     let _ = tx.send(crate::ui::app::AppMessage::ChatToEditor(
-                                        code.clone(),
-                                        lang.clone(),
+                                        (*code).to_string(),
+                                        (*lang).to_string(),
                                     ));
                                 }
                             }
@@ -794,7 +1113,7 @@ impl ChatPanel {
         ui.add_space(4.0);
     }
 
-    fn send_message(
+    pub fn send_message(
         &mut self,
         _models: &[crate::ollama::api::Model],
         selected_model: &Option<String>,
@@ -806,10 +1125,117 @@ impl ChatPanel {
     ) {
         // Trim the newline Enter inserts before the send triggers (the Enter
         // path bypasses the button's enabled guard).
-        let prompt = self.input.trim().to_string();
+        let mut prompt = self.input.trim().to_string();
         if prompt.is_empty() {
             return;
         }
+        if prompt.len() > Self::MAX_CONTENT_CHARS {
+            let mut end = Self::MAX_CONTENT_CHARS;
+            while !prompt.is_char_boundary(end) { end -= 1; }
+            prompt.truncate(end);
+        }
+
+        // Unified In-Chat Slash Command Interception
+        if prompt.starts_with('/') {
+            match crate::commands::SlashCommand::parse(&prompt) {
+                Ok(Some(cmd)) => {
+                    self.input.clear();
+                    match cmd {
+                        crate::commands::SlashCommand::Help => {
+                            self.push_system_note(crate::commands::SlashCommand::help_manual());
+                        }
+                        crate::commands::SlashCommand::Clear => {
+                            self.clear_chat();
+                            self.push_system_note("⚡ **Chat cleared from viewport.**");
+                        }
+                        crate::commands::SlashCommand::New => {
+                            let _ = tx.send(crate::ui::app::AppMessage::NewChat);
+                            self.push_system_note("⚡ **Started fresh chat session.**");
+                        }
+                        crate::commands::SlashCommand::Model(name) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ModelSelected(name.clone()));
+                            self.push_system_note(&format!("⚡ **Switching model to `{}`** (pre-warming into RAM)...", name));
+                        }
+                        crate::commands::SlashCommand::Swarm(cmd) => match cmd {
+                            crate::commands::SwarmCommand::Dispatch(task) => {
+                                let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                                self.push_system_note("🧬 **Swarm Relay dispatched.** Switching to Swarm Relay tab...");
+                            }
+                            crate::commands::SwarmCommand::Preset { template, prompt } => {
+                                if let Some(tmpl) = crate::ui::relay::SwarmTemplate::from_id(&template) {
+                                    let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmPreset {
+                                        template: tmpl,
+                                        prompt,
+                                    });
+                                    self.push_system_note(&format!("🧬 **Swarm preset `{}` activated.** Switching to Swarm Relay tab...", tmpl.label()));
+                                } else {
+                                    self.push_system_note(&format!("❌ **Unknown swarm preset `{}`.** Use `/swarm presets` to list presets.", template));
+                                }
+                            }
+                            crate::commands::SwarmCommand::ListPresets => {
+                                let mut note = String::from("### 🧬 **Available Multi-Agent Swarm Presets**\n\n| Short ID | Preset Description |\n|---|---|\n");
+                                for t in crate::ui::relay::SwarmTemplate::all() {
+                                    if t != crate::ui::relay::SwarmTemplate::Custom {
+                                        note.push_str(&format!("| `{}` | {} |\n", t.short_id(), t.label()));
+                                    }
+                                }
+                                note.push_str("\n*Usage:* `/swarm preset <id> [prompt]` (e.g. `/swarm preset triad Build an auth system`)");
+                                self.push_system_note(&note);
+                            }
+                        }
+                        crate::commands::SlashCommand::Skills(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::SkillsCommand(slot_idx, sub));
+                        }
+                        crate::commands::SlashCommand::Audit => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ShowAudit(slot_idx));
+                        }
+                        crate::commands::SlashCommand::Threads(n) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::SetThreads(n));
+                            self.push_system_note(&format!("⚡ **Inference CPU threads set to {}.**", n));
+                        }
+                        crate::commands::SlashCommand::Status => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ShowStatus(slot_idx));
+                        }
+                        crate::commands::SlashCommand::Exec(cmd_line) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::TerminalRun(cmd_line));
+                            self.push_system_note("⚡ **Command sent to IDE Terminal Dock.**");
+                        }
+                        crate::commands::SlashCommand::Mkdir(dir_path) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceMkdir(dir_path));
+                        }
+                        crate::commands::SlashCommand::Touch(file_path) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceTouch(file_path));
+                        }
+                        crate::commands::SlashCommand::Rm(target) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceRm(target));
+                        }
+                        crate::commands::SlashCommand::Mv { src, dst } => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceMv { src, dst });
+                        }
+                        crate::commands::SlashCommand::Ls(path_opt) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceLs(path_opt));
+                        }
+                        crate::commands::SlashCommand::Project(proj) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::WorkspaceProject(proj));
+                        }
+                        crate::commands::SlashCommand::Tools(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::ToolsCommand(slot_idx, sub));
+                        }
+                        crate::commands::SlashCommand::Guardrail(sub) => {
+                            let _ = tx.send(crate::ui::app::AppMessage::GuardrailCommand(slot_idx, sub));
+                        }
+                    }
+                    return;
+                }
+                Err(err_msg) => {
+                    self.input.clear();
+                    self.push_system_note(&format!("⚠ **Command Error:**\n{}", err_msg));
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+
         if let Err(hits) = self.gate.check(&prompt) {
             self.push_system_note(Self::secret_warning(&hits));
             let _ = tx.send(crate::ui::app::AppMessage::Audit(
@@ -868,6 +1294,17 @@ impl ChatPanel {
             while !prompt.is_char_boundary(end) { end -= 1; }
             prompt[..end].to_string()
         } else { prompt };
+        // Keep continuity: capture prior conversation turns (excluding the
+        // newly initiated prompt, which is appended to the payload below).
+        let history: Vec<(String, String)> = self
+            .messages
+            .iter()
+            .rev()
+            .take(self.history_depth.max(1))
+            .rev()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+
         let user_msg = ChatMessage {
             role: "user".to_string(),
             content: prompt.clone(),
@@ -878,16 +1315,6 @@ impl ChatPanel {
         let model_name = model_name.clone();
         let client = client.clone();
         let tx = tx.clone();
-
-        // Keep continuity: resend recent turns so the model sees persona +
-        // memory (in role_prompt) AND the conversation so far.
-        let history: Vec<(String, String)> = self
-            .messages
-            .iter()
-            .rev()
-            .take(self.history_depth.max(1))
-            .rev()
-            .map(|m| (m.role.clone(), m.content.clone())).collect();
         self.is_streaming = true;
         self.stream_buf.clear();
         self.stream_seq = self.stream_seq.saturating_add(1);
@@ -896,6 +1323,7 @@ impl ChatPanel {
 
         let role_prompt = role_prompt.to_string();
         let tx_handle = tx.clone();
+        let num_threads = self.num_threads;
         let h = rt.spawn(async move {
             let mut messages = Vec::new();
             if !role_prompt.trim().is_empty() {
@@ -914,12 +1342,13 @@ impl ChatPanel {
                 role: "user".to_string(),
                 content: prompt,
             });
+            let threads_opt = if num_threads > 0 { Some(num_threads) } else { None };
             let req = ChatRequest {
                 model: model_name,
                 messages,
                 stream: true,
-                options: Some(ChatOptions::lowram()),
-                keep_alive: Some("10m".to_string()),
+                options: Some(ChatOptions::lowram_with_threads(threads_opt)),
+                keep_alive: Some("30m".to_string()),
             };
 
             let result = client
@@ -943,6 +1372,8 @@ impl ChatPanel {
     pub fn handle_response(&mut self, response: Result<ChatResponse>) -> (bool, f32, usize) {
         self.is_streaming = false;
         self.stream_buf.clear();
+        self.cached_stream_segs.clear();
+        self.stream_dirty = false;
         let elapsed = self
             .send_started
             .map(|t| t.elapsed().as_secs_f32())
@@ -953,10 +1384,11 @@ impl ChatPanel {
                 self.last_reply_secs = Some(elapsed);
                 self.reply_secs_total += elapsed;
                 self.reply_count += 1;
-                let n = resp.message.content.len();
+                let clean = sanitize_text(&resp.message.content);
+                let n = clean.len();
                 let msg = ChatMessage {
                     role: "assistant".to_string(),
-                    content: Self::cap_content(&resp.message.content),
+                    content: Self::cap_content(&clean),
                     timestamp: chrono::Utc::now(),
                 };
                 self.push_capped(msg);
@@ -965,7 +1397,7 @@ impl ChatPanel {
             Err(e) => {
                 // No prefix: OllamaError already describes itself
                 // ("API error: ...", "Request failed: ...").
-                let em = format!("{e}");
+                let em = sanitize_text(&format!("{e}"));
                 let msg = ChatMessage {
                     role: "system".to_string(),
                     content: Self::cap_content(&em),
@@ -1042,35 +1474,6 @@ mod panel_tests {
     }
 
     #[test]
-    fn block_cache_parses_once_per_edit() {
-        use crate::storage::ChatMessage;
-        let mut p = ChatPanel::new();
-        for n in 0..3 {
-            p.messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: format!("text\n```py\ncode{n}\n```\n"),
-                timestamp: chrono::Utc::now(),
-            });
-        }
-        p.revision = p.revision.saturating_add(1);
-        let b0 = p.cached_blocks(1);
-        assert_eq!(b0.len(), 1);
-        assert_eq!(b0[0].1, "code1");
-        // Second call hits the cache: same result, revision synced.
-        assert_eq!(p.cached_blocks(1), b0);
-        assert_eq!(p.block_cache_rev.get(), p.revision);
-        // New edit invalidates: fresh content appears after one rebuild.
-        p.messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: "plain".to_string(),
-            timestamp: chrono::Utc::now(),
-        });
-        p.revision = p.revision.saturating_add(1);
-        assert!(p.cached_blocks(3).is_empty());
-        assert_eq!(p.cached_blocks(0)[0].1, "code0");
-    }
-
-    #[test]
     fn last_prompt_picks_newest_user() {
         let mut p = ChatPanel::new();
         assert!(p.last_user_prompt().is_none());
@@ -1083,4 +1486,115 @@ mod panel_tests {
         }
         assert_eq!(p.last_user_prompt().as_deref(), Some("second"));
     }
+
+    #[test]
+    fn history_continuity_excludes_new_user_prompt() {
+        let mut p = ChatPanel::new();
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "turn 1".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        p.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: "reply 1".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        let history: Vec<(String, String)> = p
+            .messages
+            .iter()
+            .rev()
+            .take(p.history_depth.max(1))
+            .rev()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].1, "turn 1");
+        assert_eq!(history[1].1, "reply 1");
+    }
+
+    #[test]
+    fn sanitize_text_cleans_ansi_and_replacement_artifacts() {
+        let dirty = "\x1b[31mRed Alert\x1b[0m \u{FFFD}clean\x07text\twith\nnewlines";
+        let clean = sanitize_text(dirty);
+        assert_eq!(clean, "Red Alert cleantext\twith\nnewlines");
+    }
+
+    #[test]
+    fn parse_segments_splits_code_and_text() {
+        let content = "Here is the code:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nEnjoy!";
+        let segs = parse_segments(content);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], MessageSegment::Text("Here is the code:\n".to_string()));
+        assert_eq!(segs[1], MessageSegment::Code {
+            lang: "rust".to_string(),
+            code: "fn main() {\n    println!(\"hello\");\n}".to_string(),
+        });
+        assert_eq!(segs[2], MessageSegment::Text("\nEnjoy!".to_string()));
+    }
+
+    #[test]
+    fn parse_segments_handles_unclosed_streaming_code() {
+        let streaming = "Streaming snippet:\n```python\ndef compute(x):\n    return x * 2";
+        let segs = parse_segments(streaming);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0], MessageSegment::Text("Streaming snippet:\n".to_string()));
+        assert_eq!(segs[1], MessageSegment::Code {
+            lang: "python".to_string(),
+            code: "def compute(x):\n    return x * 2".to_string(),
+        });
+    }
+
+    #[test]
+    fn parse_segments_isolates_think_blocks() {
+        let msg = "<think>\nAnalyzing problem\nStep 1: Check constraints\n</think>\nResult:\n```sh\necho done\n```";
+        let segs = parse_segments(msg);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], MessageSegment::Think("Analyzing problem\nStep 1: Check constraints".to_string()));
+        assert_eq!(segs[1], MessageSegment::Text("\nResult:\n".to_string()));
+        assert_eq!(segs[2], MessageSegment::Code {
+            lang: "sh".to_string(),
+            code: "echo done".to_string(),
+        });
+    }
+
+    #[test]
+    fn test_sanitize_text_cow_zero_alloc() {
+        use std::borrow::Cow;
+        let clean_text = "This is a clean response with newlines\nand tabs\twithout escapes.";
+        let res = sanitize_text_cow(clean_text);
+        assert!(matches!(res, Cow::Borrowed(_)));
+        assert_eq!(res, clean_text);
+
+        let dirty_text = "Hello\x1b[31mRed\x1b[0m world\u{FFFD}!\x07";
+        let res2 = sanitize_text_cow(dirty_text);
+        assert!(matches!(res2, Cow::Owned(_)));
+        assert_eq!(res2, "HelloRed world!");
+    }
+
+    #[test]
+    fn test_take_broadcast_and_clear_chat() {
+        let mut p = ChatPanel::new();
+        p.input = "  broadcast message to all models  ".to_string();
+        let prompt = p.take_broadcast();
+        assert_eq!(prompt.as_deref(), Some("broadcast message to all models"));
+        assert!(p.input.is_empty());
+
+        // When streaming, take_broadcast must return None
+        p.input = "next message".to_string();
+        p.is_streaming = true;
+        assert!(p.take_broadcast().is_none());
+        assert_eq!(p.input, "next message");
+
+        p.is_streaming = false;
+        p.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+        assert_eq!(p.messages.len(), 1);
+        p.clear_chat();
+        assert_eq!(p.messages.len(), 0);
+    }
 }
+

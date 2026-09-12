@@ -1,0 +1,105 @@
+<!-- Copyright 2026 Sean M. Stow. All rights reserved. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0e1a"/>
+      <stop offset="50%" stop-color="#121829"/>
+      <stop offset="100%" stop-color="#1e1638"/>
+    </linearGradient>
+
+    <!-- Glowing Flask Gradient -->
+    <linearGradient id="flaskGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#4facfe"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <!-- Quantum Fluid Gradient -->
+    <linearGradient id="fluidGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38ef7d"/>
+      <stop offset="40%" stop-color="#11998e"/>
+      <stop offset="80%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#9d4edd"/>
+    </linearGradient>
+
+    <!-- Node Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Squircle Rounded Base Background -->
+  <rect x="24" y="24" width="464" height="464" rx="108" fill="url(#bgGrad)" stroke="#2e3856" stroke-width="6"/>
+
+  <!-- Subtle Quantum Grid lines -->
+  <path d="M128 64 L128 448 M256 64 L256 448 M384 64 L384 448 M64 128 L448 128 M64 256 L448 256 M64 384 L448 384" 
+        stroke="#24304f" stroke-width="1.5" stroke-dasharray="6,8" opacity="0.45"/>
+
+  <!-- Flask Body Path (Erlenmeyer / Quantum Flask) -->
+  <!-- Neck: 224 to 288, Y from 110 to 200. Body flares from 200 to base at Y=410, width from 130 to 382 -->
+  <path d="M 216 110 
+           L 296 110 
+           Q 296 120 290 130 
+           L 290 205 
+           L 386 360 
+           Q 406 394 380 416 
+           Q 368 424 350 424 
+           L 162 424 
+           Q 144 424 132 416 
+           Q 106 394 126 360 
+           L 222 205 
+           L 222 130 
+           Q 216 120 216 110 Z" 
+        fill="none" 
+        stroke="url(#flaskGrad)" 
+        stroke-width="14" 
+        stroke-linejoin="round" 
+        stroke-linecap="round"
+        filter="url(#glow)"/>
+
+  <!-- Flask Lip -->
+  <rect x="206" y="98" width="100" height="14" rx="7" fill="url(#flaskGrad)" filter="url(#glow)"/>
+
+  <!-- Liquid inside Flask -->
+  <path d="M 152 355 
+           Q 200 340 256 355 
+           Q 312 370 360 355 
+           L 374 385 
+           Q 384 404 366 414 
+           L 146 414 
+           Q 128 404 138 385 Z" 
+        fill="url(#fluidGrad)" 
+        opacity="0.85"
+        filter="url(#softGlow)"/>
+
+  <!-- Neural Swarm Synapses inside & above the liquid -->
+  <!-- Central Hub -->
+  <circle cx="256" cy="300" r="14" fill="#00f2fe" filter="url(#glow)"/>
+  <!-- Orbiting Nodes -->
+  <circle cx="196" cy="270" r="9" fill="#a855f7" filter="url(#glow)"/>
+  <circle cx="316" cy="265" r="10" fill="#38ef7d" filter="url(#glow)"/>
+  <circle cx="210" cy="360" r="8" fill="#ffffff" filter="url(#glow)"/>
+  <circle cx="300" cy="355" r="9" fill="#00f2fe" filter="url(#glow)"/>
+  <circle cx="256" cy="180" r="11" fill="#f43f5e" filter="url(#glow)"/>
+
+  <!-- Neural Connections -->
+  <line x1="256" y1="300" x2="196" y2="270" stroke="#00f2fe" stroke-width="3" stroke-dasharray="4,3" opacity="0.9"/>
+  <line x1="256" y1="300" x2="316" y2="265" stroke="#a855f7" stroke-width="3" stroke-dasharray="4,3" opacity="0.9"/>
+  <line x1="256" y1="300" x2="210" y2="360" stroke="#38ef7d" stroke-width="3" stroke-dasharray="4,3" opacity="0.9"/>
+  <line x1="256" y1="300" x2="300" y2="355" stroke="#00f2fe" stroke-width="3" stroke-dasharray="4,3" opacity="0.9"/>
+  <line x1="256" y1="300" x2="256" y2="180" stroke="#f43f5e" stroke-width="3.5" opacity="0.85"/>
+  <line x1="196" y1="270" x2="256" y2="180" stroke="#a855f7" stroke-width="2.5" opacity="0.7"/>
+  <line x1="316" y1="265" x2="256" y2="180" stroke="#38ef7d" stroke-width="2.5" opacity="0.7"/>
+
+  <!-- Bubbles rising out of flask -->
+  <circle cx="240" cy="135" r="6" fill="#00f2fe" opacity="0.8" filter="url(#glow)"/>
+  <circle cx="270" cy="100" r="8" fill="#a855f7" opacity="0.8" filter="url(#glow)"/>
+  <circle cx="250" cy="65" r="10" fill="#38ef7d" opacity="0.9" filter="url(#glow)"/>
+</svg>

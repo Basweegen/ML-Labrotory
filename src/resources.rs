@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use std::collections::HashMap;
 
 /// Fraction of total system RAM always reserved for the OS.

@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use anyhow::Result;
 use chrono::Utc;
 use eframe::egui;
@@ -22,7 +23,10 @@ use crate::ui::train::TrainPanel;
 use crate::workspace::{spawn_shell, Workspace};
 use crate::ui::models::ModelsPanel;
 use crate::ui::neural_viz::NeuralVizPanel;
+use crate::ui::relay::RelayPanel;
 use crate::ui::settings::SettingsPanel;
+use crate::ui::skills::SkillsPanel;
+use crate::ui::tools_panel::ToolsPanel;
 
 /// Messages sent from background tasks / panels to the app.
 pub enum AppMessage {
@@ -59,6 +63,35 @@ pub enum AppMessage {
     StopStream(usize),
     StopAll,
     Notice(String),
+    LaunchSwarmTask(String),
+    SkillsCommand(usize, crate::commands::SkillsCommand),
+    ShowAudit(usize),
+    SetThreads(u32),
+    ShowStatus(usize),
+    RunSkill { skill_name: String, target_slot: Option<usize> },
+    ReinforceSkill { skill_id: Uuid, reward_delta: f32 },
+    TerminalRun(String),
+    TerminalFinished(crate::workspace::CommandResult),
+    WorkspaceMkdir(String),
+    WorkspaceTouch(String),
+    WorkspaceRm(String),
+    WorkspaceMv { src: String, dst: String },
+    WorkspaceLs(Option<String>),
+    WorkspaceProject(crate::commands::ProjectCommand),
+    ToolsCommand(usize, crate::commands::ToolsCommand),
+    GuardrailCommand(usize, crate::commands::GuardrailCommand),
+    RunTool { id: String, args: Option<String> },
+    ApplySwarmToChatSlots(Vec<(ModelRole, Option<String>)>),
+    LaunchSwarmPreset {
+        template: crate::ui::relay::SwarmTemplate,
+        prompt: Option<String>,
+    },
+    #[allow(dead_code)]
+    SetGuardrailTier(crate::guardrails::GuardrailTier),
+    #[allow(dead_code)]
+    DeployApp { template: crate::workspace::AppTemplateType, name: String },
+    #[allow(dead_code)]
+    DeployMultiFile(String),
 }
 
 /// Role assigned to a model slot. Prepended as a system prompt to every chat.
@@ -123,9 +156,18 @@ pub fn short_name(s: &str, max_chars: usize) -> String {
     format!("{cut}\u{2026}")
 }
 
-/// Shared identity + memory + slot role, sent as the system prompt.
-fn compose_system_prompt(persona: &str, memory: &str, slot: &ModelSlot) -> String {
+/// Shared identity + memory + slot role + guardrail directive, sent as the system prompt.
+fn compose_system_prompt(
+    persona: &str,
+    memory: &str,
+    slot: &ModelSlot,
+    guardrail_tier: crate::guardrails::GuardrailTier,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
+    let directive = guardrail_tier.system_prompt_directive();
+    if !directive.trim().is_empty() {
+        parts.push(directive.trim().to_string());
+    }
     if !persona.trim().is_empty() {
         parts.push(persona.trim().to_string());
     }
@@ -183,58 +225,137 @@ impl ModelSlot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Tab {
+pub fn apply_luxury_visuals(ctx: &egui::Context, theme: &Theme) {
+    match theme {
+        Theme::Light => {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+        _ => {
+            let mut visuals = egui::Visuals::dark();
+            visuals.dark_mode = true;
+            visuals.panel_fill = egui::Color32::from_rgb(0x0a, 0x0e, 0x17);
+            visuals.window_fill = egui::Color32::from_rgb(0x0e, 0x14, 0x22);
+            visuals.extreme_bg_color = egui::Color32::from_rgb(0x1a, 0x25, 0x3d);
+            visuals.faint_bg_color = egui::Color32::from_rgb(0x13, 0x1a, 0x2b);
+            visuals.code_bg_color = egui::Color32::from_rgb(0x07, 0x0a, 0x12);
+            visuals.override_text_color = Some(egui::Color32::from_rgb(0xf1, 0xf5, 0xf9));
+
+            visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x11, 0x18, 0x27);
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b));
+            visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
+
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x16, 0x1f, 0x33);
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x24, 0x32, 0x4f));
+            visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xe2, 0xe8, 0xf0));
+
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x1f, 0x2c, 0x47);
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x06, 0xb6, 0xd4));
+            visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x28, 0x38, 0x5a);
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(0xf5, 0x9e, 0x0b));
+            visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xf5, 0x9e, 0x0b));
+
+            visuals.widgets.open.bg_fill = egui::Color32::from_rgb(0x13, 0x1a, 0x2b);
+            visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0x06, 0xb6, 0xd4));
+            visuals.widgets.open.corner_radius = egui::CornerRadius::same(6);
+
+            visuals.selection.bg_fill = egui::Color32::from_rgb(0x02, 0x84, 0xc7);
+            visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+
+            ctx.set_visuals(visuals);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tab {
     Chat,
-    Models,
+    Relay,
+    Compare,
     Editor,
     Workspace,
     History,
     Neural,
     Train,
-    Compare,
+    Models,
+    Skills,
+    Tools,
     Settings,
 }
 
 impl Tab {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tab::Chat => "Chat",
-            Tab::Models => "Models",
+            Tab::Relay => "Swarm Relay",
+            Tab::Compare => "Compare",
             Tab::Editor => "Editor",
             Tab::Workspace => "Files",
             Tab::History => "History",
             Tab::Neural => "Neural",
             Tab::Train => "Train",
-            Tab::Compare => "Compare",
+            Tab::Models => "Models",
+            Tab::Skills => "Skills",
+            Tab::Tools => "Tools",
             Tab::Settings => "Settings",
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Tab::Chat => "💬",
-            Tab::Models => "🤖",
+            Tab::Relay => "🧬",
+            Tab::Compare => "⚖",
             Tab::Editor => "📝",
             Tab::Workspace => "🗂",
             Tab::History => "📜",
             Tab::Neural => "🧠",
             Tab::Train => "🎓",
-            Tab::Compare => "⚖",
+            Tab::Models => "🤖",
+            Tab::Skills => "⚡",
+            Tab::Tools => "🛠",
             Tab::Settings => "⚙",
         }
     }
 
-    fn all() -> Vec<Tab> {
+    pub fn from_label(label: &str) -> Option<Tab> {
+        match label.trim() {
+            "Chat" => Some(Tab::Chat),
+            "Swarm Relay" | "Relay" => Some(Tab::Relay),
+            "Compare" => Some(Tab::Compare),
+            "Editor" => Some(Tab::Editor),
+            "Models" => Some(Tab::Models),
+            "History" => Some(Tab::History),
+            "Neural" => Some(Tab::Neural),
+            "Skills" => Some(Tab::Skills),
+            "Tools" => Some(Tab::Tools),
+            "Settings" => Some(Tab::Settings),
+            _ => None,
+        }
+    }
+
+    pub fn is_closable(self) -> bool {
+        !matches!(self, Tab::Chat | Tab::Settings)
+    }
+
+    pub fn all() -> Vec<Tab> {
         vec![
             Tab::Chat,
-            Tab::Models,
+            Tab::Relay,
+            Tab::Compare,
             Tab::Editor,
             Tab::Workspace,
             Tab::History,
             Tab::Neural,
             Tab::Train,
             Tab::Compare,
+            Tab::Models,
+            Tab::Skills,
+            Tab::Tools,
             Tab::Settings,
         ]
     }
@@ -248,7 +369,7 @@ pub struct AiDashboardApp {
     cli_client: Option<OllamaCli>,
     voice: Option<VoiceEngine>,
     inflight: HashMap<usize, tokio::task::JoinHandle<()>>,
-    relay: Option<RelayState>,
+    relay_chain: Option<RelayState>,
     cmd_child: Option<tokio::process::Child>,
     cmd_id: u64,
     last_ollama_url: String,
@@ -264,14 +385,20 @@ pub struct AiDashboardApp {
     retry_count: u32,
     status: String,
     slots: Vec<ModelSlot>,
+    show_model_slots: bool,
+    pub split_chat_view: bool,
+    pub dual_run_mode: bool,
     next_slot_id: usize,
     focused_slot: usize,
     tab: Tab,
     editor: EditorPanel,
+    relay: RelayPanel,
     models_panel: ModelsPanel,
     history: HistoryPanel,
     workspace_panel: WorkspacePanel,
     train_panel: TrainPanel,
+    skills_panel: SkillsPanel,
+    tools_panel: ToolsPanel,
     settings_panel: SettingsPanel,
     settings: AppSettings,
     storage: Option<Storage>,
@@ -290,14 +417,14 @@ pub struct AiDashboardApp {
 
 impl AiDashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        let rt = Runtime::new().expect("tokio runtime");
-        let (tx, rx) = mpsc::channel();
         let storage = Storage::new().ok();
         let settings = storage
             .as_ref()
             .and_then(|s| s.load_settings().ok())
             .unwrap_or_default();
+        apply_luxury_visuals(&cc.egui_ctx, &settings.theme);
+        let rt = Runtime::new().expect("tokio runtime");
+        let (tx, rx) = mpsc::channel();
         let api_client =
             OllamaClient::new(settings.ollama_url.clone(), settings.allow_remote).ok();
         let cli_client = OllamaCli::new().ok();
@@ -311,7 +438,7 @@ impl AiDashboardApp {
             cli_client,
             voice: None,
             inflight: HashMap::new(),
-            relay: None,
+            relay_chain: None,
             cmd_child: None,
             cmd_id: 0,
             last_ollama_url: settings.ollama_url.clone(),
@@ -327,14 +454,20 @@ impl AiDashboardApp {
             retry_count: 0,
             status: "Ready".to_string(),
             slots: Self::restore_slots(&settings),
+            show_model_slots: true,
+            split_chat_view: settings.chat_split_view_default,
+            dual_run_mode: true,
             next_slot_id: settings.slot_layout.len().max(2),
             focused_slot: 0,
-            tab: Tab::Chat,
+            tab: Tab::from_label(&settings.default_tab).unwrap_or(Tab::Chat),
             editor: EditorPanel::new(),
+            relay: RelayPanel::new(),
             models_panel: ModelsPanel::new(),
             history: HistoryPanel::new(),
             workspace_panel: WorkspacePanel::new(),
             train_panel: TrainPanel::new(),
+            skills_panel: SkillsPanel::new(),
+            tools_panel: ToolsPanel::new(),
             settings_panel: SettingsPanel::new(),
             settings,
             storage,
@@ -382,7 +515,8 @@ impl AiDashboardApp {
         self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
-    /// Try to assign a model to a slot. Blocked when it would break the reserve.
+    /// Assign a model to a slot. Ensures model is assigned so local inference
+    /// is never hard-blocked, while providing clear defensive warnings if RAM is constrained.
     fn try_assign_model(&mut self, idx: usize, name: String) {
         if self.slots.get(idx).is_none() {
             return;
@@ -390,40 +524,44 @@ impl AiDashboardApp {
         let known = self.known_sizes();
         let new_size = ResourceGuard::size_for_model(&name, &known);
         let others = self.current_sizes(Some(idx));
-        match ResourceGuard::can_fit(&self.mem, &others, new_size) {
+        let fit_res = ResourceGuard::can_fit(&self.mem, &others, new_size);
+        if let Some(slot) = self.slots.get_mut(idx) {
+            slot.model = Some(name.clone());
+        }
+        match fit_res {
             Ok(()) => {
-                if let Some(slot) = self.slots.get_mut(idx) {
-                    slot.model = Some(name.clone());
-                }
                 self.status = format!("Slot {} now runs {}", idx + 1, name);
                 self.audit("model.assign", format!("slot {} -> {}", idx + 1, name));
-                let sizes = self.current_sizes(None);
-                self.report = ResourceGuard::evaluate(&self.mem, &sizes);
             }
             Err(e) => {
-                self.status = format!("Blocked: {}", e);
+                self.status = format!("Slot {} runs {} (Warning: {})", idx + 1, name, e);
+                self.audit("model.assign_warn", format!("slot {} -> {} ({})", idx + 1, name, e));
             }
         }
+        if let Some(api) = self.api_client.clone() {
+            let warm_name = name;
+            self.rt.spawn(async move {
+                let _ = api.warm_model(&warm_name, Some("30m")).await;
+            });
+        }
+        let sizes = self.current_sizes(None);
+        self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
-    /// Try to add a new empty slot. Blocked when even an average model would
-    /// exceed the budget — the "+" is gated by real headroom, so a weak box
-    /// stays at 1 slot while a big server can grow toward dozens or more.
+    /// Add a new empty slot for multi-model workflows. Capped at 16 slots.
     fn try_add_slot(&mut self) {
-        let sizes = self.current_sizes(None);
-        match ResourceGuard::can_fit(&self.mem, &sizes, ESTIMATED_MODEL_BYTES) {
-            Ok(()) => {
-                let id = self.next_slot_id;
-                self.next_slot_id += 1;
-                self.slots.push(ModelSlot::new(id, ModelRole::General));
-                self.focused_slot = self.slots.len() - 1;
-                self.status = format!("Slot {} added", self.slots.len());
-                self.audit("slot.add", format!("slot {}", self.slots.len()));
-            }
-            Err(e) => {
-                self.status = format!("Cannot add slot: {}", e);
-            }
+        if self.slots.len() >= 16 {
+            self.status = "Maximum slot count (16) reached".to_string();
+            return;
         }
+        let id = self.next_slot_id;
+        self.next_slot_id += 1;
+        self.slots.push(ModelSlot::new(id, ModelRole::General));
+        self.focused_slot = self.slots.len() - 1;
+        self.status = format!("Slot {} added", self.slots.len());
+        self.audit("slot.add", format!("slot {}", self.slots.len()));
+        let sizes = self.current_sizes(None);
+        self.report = ResourceGuard::evaluate(&self.mem, &sizes);
     }
 
     /// Assign the first listed model to every slot that has none.
@@ -554,12 +692,14 @@ impl AiDashboardApp {
         ModelProfileNetwork::new(8, vec![16, 16], 4)
     }
 
-    /// True while anything animates (stream, spinner, pull): deserves a fast tick.
+    /// True while anything animates (stream, spinner, pull, relay, coder): deserves a fast tick.
     fn animating(&self) -> bool {
         self.models_loading
             || self.models_panel.is_busy()
             || self.cmd_child.is_some()
             || self.slots.iter().any(|s| s.chat.is_streaming())
+            || self.relay.is_running
+            || self.editor.coder_is_streaming
     }
 
     /// Drop the trained profiler net and start fresh (weights + loss curve).
@@ -619,9 +759,22 @@ impl AiDashboardApp {
             done: true,
         });
         self.network.update_performance(reward);
+        let domain_idx = match role_idx {
+            1 => 1, // Coder
+            2 => 2, // Researcher
+            3 => 3, // Critic / Cyber
+            4 => 4, // Planner
+            5 => 5, // Writer
+            _ => 0, // General
+        };
+        self.network.swarm_pheromones.deposit(domain_idx, idx, reward);
         if self.network.experience_buffer.len() >= 4 {
             if let Ok(loss) = self.network.train_step() {
                 if loss.is_finite() && loss > 0.0 {
+                    if let Some(ql) = &mut self.network.quantum_layer {
+                        let grad = vec![loss * 0.01; ql.num_qubits];
+                        ql.update_phases(self.network.learning_rate, &grad);
+                    }
                     self.neural_panel.add_training_loss(loss);
                     self.neural_panel.last_loss = Some(loss);
                     let path = Self::network_path().to_string_lossy().to_string();
@@ -684,16 +837,21 @@ impl AiDashboardApp {
 
     /// Persist slot model/role assignments when they change.
     fn sync_slot_layout(&mut self) {
-        let layout: Vec<SlotConfig> = self
-            .slots
-            .iter()
-            .map(|s| SlotConfig {
-                model: s.model.clone(),
-                role: s.role.label(),
-                custom_role: s.custom_role.clone(),
-            })
-            .collect();
-        if layout != self.settings.slot_layout {
+        let changed = self.slots.len() != self.settings.slot_layout.len()
+            || self.slots.iter().zip(self.settings.slot_layout.iter()).any(|(s, cfg)| {
+                s.model != cfg.model || s.role.label() != cfg.role || s.custom_role != cfg.custom_role
+            });
+
+        if changed {
+            let layout: Vec<SlotConfig> = self
+                .slots
+                .iter()
+                .map(|s| SlotConfig {
+                    model: s.model.clone(),
+                    role: s.role.label(),
+                    custom_role: s.custom_role.clone(),
+                })
+                .collect();
             self.settings.slot_layout = layout;
             if let Some(st) = self.storage.as_ref() {
                 let _ = st.save_settings(&self.settings);
@@ -903,7 +1061,7 @@ impl AiDashboardApp {
                 slot.chat.push_system_note(note);
                 false
             } else {
-                let rp = compose_system_prompt(&persona, &memory, slot);
+                let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
                 let model = slot.model.clone();
                 slot.chat.send_prompt(
                     step0, &models, &model, &rp, first, &api, &self.tx, &self.rt,
@@ -913,7 +1071,7 @@ impl AiDashboardApp {
             false
         };
         if sent {
-            self.relay = Some(RelayState {
+            self.relay_chain = Some(RelayState {
                 task: prompt.clone(),
                 order: order.clone(),
                 pos: 0,
@@ -929,9 +1087,9 @@ impl AiDashboardApp {
     /// Advance the chain when the expected slot finishes. Anything else
     /// (wrong slot, failure, full inbox) ends the relay with a reason.
     fn advance_relay(&mut self, finished_idx: usize, ok: bool) {
-        let Some(st) = self.relay.take() else { return };
+        let Some(st) = self.relay_chain.take() else { return };
         if st.order.get(st.pos) != Some(&finished_idx) {
-            self.relay = Some(st);
+            self.relay_chain = Some(st);
             return;
         }
         if !ok {
@@ -974,7 +1132,7 @@ impl AiDashboardApp {
                 self.audit("relay.blocked", "secret guard".to_string());
                 return;
             }
-            let rp = compose_system_prompt(&persona, &memory, slot);
+            let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
             let model = slot.model.clone();
             slot.chat.send_prompt(
                 prompt, &models, &model, &rp, next_idx, &api, &self.tx, &self.rt,
@@ -983,7 +1141,7 @@ impl AiDashboardApp {
             false
         };
         if sent {
-            self.relay = Some(RelayState { task, order: order.clone(), pos: next_pos, prior });
+            self.relay_chain = Some(RelayState { task, order: order.clone(), pos: next_pos, prior });
             self.status = format!(
                 "Relay {}/{}: slot {} working\u{2026}",
                 next_pos + 1,
@@ -1045,7 +1203,7 @@ impl AiDashboardApp {
                 self.audit("synthesize.blocked", "secret guard".to_string());
                 return;
             }
-            let rp = compose_system_prompt(&persona, &memory, slot);
+            let rp = compose_system_prompt(&persona, &memory, slot, self.settings.guardrail_tier);
             let model = slot.model.clone();
             slot.chat.send_prompt(prompt, &models, &model, &rp, f, &api, &self.tx, &self.rt)
         } else {
@@ -1081,7 +1239,7 @@ impl AiDashboardApp {
 
     /// Snapshot of the live relay for the progress strip (pos, order).
     fn relay_status(&self) -> Option<(usize, Vec<usize>)> {
-        self.relay.as_ref().map(|st| (st.pos, st.order.clone()))
+        self.relay_chain.as_ref().map(|st| (st.pos, st.order.clone()))
     }
 
     // ---------- model loading ----------
@@ -1125,6 +1283,95 @@ impl AiDashboardApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMessage::Broadcast(prompt) => {
+                    let trimmed = prompt.trim();
+                    if trimmed.starts_with('/') {
+                        if let Ok(Some(cmd)) = crate::commands::SlashCommand::parse(trimmed) {
+                            match cmd {
+                                crate::commands::SlashCommand::Help => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    if let Some(slot) = self.slots.get_mut(f0) {
+                                        slot.chat.push_system_note(crate::commands::SlashCommand::help_manual());
+                                    }
+                                }
+                                crate::commands::SlashCommand::Clear => {
+                                    for slot in &mut self.slots {
+                                        slot.chat.clear_chat();
+                                        slot.chat.push_system_note("⚡ **Chat cleared from viewport.**");
+                                    }
+                                    self.status = "All active chats cleared".to_string();
+                                }
+                                crate::commands::SlashCommand::New => {
+                                    for slot in &mut self.slots {
+                                        slot.chat.clear_chat();
+                                    }
+                                    self.status = "Fresh session started across all slots".to_string();
+                                }
+                                crate::commands::SlashCommand::Model(name) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::ModelSelected(name.clone()));
+                                }
+                                crate::commands::SlashCommand::Swarm(cmd) => match cmd {
+                                    crate::commands::SwarmCommand::Dispatch(task) => {
+                                        let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                                    }
+                                    crate::commands::SwarmCommand::Preset { template, prompt } => {
+                                        if let Some(tmpl) = crate::ui::relay::SwarmTemplate::from_id(&template) {
+                                            let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmPreset {
+                                                template: tmpl,
+                                                prompt,
+                                            });
+                                        }
+                                    }
+                                    crate::commands::SwarmCommand::ListPresets => {}
+                                }
+                                crate::commands::SlashCommand::Skills(sub) => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::SkillsCommand(f0, sub));
+                                }
+                                crate::commands::SlashCommand::Audit => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::ShowAudit(f0));
+                                }
+                                crate::commands::SlashCommand::Threads(n) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::SetThreads(n));
+                                }
+                                crate::commands::SlashCommand::Status => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::ShowStatus(f0));
+                                }
+                                crate::commands::SlashCommand::Exec(cmd_line) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::TerminalRun(cmd_line));
+                                }
+                                crate::commands::SlashCommand::Mkdir(dir_path) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceMkdir(dir_path));
+                                }
+                                crate::commands::SlashCommand::Touch(file_path) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceTouch(file_path));
+                                }
+                                crate::commands::SlashCommand::Rm(target) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceRm(target));
+                                }
+                                crate::commands::SlashCommand::Mv { src, dst } => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceMv { src, dst });
+                                }
+                                crate::commands::SlashCommand::Ls(path_opt) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceLs(path_opt));
+                                }
+                                crate::commands::SlashCommand::Project(proj) => {
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::WorkspaceProject(proj));
+                                }
+                                crate::commands::SlashCommand::Tools(sub) => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::ToolsCommand(f0, sub));
+                                }
+                                crate::commands::SlashCommand::Guardrail(sub) => {
+                                    let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                                    let _ = self.tx.send(crate::ui::app::AppMessage::GuardrailCommand(f0, sub));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
                     let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
                     if let Some(note) = self
                         .slots
@@ -1148,9 +1395,10 @@ impl AiDashboardApp {
                         let model = self.slots[idx].model.clone();
                         let role_prompt = {
                             let s = &self.slots[idx];
-                            compose_system_prompt(&persona, &memory, s)
+                            compose_system_prompt(&persona, &memory, s, self.settings.guardrail_tier)
                         };
                         if let Some(slot) = self.slots.get_mut(idx) {
+                            slot.chat.num_threads = self.settings.num_threads;
                             if slot.chat.send_prompt(
                                 prompt.clone(),
                                 &models,
@@ -1192,7 +1440,9 @@ impl AiDashboardApp {
                     self.ollama_version = Some(v);
                 }
                 AppMessage::ChatChunk(idx, seq, piece) => {
-                    if let Some(slot) = self.slots.get_mut(idx) {
+                    if idx >= 999000 {
+                        self.relay.push_chunk(idx - 999000, piece);
+                    } else if let Some(slot) = self.slots.get_mut(idx) {
                         slot.chat.push_chunk(seq, &piece);
                     }
                 }
@@ -1298,6 +1548,7 @@ impl AiDashboardApp {
                             self.linked = true;
                             self.status = format!("{} models loaded", m.len());
                             self.models = m;
+                            self.relay.auto_assign_models(&self.models);
                             // First: re-attach models saved in the slot layout
                             // (each vetted by the RAM guard); then auto-fill
                             // any still-empty slots with the smallest models
@@ -1359,6 +1610,7 @@ impl AiDashboardApp {
                 AppMessage::ModelSelected(name) => {
                     let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
                     self.try_assign_model(f, name);
+                    self.tab = Tab::Chat;
                 }
                 AppMessage::ModelPulled(res) => {
                     match res {
@@ -1408,7 +1660,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopStream(idx) => {
-                    if self.relay.take().is_some() {
+                    if self.relay_chain.take().is_some() {
                         self.audit("relay.cancelled", format!("slot {}", idx + 1));
                     }
                     self.abort_slot(idx);
@@ -1501,7 +1753,7 @@ impl AiDashboardApp {
                     }
                 }
                 AppMessage::StopAll => {
-                    if self.relay.take().is_some() {
+                    if self.relay_chain.take().is_some() {
                         self.audit("relay.cancelled", "stop all".to_string());
                     }
                     if let Some(mut c) = self.cmd_child.take() {
@@ -1520,7 +1772,55 @@ impl AiDashboardApp {
                     self.audit("chat.stop_all", "all slots".to_string());
                 }
                 AppMessage::Notice(s) => {
-                    self.status = s;
+                    if let Some(rest) = s.strip_prefix("RELAY_DONE:") {
+                        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                        if parts.len() >= 3 {
+                            let step_idx: usize = parts[0].parse().unwrap_or(0);
+                            let dur: f32 = parts[1].parse().unwrap_or(0.0);
+                            let content = parts[2].to_string();
+                            self.relay.step_completed(step_idx, content, dur);
+                            if let Some(step) = self.relay.steps.get(step_idx) {
+                                let domain_idx = match step.role {
+                                    ModelRole::Planner => 4,
+                                    ModelRole::Coder => 1,
+                                    ModelRole::Critic => 3,
+                                    ModelRole::Researcher => 2,
+                                    ModelRole::Writer => 5,
+                                    _ => 0,
+                                };
+                                let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
+                                self.network.swarm_pheromones.deposit(domain_idx, step_idx.min(7), reward);
+                            }
+                            self.relay.advance_or_finish(&self.api_client, &self.tx, &self.rt, self.settings.num_threads);
+                            self.status = format!("Swarm step {} completed in {:.1}s", step_idx + 1, dur);
+                            self.audit("relay.step_done", format!("step {} ({:.1}s)", step_idx + 1, dur));
+                        }
+                    } else if let Some(rest) = s.strip_prefix("RELAY_FAIL:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        let step_idx: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let err = parts.get(1).unwrap_or(&"Unknown error").to_string();
+                        self.relay.step_failed(step_idx, err.clone());
+                        self.status = format!("Swarm step {} failed: {}", step_idx + 1, err);
+                        self.audit("relay.step_failed", format!("step {}: {}", step_idx + 1, err));
+                    } else if let Some(rest) = s.strip_prefix("CHAT_IMPORT:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        let target_slot: usize = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        let content = parts.get(1).unwrap_or(&"").to_string();
+                        if let Some(slot) = self.slots.get_mut(target_slot) {
+                            slot.chat.push_assistant_message(format!("**[Swarm Relay Consensus Output]**\n\n{}", content));
+                            self.tab = Tab::Chat;
+                            self.focused_slot = target_slot;
+                            self.status = format!("Imported Swarm output into Slot {}", target_slot + 1);
+                            self.audit("relay.import_chat", format!("slot {}", target_slot + 1));
+                        }
+                    } else if let Some(rest) = s.strip_prefix("EDITOR_IMPORT:") {
+                        self.editor.load_imported_code(rest);
+                        self.tab = Tab::Editor;
+                        self.status = "Imported Swarm code into Editor IDE".to_string();
+                        self.audit("relay.import_editor", "editor".to_string());
+                    } else {
+                        self.status = s;
+                    }
                 }
                 AppMessage::Audit(kind, detail) => {
                     self.audit(&kind, detail);
@@ -1650,6 +1950,466 @@ impl AiDashboardApp {
                         self.status = "Voice unavailable — toggle Voice ON first".to_string();
                     }
                 }
+                AppMessage::LaunchSwarmTask(task) => {
+                    self.relay.prompt = task;
+                    self.tab = Tab::Relay;
+                    self.status = "Swarm Relay loaded with task".to_string();
+                }
+                AppMessage::ApplySwarmToChatSlots(roles) => {
+                    if !roles.is_empty() {
+                        self.slots.clear();
+                        for (idx, (role, model)) in roles.into_iter().enumerate() {
+                            let mut slot = ModelSlot::new(idx, role);
+                            slot.model = model;
+                            self.slots.push(slot);
+                        }
+                        self.focused_slot = 0;
+                        self.split_chat_view = self.slots.len() > 1;
+                        self.tab = Tab::Chat;
+                        self.status = format!("Loaded {} swarm roles into Chat slots", self.slots.len());
+                        self.audit("swarm.chat_slots_applied", format!("{} slots", self.slots.len()));
+                    }
+                }
+                AppMessage::LaunchSwarmPreset { template, prompt } => {
+                    self.relay.apply_template(template);
+                    if let Some(p) = prompt {
+                        self.relay.prompt = p;
+                    }
+                    self.tab = Tab::Relay;
+                    self.status = format!("Loaded Swarm preset: {}", template.label());
+                    self.audit("swarm.preset_launched", template.short_id().to_string());
+                }
+                AppMessage::SetThreads(n) => {
+                    self.settings.num_threads = n;
+                    if let Some(st) = self.storage.as_ref() {
+                        let _ = st.save_settings(&self.settings);
+                    }
+                    for slot in &mut self.slots {
+                        slot.chat.num_threads = n;
+                    }
+                    self.status = format!("Inference threads set to {}", n);
+                }
+                AppMessage::ShowAudit(slot_idx) => {
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(entries) = st.load_audit() {
+                            let mut msg = String::from("### 🛡 **Recent Security & Cryptographic Audit Log**\n\n| Timestamp | Event Kind | Detail |\n|---|---|---|\n");
+                            if entries.is_empty() {
+                                msg.push_str("| - | *Clean* | No security incidents or blocked secrets |\n");
+                            } else {
+                                for e in entries.iter().take(15) {
+                                    msg.push_str(&format!("| `{}` | `{}` | {} |\n", e.ts.format("%H:%M:%S"), e.kind, e.detail));
+                                }
+                            }
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                    }
+                }
+                AppMessage::ShowStatus(slot_idx) => {
+                    let mem = crate::resources::system_memory();
+                    let v = self.ollama_version.clone().unwrap_or_else(|| "offline".to_string());
+                    let msg = format!(
+                        "### ⚡ **ML Laboratory System Status**\n\n\
+                         • **Ollama Engine:** `{}`\n\
+                         • **System Memory:** Used `{:.2} GB` / Total `{:.2} GB`\n\
+                         • **Active CPU Inference Threads:** `{}` (optimal: `{}`)\n\
+                         • **Post-Quantum Storage Vault:** `AES-256-GCM (Active)`\n\
+                         • **Active Model Slots:** `{}` slots configured\n",
+                        v,
+                        mem.used_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                        mem.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        self.settings.num_threads,
+                        crate::ollama::api::ChatOptions::optimal_threads(),
+                        self.slots.len()
+                    );
+                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                        slot.chat.push_system_note(msg);
+                    }
+                }
+                AppMessage::SkillsCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::SkillsCommand::List => {
+                            if let Some(st) = self.storage.as_ref() {
+                                if let Ok(skills) = st.load_skills() {
+                                    let mut msg = String::from("### ⚡ **Autonomous Skills Registry**\n\n");
+                                    for s in skills {
+                                        let domain_name = match s.domain_idx {
+                                            1 => "Coder",
+                                            2 => "Researcher",
+                                            3 => "Cyber/Critic",
+                                            4 => "Planner",
+                                            5 => "Writer",
+                                            _ => "General",
+                                        };
+                                        msg.push_str(&format!("• **`{}`** `[{}]` — Score: `{:.2}` (Runs: {})\n  _{}_\n\n",
+                                            s.name, domain_name, s.reinforcement_score, s.execution_count, s.description));
+                                    }
+                                    msg.push_str("To execute: `/skills run <name>` or visit the **⚡ Skills** tab.");
+                                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&msg);
+                                    }
+                                }
+                            }
+                        }
+                        crate::commands::SkillsCommand::Run(name) => {
+                            if let Some(st) = self.storage.as_ref() {
+                                if let Ok(skills) = st.load_skills() {
+                                    if let Some(skill) = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&name)) {
+                                        let _ = st.reinforce_skill(skill.id, 0.1);
+                                        if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                            slot.chat.append_input(&skill.prompt_template);
+                                            slot.chat.push_system_note(&format!("⚡ **Loaded skill `{}`.** Provide your context or hit Send.", skill.name));
+                                        }
+                                    } else if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&format!("⚠ Skill `{}` not found. Type `/skills list` for registered skills.", name));
+                                    }
+                                }
+                            }
+                        }
+                        crate::commands::SkillsCommand::Add { name, description } => {
+                            if let Some(st) = self.storage.as_ref() {
+                                let skill = crate::storage::Skill {
+                                    id: Uuid::new_v4(),
+                                    name: name.clone(),
+                                    description,
+                                    prompt_template: format!("You are an expert specialist performing {}:", name),
+                                    domain_idx: 0,
+                                    reinforcement_score: 1.0,
+                                    execution_count: 0,
+                                    last_used: None,
+                                    is_built_in: false,
+                                };
+                                if st.save_skill(&skill).is_ok() {
+                                    if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                        slot.chat.push_system_note(&format!("⚡ **Skill `{}` successfully created and encrypted in vault.**", name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                AppMessage::RunSkill { skill_name, target_slot } => {
+                    let target = target_slot.unwrap_or(self.focused_slot).min(self.slots.len().saturating_sub(1));
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(skills) = st.load_skills() {
+                            if let Some(skill) = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&skill_name)) {
+                                let _ = st.reinforce_skill(skill.id, 0.2);
+                                self.tab = Tab::Chat;
+                                self.focused_slot = target;
+                                if let Some(slot) = self.slots.get_mut(target) {
+                                    slot.chat.append_input(&skill.prompt_template);
+                                    slot.chat.push_system_note(&format!("⚡ **Activated autonomous skill `{}`.**", skill.name));
+                                }
+                            }
+                        }
+                    }
+                }
+                AppMessage::ReinforceSkill { skill_id, reward_delta } => {
+                    if let Some(st) = self.storage.as_ref() {
+                        if let Ok(Some(skill)) = st.reinforce_skill(skill_id, reward_delta) {
+                            self.network.swarm_pheromones.deposit(skill.domain_idx, self.focused_slot, reward_delta);
+                            self.status = format!("Skill '{}' reinforced ({:+.2})", skill.name, reward_delta);
+                        }
+                    }
+                }
+                AppMessage::ToolsCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::ToolsCommand::List => {
+                            let mut msg = String::from("### 🛠 **External Tools Registry (BYOT)**\n\n");
+                            for t in &self.tools_panel.registry.tools {
+                                let (sens, _) = match t.sensitivity {
+                                    crate::tools::SensitivityLevel::Low => ("1-Click Run", ()),
+                                    crate::tools::SensitivityLevel::High => ("Confirm Req", ()),
+                                };
+                                msg.push_str(&format!(
+                                    "• **`{}`** `[{}]` `[{}]` Min: `{}`\n  `{} {}`\n  _{}_\n\n",
+                                    t.id,
+                                    t.execution_type.short_badge(),
+                                    sens,
+                                    t.min_guardrail.short_label(),
+                                    t.command,
+                                    t.args_template,
+                                    t.description
+                                ));
+                            }
+                            msg.push_str("To run: `/tools run <id> [args]` or switch to the **🛠 Tools** tab.");
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                        crate::commands::ToolsCommand::Run { id, args } => {
+                            let _ = self.tx.send(AppMessage::RunTool { id, args });
+                        }
+                        crate::commands::ToolsCommand::Add { id, command, args_template, detached, high_sensitivity } => {
+                            let tool = crate::tools::UserTool {
+                                id: id.clone(),
+                                name: id.clone(),
+                                command,
+                                args_template,
+                                execution_type: if detached { crate::tools::ToolExecutionType::Detached } else { crate::tools::ToolExecutionType::TerminalDock },
+                                sensitivity: if high_sensitivity { crate::tools::SensitivityLevel::High } else { crate::tools::SensitivityLevel::Low },
+                                min_guardrail: crate::guardrails::GuardrailTier::Heavy,
+                                description: "User established tool".to_string(),
+                            };
+                            self.tools_panel.registry.add_or_update(tool);
+                            self.tools_panel.save(&self.storage);
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&format!("🛠 **Tool `{}` registered and encrypted into vault.**", id));
+                            }
+                        }
+                        crate::commands::ToolsCommand::Rm(id) => {
+                            if self.tools_panel.registry.remove(&id) {
+                                self.tools_panel.save(&self.storage);
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(&format!("🛠 **Tool `{}` removed from registry.**", id));
+                                }
+                            } else if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&format!("⚠ Tool `{}` not found in registry.", id));
+                            }
+                        }
+                    }
+                }
+                AppMessage::GuardrailCommand(slot_idx, sub) => {
+                    match sub {
+                        crate::commands::GuardrailCommand::Status => {
+                            let msg = format!(
+                                "### 🛡 **Active Safety Guardrails**\n\n\
+                                 • **Tier:** `{}`\n\
+                                 • **Description:** {}\n\
+                                 • **Unrestricted Waiver Accepted:** `{}`\n\n\
+                                 Use `/guardrail [heavy | medium | none]` or the **🛠 Tools** tab to modify.",
+                                self.settings.guardrail_tier.label(),
+                                self.settings.guardrail_tier.description(),
+                                if self.settings.unrestricted_waiver_accepted { "YES" } else { "NO" }
+                            );
+                            if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                slot.chat.push_system_note(&msg);
+                            }
+                        }
+                        crate::commands::GuardrailCommand::Set(tier) => {
+                            if tier == crate::guardrails::GuardrailTier::None && !self.settings.unrestricted_waiver_accepted {
+                                self.tab = Tab::Tools;
+                                self.tools_panel.show_waiver_modal = true;
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(
+                                        "⚠ **Unrestricted Guardrails require typed waiver acceptance.**\n\
+                                         Opening legal authorization modal in the **🛠 Tools** tab."
+                                    );
+                                }
+                            } else {
+                                self.settings.guardrail_tier = tier;
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.save_settings(&self.settings);
+                                }
+                                if let Some(slot) = self.slots.get_mut(slot_idx) {
+                                    slot.chat.push_system_note(&format!("🛡 **Safety guardrail tier set to `{}`.**", tier.label()));
+                                }
+                                self.status = format!("Guardrails set to {}", tier.short_label());
+                            }
+                        }
+                    }
+                }
+                AppMessage::RunTool { id, args } => {
+                    let tool_opt = self.tools_panel.registry.get(&id).cloned();
+                    let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    if let Some(tool) = tool_opt {
+                        let ws_root = self.editor.workspace.root_path.to_str();
+                        let active_file = if self.editor.file_path.is_empty() { None } else { Some(self.editor.file_path.as_str()) };
+                        let cmd_line = tool.format_command_line(active_file, ws_root, args.as_deref());
+
+                        // Validate against active guardrails
+                        let ws_path = Some(self.editor.workspace.root_path.as_path());
+                        if let Err(violation) = self.settings.guardrail_tier.validate_command(&cmd_line, ws_path) {
+                            if let Some(slot) = self.slots.get_mut(f) {
+                                slot.chat.push_system_note(&format!("❌ **Guardrail Block:**\n{}", violation));
+                            }
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("guardrail.blocked", &format!("tool {}: {}", id, violation));
+                            }
+                            self.status = "Command blocked by active guardrail tier".to_string();
+                        } else {
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("tool.exec", &format!("{}: {}", id, cmd_line));
+                            }
+                            match tool.execution_type {
+                                crate::tools::ToolExecutionType::Detached => {
+                                    match self.tools_panel.registry.spawn_detached(&id, active_file, ws_root, args.as_deref()) {
+                                        Ok(pid) => {
+                                            if let Some(slot) = self.slots.get_mut(f) {
+                                                slot.chat.push_system_note(&format!("🛠 **Spawned `{}`** (PID: `{}`) in detached process.", tool.name, pid));
+                                            }
+                                            self.status = format!("Tool '{}' spawned (PID: {})", tool.name, pid);
+                                        }
+                                        Err(e) => {
+                                            if let Some(slot) = self.slots.get_mut(f) {
+                                                slot.chat.push_system_note(&format!("❌ **Tool Error:** {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                                crate::tools::ToolExecutionType::TerminalDock => {
+                                    if let Some(slot) = self.slots.get_mut(f) {
+                                        slot.chat.push_system_note(&format!("🛠 **Dispatched `{}` to Terminal Dock:**\n`{}`", tool.name, cmd_line));
+                                    }
+                                    let _ = self.tx.send(AppMessage::TerminalRun(cmd_line));
+                                }
+                            }
+                        }
+                    } else if let Some(slot) = self.slots.get_mut(f) {
+                        slot.chat.push_system_note(&format!("⚠ Tool `{}` not found in registry. Type `/tools list` to check registered tools.", id));
+                    }
+                }
+                AppMessage::SetGuardrailTier(tier) => {
+                    self.settings.guardrail_tier = tier;
+                    if let Some(st) = self.storage.as_ref() {
+                        let _ = st.save_settings(&self.settings);
+                    }
+                }
+                AppMessage::TerminalRun(cmd_line) => {
+                    self.editor.run_terminal_command(&cmd_line, &self.tx, &self.rt);
+                    self.tab = Tab::Editor;
+                }
+                AppMessage::TerminalFinished(result) => {
+                    if let Some(st) = self.storage.as_ref() {
+                        let status_str = if result.success { "success" } else { "failed" };
+                        let _ = st.log_audit("terminal.exec", &format!("{}: {}", status_str, result.cmd));
+                    }
+                    self.editor.on_terminal_finished(result);
+                }
+                AppMessage::WorkspaceMkdir(dir_path) => {
+                    match self.editor.workspace.create_dir(std::path::Path::new(&dir_path)) {
+                        Ok(p) => {
+                            self.status = format!("Created folder: {}", p.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.mkdir", &p.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Failed to create folder: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceTouch(file_path) => {
+                    match self.editor.workspace.create_file(std::path::Path::new(&file_path), "") {
+                        Ok(p) => {
+                            self.status = format!("Created file: {}", p.display());
+                            self.editor.load_file_from_path(&p);
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.touch", &p.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Failed to create file: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceRm(target) => {
+                    match self.editor.workspace.delete_entry(std::path::Path::new(&target)) {
+                        Ok(()) => {
+                            self.status = format!("Deleted: {}", target);
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.rm", &target);
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Delete failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceMv { src, dst } => {
+                    match self.editor.workspace.move_entry(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+                        Ok(d) => {
+                            self.status = format!("Moved {} -> {}", src, d.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("workspace.mv", &format!("{} -> {}", src, dst));
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Move failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::WorkspaceLs(path_opt) => {
+                    let p = path_opt.unwrap_or_else(|| self.editor.workspace.root_path.display().to_string());
+                    self.status = format!("Listed contents of {}", p);
+                    let _ = self.editor.workspace.refresh_tree();
+                }
+                AppMessage::WorkspaceProject(proj) => match proj {
+                    crate::commands::ProjectCommand::Scaffold { template, name } => {
+                        let tmpl = match template.to_lowercase().as_str() {
+                            "python" | "py" | "swarm" => crate::workspace::AppTemplateType::PythonAiSwarm,
+                            "web" | "js" | "html" => crate::workspace::AppTemplateType::ModernWeb,
+                            "cyber" | "quantum" | "vault" => crate::workspace::AppTemplateType::QuantumCyberSecurity,
+                            _ => crate::workspace::AppTemplateType::RustHighPerformance,
+                        };
+                        match self.editor.scaffold_app(tmpl, &name) {
+                            Ok(rep) => {
+                                self.status = format!("Scaffolded {} in {}", rep.app_name, rep.target_dir.display());
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.log_audit("project.scaffold", &format!("{}: {}", rep.app_name, rep.target_dir.display()));
+                                }
+                            }
+                            Err(e) => {
+                                self.status = format!("Scaffold failed: {}", e);
+                            }
+                        }
+                    }
+                    crate::commands::ProjectCommand::Build => {
+                        self.editor.run_build(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Test => {
+                        self.editor.run_test(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Run => {
+                        self.editor.run_start(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Setup => {
+                        self.editor.run_setup(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Verify => {
+                        self.editor.run_verify(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Clean => {
+                        self.editor.run_clean(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::GenerateScripts => {
+                        match self.editor.generate_automation_scripts() {
+                            Ok(n) => {
+                                self.status = format!("Generated {} automation scripts in workspace", n);
+                            }
+                            Err(e) => {
+                                self.status = format!("Script generation failed: {}", e);
+                            }
+                        }
+                    }
+                },
+                AppMessage::DeployApp { template, name } => {
+                    match self.editor.scaffold_app(template, &name) {
+                        Ok(rep) => {
+                            self.status = format!("App deployed to {}", rep.target_dir.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("app.deployed", &rep.target_dir.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("App deployment failed: {}", e);
+                        }
+                    }
+                }
+                AppMessage::DeployMultiFile(text) => {
+                    match self.editor.deploy_multi_file_from_text(&text) {
+                        Ok(rep) => {
+                            self.status = format!("Deployed {} files to {}", rep.created_files.len(), rep.target_dir.display());
+                            if let Some(st) = self.storage.as_ref() {
+                                let _ = st.log_audit("app.multi_file_deployed", &format!("{} files in {}", rep.created_files.len(), rep.target_dir.display()));
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Multi-file deploy failed: {}", e);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1734,6 +2494,25 @@ impl AiDashboardApp {
                         .size(12.0)
                         .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                 );
+                ui.separator();
+                let (gr_r, gr_g, gr_b) = self.settings.guardrail_tier.badge_rgb();
+                let gr_badge = if self.settings.guardrail_tier == crate::guardrails::GuardrailTier::None {
+                    "⚠ [UNRESTRICTED - AUTHORIZED USE ONLY]"
+                } else {
+                    match self.settings.guardrail_tier {
+                        crate::guardrails::GuardrailTier::Heavy => "[🛡 Guardrail: Heavy]",
+                        crate::guardrails::GuardrailTier::Medium => "[🛡 Guardrail: Medium]",
+                        crate::guardrails::GuardrailTier::None => "[⚠ UNRESTRICTED]",
+                    }
+                };
+                if ui.small_button(
+                    egui::RichText::new(gr_badge)
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(gr_r, gr_g, gr_b))
+                ).on_hover_text("Click to configure Safety Guardrails and External Tools in the Tools tab").clicked() {
+                    self.tab = Tab::Tools;
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -1765,7 +2544,28 @@ impl AiDashboardApp {
 
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
+        let mut ordered_tabs = Vec::new();
+        for label in &self.settings.tab_order {
+            if let Some(tab) = Tab::from_label(label) {
+                if !ordered_tabs.contains(&tab) {
+                    ordered_tabs.push(tab);
+                }
+            }
+        }
         for tab in Tab::all() {
+            if !ordered_tabs.contains(&tab) {
+                ordered_tabs.push(tab);
+            }
+        }
+
+        for tab in ordered_tabs {
+            // Visibility check: Chat and Settings are permanently visible anchors
+            let is_visible = !tab.is_closable()
+                || self.settings.visible_tabs.iter().any(|v| v == tab.label() || (v == "Relay" && tab == Tab::Relay));
+            if !is_visible {
+                continue;
+            }
+
             let selected = self.tab == tab;
             let resp = ui.selectable_label(
                 selected,
@@ -1937,11 +2737,25 @@ impl AiDashboardApp {
                     None => "Export failed: bad export name.".to_string(),
                 };
             }
+            ui.add_space(8.0);
+            let toggle_label = if self.show_model_slots {
+                "⊟ Collapse Slots"
+            } else {
+                "⊞ Multi-Model Slots"
+            };
+            if ui
+                .small_button(toggle_label)
+                .on_hover_text("Toggle the multi-model slot bar (hide to maximize chat area, show to adjust slots)")
+                .clicked()
+            {
+                self.show_model_slots = !self.show_model_slots;
+            }
         });
         ui.add_space(4.0);
-        egui::ScrollArea::horizontal()
-            .id_salt("slot_cards")
-            .show(ui, |ui| {
+        if self.show_model_slots {
+            egui::ScrollArea::horizontal()
+                .id_salt("slot_cards")
+                .show(ui, |ui| {
             ui.horizontal(|ui| {
             for (i, (id, model, role, custom)) in snapshot.iter().enumerate() {
                 let is_focused = i == self.focused_slot;
@@ -2160,6 +2974,7 @@ impl AiDashboardApp {
                 });
             });
         });
+        }
 
         // Apply pending actions.
         if let Some((i, name)) = pending_assign {
@@ -2205,134 +3020,433 @@ impl AiDashboardApp {
         ui.separator();
         ui.add_space(8.0);
 
-        // Focused slot chat. One shared identity for every model:
-        // persona (who I am) + memory (what I remember) + slot role (job).
-        let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
-        let role_prompt = compose_system_prompt(
-            &self.settings.persona,
-            &self.settings.memory,
-            &self.slots[f],
-        );
-        let slot_model = self.slots[f].model.clone();
-        let history_depth = self.settings.history_depth.max(1) as usize;
-        let slot_role = self.slots[f].role.label();
-        let (face_mood, face_hint): (crate::ui::avatar::FaceMood, String) = {
-            let c = &self.slots[f].chat;
-            let now = chrono::Utc::now();
-            let last = c.messages().last();
-            let since_last = last.map(|m| (now - m.timestamp).num_seconds());
-            let since_asst = last
-                .filter(|m| m.role == "assistant")
-                .map(|m| (now - m.timestamp).num_seconds());
-            let streaming = c.is_streaming();
-            let mood = crate::ui::avatar::mood_for(
-                streaming,
-                c.stream_len(),
-                last.map(|m| m.role.as_str()),
-                since_last,
-                since_asst,
-            );
-            let hint = match mood {
-                crate::ui::avatar::FaceMood::Talking => "talking…".to_string(),
-                crate::ui::avatar::FaceMood::Thinking => "thinking…".to_string(),
-                crate::ui::avatar::FaceMood::Happy => "happy!".to_string(),
-                crate::ui::avatar::FaceMood::Sad => "uh oh…".to_string(),
-                crate::ui::avatar::FaceMood::Sleepy => "zzz…".to_string(),
-                crate::ui::avatar::FaceMood::Idle => "idle".to_string(),
-            };
-            (mood, hint)
-        };
-        // Live overrides: poke > voice > relay > chat mood (streaming chat
-        // mood always wins while tokens flow).
-        let now_i = Instant::now();
-        let poked = self
-            .face_poke_at
-            .map(|t| now_i.duration_since(t).as_secs_f32() < 2.5)
-            .unwrap_or(false);
-        let listening = self
-            .listening_until
-            .map(|u| now_i < u)
-            .unwrap_or(false);
-        let speaking = self
-            .speaking_until
-            .map(|u| now_i < u)
-            .unwrap_or(false);
-        let relay = self.relay_status();
-        let (face_mood, face_hint) = if self.slots[f].chat.is_streaming() {
-            match &relay {
-                Some((pos, order)) => (
-                    face_mood,
-                    format!("relay {}/{} · {}", pos + 1, order.len(), face_hint),
-                ),
-                None => (face_mood, face_hint),
-            }
-        } else if poked {
-            (
-                crate::ui::avatar::FaceMood::Happy,
-                "\u{2665} hey!".to_string(),
-            )
-        } else if listening {
-            (
-                crate::ui::avatar::FaceMood::Thinking,
-                "listening…".to_string(),
-            )
-        } else if speaking {
-            (
-                crate::ui::avatar::FaceMood::Talking,
-                "speaking…".to_string(),
-            )
-        } else {
-            match &relay {
-                Some((pos, order)) => (
-                    crate::ui::avatar::FaceMood::Thinking,
-                    format!("relay {}/{}", pos + 1, order.len()),
-                ),
-                None => (face_mood, face_hint),
-            }
-        };
-        ui.horizontal(|ui| {
-            if self.settings.show_avatar {
-                let accent = crate::ui::avatar::accent_for_role(&slot_role);
-                let size = self.settings.avatar_size.clamp(40.0, 80.0);
-                let resp = crate::ui::avatar::show_face(ui, size, face_mood, accent)
-                    .on_hover_text("Click to poke");
-                if resp.clicked() {
-                    self.face_poke_at = Some(Instant::now());
-                }
-            }
-            ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Chatting with {} as {}",
-                    short_name(
-                        &slot_model.clone().unwrap_or("(no model — pick one above)".to_string()),
-                        40,
-                    ),
-                    slot_role,
-                ))
-                .size(14.0)
-                .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
-            );
+        let active_slots: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.model.is_some())
+            .map(|(i, _)| i)
+            .collect();
+
+        if active_slots.len() >= 2 {
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                let active_summary: Vec<String> = active_slots
+                    .iter()
+                    .map(|&idx| {
+                        format!(
+                            "Slot {}: {}",
+                            idx + 1,
+                            self.slots[idx].model.as_deref().unwrap_or("none")
+                        )
+                    })
+                    .collect();
                 ui.label(
-                    egui::RichText::new(face_hint)
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                    egui::RichText::new(format!("⚡ Multi-Model: {}", active_summary.join("  |  ")))
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x00, 0xee, 0xff)),
+                );
+                ui.add_space(8.0);
+                ui.checkbox(&mut self.dual_run_mode, "⚡ Run Both on Enter (Dual Mode)")
+                    .on_hover_text("When enabled, typing a prompt and pressing Enter runs all active models simultaneously.");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    if ui.selectable_label(self.split_chat_view, "⊞ Split View").clicked() {
+                        self.split_chat_view = true;
+                    }
+                    if ui.selectable_label(!self.split_chat_view, "⬚ Single View").clicked() {
+                        self.split_chat_view = false;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+        }
+
+        if active_slots.len() >= 2 && self.split_chat_view {
+            let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+            let input_reserve = 180.0 * ui.ctx().zoom_factor();
+            let list_h = (ui.available_height() - input_reserve).max(100.0);
+            let num_cols = active_slots.len();
+
+            ui.columns(num_cols, |cols| {
+                for (col_idx, &slot_idx) in active_slots.iter().enumerate() {
+                    let col = &mut cols[col_idx];
+                    let is_focused = slot_idx == f;
+                    let slot = &mut self.slots[slot_idx];
+                    let slot_m = slot.model.clone().unwrap_or_default();
+                    let slot_r = slot.role.label();
+
+                    col.horizontal(|ui| {
+                        ui.add_space(2.0);
+                        let title = format!("Slot {} · {} [{}]", slot_idx + 1, slot_m, slot_r);
+                        let text_color = if is_focused {
+                            egui::Color32::from_rgb(0x00, 0xee, 0xff)
+                        } else {
+                            egui::Color32::from_rgb(0xdd, 0xdd, 0xdd)
+                        };
+                        ui.label(egui::RichText::new(title).size(13.0).strong().color(text_color));
+                        if slot.chat.is_streaming() {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("Streaming...").size(11.0).color(egui::Color32::YELLOW));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Clear").on_hover_text("Clear this slot").clicked() {
+                                slot.chat.clear_chat();
+                            }
+                        });
+                    });
+                    col.add_space(2.0);
+                    col.separator();
+                    slot.chat.show_message_list(col, &self.tx, list_h);
+                }
+            });
+
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Unified bottom input dock
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.slots[f].chat.input)
+                    .id_salt("chat_unified_multiline_input")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(if self.dual_run_mode {
+                        "Type message for ALL active models... (Enter to send to both, Shift+Enter for newline)"
+                    } else {
+                        "Type message for focused slot... (Enter to send, Shift+Enter for newline)"
+                    })
+                    .font(egui::TextStyle::Body),
+            );
+
+            let input_text = self.slots[f].chat.input.trim().to_string();
+            let domain_info = if !input_text.is_empty() && input_text.len() >= 6 {
+                Some(crate::neural::classify_prompt_domain(&input_text))
+            } else {
+                None
+            };
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let voice_btn = ui.add(
+                    egui::Button::new(if self.slots[f].chat.voice_enabled() { "Voice ON" } else { "Voice OFF" })
+                        .corner_radius(egui::CornerRadius::same(6)),
+                );
+                if voice_btn.clicked() {
+                    let cur = self.slots[f].chat.voice_enabled();
+                    let _ = self.tx.send(crate::ui::app::AppMessage::VoiceToggled(!cur));
+                }
+                let mic_btn = ui.add(
+                    egui::Button::new("Dictate").corner_radius(egui::CornerRadius::same(6)),
+                );
+                if mic_btn.clicked() {
+                    let _ = self.tx.send(crate::ui::app::AppMessage::VoiceListen(f));
+                }
+                if let Some((domain_idx, domain_name)) = domain_info {
+                    let badge = match domain_idx {
+                        1 => "💻 Coder",
+                        2 => "🔬 Researcher",
+                        3 => "🛡️ Cyber / Critic",
+                        4 => "📋 Planner",
+                        5 => "✍️ Writer",
+                        _ => "🌐 General",
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("🐝 {badge} ({domain_name})"))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x00, 0xee, 0xff)),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let any_streaming = active_slots.iter().any(|&s| self.slots[s].chat.is_streaming());
+                    let can_send = !input_text.is_empty() && !any_streaming && self.api_client.is_some();
+                    let label = if any_streaming {
+                        "Working..."
+                    } else if self.dual_run_mode {
+                        "⚡ Send to Both (Enter)"
+                    } else {
+                        "Send to Focused (Enter)"
+                    };
+                    let fill = if can_send {
+                        egui::Color32::from_rgb(0x00, 0x66, 0xcc)
+                    } else {
+                        egui::Color32::from_rgb(0x1a, 0x3a, 0x66)
+                    };
+                    let send_btn = ui.add_enabled(
+                        can_send,
+                        egui::Button::new(egui::RichText::new(label).size(13.0).color(egui::Color32::WHITE).strong())
+                            .fill(fill)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x44, 0xaa, 0xff)))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .min_size(egui::vec2(150.0, 34.0)),
+                    ).on_hover_text("Send prompt (Enter to send, Shift+Enter for newline)");
+                    if send_btn.clicked() {
+                        if self.dual_run_mode {
+                            if let Some(prompt) = self.slots[f].chat.take_broadcast() {
+                                let _ = self.tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                            }
+                        } else {
+                            let slot_model = self.slots[f].model.clone();
+                            let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f], self.settings.guardrail_tier);
+                            self.slots[f].chat.send_message(&self.models, &slot_model, &role_prompt, f, &self.api_client, &self.tx, &self.rt);
+                        }
+                    }
+
+                    // Individual slot triggers
+                    for &slot_idx in active_slots.iter().rev() {
+                        let btn_lbl = format!("Slot {} Only", slot_idx + 1);
+                        let btn = ui.add_enabled(
+                            can_send,
+                            egui::Button::new(egui::RichText::new(btn_lbl).size(11.0))
+                                .corner_radius(egui::CornerRadius::same(6)),
+                        );
+                        if btn.clicked() {
+                            let prompt = self.slots[f].chat.take_broadcast().unwrap_or_default();
+                            if !prompt.is_empty() {
+                                let slot_model = self.slots[slot_idx].model.clone();
+                                let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[slot_idx], self.settings.guardrail_tier);
+                                self.slots[slot_idx].chat.send_prompt(prompt, &self.models, &slot_model, &role_prompt, slot_idx, &self.api_client, &self.tx, &self.rt);
+                            }
+                        }
+                    }
+
+                    if any_streaming {
+                        ui.add_space(4.0);
+                        let stop_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("Stop All").size(13.0).strong())
+                                .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))
+                                .corner_radius(egui::CornerRadius::same(6)),
+                        );
+                        if stop_btn.clicked() {
+                            let _ = self.tx.send(crate::ui::app::AppMessage::StopAll);
+                        }
+                    }
+                });
+                // Enter sends
+                let send_triggered = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter) && !i.modifiers.shift && !i.modifiers.ctrl
+                }) && response.has_focus()
+                    && !self.slots[f].chat.input.trim().is_empty()
+                    && !active_slots.iter().any(|&s| self.slots[s].chat.is_streaming());
+                if send_triggered {
+                    if self.dual_run_mode {
+                        if let Some(prompt) = self.slots[f].chat.take_broadcast() {
+                            let _ = self.tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                        }
+                    } else {
+                        let slot_model = self.slots[f].model.clone();
+                        let role_prompt = compose_system_prompt(&self.settings.persona, &self.settings.memory, &self.slots[f], self.settings.guardrail_tier);
+                        self.slots[f].chat.send_message(&self.models, &slot_model, &role_prompt, f, &self.api_client, &self.tx, &self.rt);
+                    }
+                }
+                let broadcast_triggered = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl
+                }) && response.has_focus()
+                    && !self.slots[f].chat.input.trim().is_empty()
+                    && !active_slots.iter().any(|&s| self.slots[s].chat.is_streaming());
+                if broadcast_triggered {
+                    if let Some(prompt) = self.slots[f].chat.take_broadcast() {
+                        let _ = self.tx.send(crate::ui::app::AppMessage::Broadcast(prompt));
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "⚡ Split View: {} models active | Ollama: {} | Press Enter to send to all active models concurrently",
+                        active_slots.len(),
+                        if self.api_client.is_some() { "linked" } else { "NOT linked" }
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
                 );
             });
-        });
-        ui.add_space(4.0);
-        if let Some(slot) = self.slots.get_mut(f) {
-            slot.chat.history_depth = history_depth;
-            slot.chat.show(
-                ui,
-                &models,
-                &slot_model,
-                &role_prompt,
-                &self.api_client,
-                f,
-                &self.tx,
-                &self.rt,
+        } else {
+            // Focused slot chat. One shared identity for every model:
+            // persona (who I am) + memory (what I remember) + slot role (job).
+            let f = self.focused_slot.min(self.slots.len().saturating_sub(1));
+            let role_prompt = compose_system_prompt(
+                &self.settings.persona,
+                &self.settings.memory,
+                &self.slots[f],
+                self.settings.guardrail_tier,
             );
+            let slot_model = self.slots[f].model.clone();
+            let history_depth = self.settings.history_depth.max(1) as usize;
+            let slot_role = self.slots[f].role.label();
+            // Stack-chan face: mood from chat state + live overrides
+            // (poke > voice > relay > chat mood; streaming always wins).
+            let (face_mood, face_hint): (crate::ui::avatar::FaceMood, String) = {
+                let c = &self.slots[f].chat;
+                let now = chrono::Utc::now();
+                let last = c.messages().last();
+                let since_last = last.map(|m| (now - m.timestamp).num_seconds());
+                let since_asst = last
+                    .filter(|m| m.role == "assistant")
+                    .map(|m| (now - m.timestamp).num_seconds());
+                let mood = crate::ui::avatar::mood_for(
+                    c.is_streaming(),
+                    c.stream_len(),
+                    last.map(|m| m.role.as_str()),
+                    since_last,
+                    since_asst,
+                );
+                let hint = match mood {
+                    crate::ui::avatar::FaceMood::Talking => "talking…".to_string(),
+                    crate::ui::avatar::FaceMood::Thinking => "thinking…".to_string(),
+                    crate::ui::avatar::FaceMood::Happy => "happy!".to_string(),
+                    crate::ui::avatar::FaceMood::Sad => "uh oh…".to_string(),
+                    crate::ui::avatar::FaceMood::Sleepy => "zzz…".to_string(),
+                    crate::ui::avatar::FaceMood::Idle => "idle".to_string(),
+                };
+                (mood, hint)
+            };
+            let now_i = Instant::now();
+            let poked = self
+                .face_poke_at
+                .map(|t| now_i.duration_since(t).as_secs_f32() < 2.5)
+                .unwrap_or(false);
+            let listening = self.listening_until.map(|u| now_i < u).unwrap_or(false);
+            let speaking = self.speaking_until.map(|u| now_i < u).unwrap_or(false);
+            let relay = self.relay_status();
+            let (face_mood, face_hint) = if self.slots[f].chat.is_streaming() {
+                match &relay {
+                    Some((pos, order)) => (
+                        face_mood,
+                        format!("relay {}/{} \u{00B7} {}", pos + 1, order.len(), face_hint),
+                    ),
+                    None => (face_mood, face_hint),
+                }
+            } else if poked {
+                (crate::ui::avatar::FaceMood::Happy, "\u{2665} hey!".to_string())
+            } else if listening {
+                (crate::ui::avatar::FaceMood::Thinking, "listening…".to_string())
+            } else if speaking {
+                (crate::ui::avatar::FaceMood::Talking, "speaking…".to_string())
+            } else {
+                match &relay {
+                    Some((pos, order)) => (
+                        crate::ui::avatar::FaceMood::Thinking,
+                        format!("relay {}/{}", pos + 1, order.len()),
+                    ),
+                    None => (face_mood, face_hint),
+                }
+            };
+            if self.settings.show_avatar {
+                ui.horizontal(|ui| {
+                    let accent = crate::ui::avatar::accent_for_role(&slot_role);
+                    let size = self.settings.avatar_size.clamp(40.0, 80.0);
+                    let resp = crate::ui::avatar::show_face(ui, size, face_mood, accent)
+                        .on_hover_text("Click to poke");
+                    if resp.clicked() {
+                        self.face_poke_at = Some(Instant::now());
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Chatting with {} as {}",
+                                short_name(
+                                    &slot_model.clone().unwrap_or(
+                                        "(no model \u{2014} pick one above)".to_string()
+                                    ),
+                                    40,
+                                ),
+                                slot_role,
+                            ))
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+                        );
+                        ui.label(
+                            egui::RichText::new(face_hint)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+            }
+            let mut chat_hdr_assign: Option<String> = None;
+            let mut chat_hdr_unassign = false;
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("Slot {} ·", f + 1))
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
+                );
+                let current_txt = slot_model.clone().unwrap_or("(select model)".to_string());
+                egui::ComboBox::from_id_salt(format!("active_chat_hdr_model_{}", f))
+                    .selected_text(current_txt)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(slot_model.is_none(), "(none)").clicked() {
+                            chat_hdr_unassign = true;
+                        }
+                        for m in &models {
+                            let is_sel = slot_model.as_deref() == Some(&m.name);
+                            let lbl = format!("{} ({})", m.name, crate::resources::format_bytes(m.size));
+                            if ui.selectable_label(is_sel, lbl).clicked() {
+                                chat_hdr_assign = Some(m.name.clone());
+                            }
+                        }
+                    });
+                ui.label(
+                    egui::RichText::new("as")
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+                );
+                ui.label(
+                    egui::RichText::new(&slot_role)
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
+                );
+                if !self.show_model_slots {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        if ui
+                            .small_button(format!("⊞ Model Slots ({})", self.slots.len()))
+                            .on_hover_text("Show multi-model slots to add, remove, or configure")
+                            .clicked()
+                        {
+                            self.show_model_slots = true;
+                        }
+                    });
+                }
+            });
+            if let Some(m_name) = chat_hdr_assign {
+                self.try_assign_model(f, m_name);
+            }
+            if chat_hdr_unassign {
+                if let Some(slot) = self.slots.get_mut(f) {
+                    slot.model = None;
+                    self.status = format!("Slot {} cleared", f + 1);
+                }
+            }
+            let slot_model = self.slots[f].model.clone();
+            ui.add_space(4.0);
+            if let Some(slot) = self.slots.get_mut(f) {
+                slot.chat.history_depth = history_depth;
+                slot.chat.num_threads = self.settings.num_threads;
+                let dual_active = self.dual_run_mode && active_slots.len() >= 2;
+                slot.chat.show(
+                    ui,
+                    &models,
+                    &slot_model,
+                    &role_prompt,
+                    &self.api_client,
+                    f,
+                    &self.tx,
+                    &self.rt,
+                    dual_active,
+                );
+            }
         }
     }
 }
@@ -2393,13 +3507,10 @@ impl eframe::App for AiDashboardApp {
             };
             self.status = format!("Slot {} focused", self.focused_slot + 1);
         }
-        // Apply the Settings-tab theme choice (Dark/Light); System falls back to dark.
+        // Apply the Settings-tab theme choice (Dark/Light); System falls back to luxury dark.
         if self.settings.theme != self.last_theme {
             self.last_theme = self.settings.theme.clone();
-            ui.ctx().set_visuals(match self.last_theme {
-                Theme::Dark | Theme::System => egui::Visuals::dark(),
-                Theme::Light => egui::Visuals::light(),
-            });
+            apply_luxury_visuals(ui.ctx(), &self.last_theme);
         }
         self.poll_messages();
 
@@ -2476,6 +3587,16 @@ impl eframe::App for AiDashboardApp {
             }
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Chat => self.show_chat(ui),
+                Tab::Relay => {
+                    self.relay.show(
+                        ui,
+                        &self.models,
+                        &self.api_client,
+                        &self.tx,
+                        &self.rt,
+                        self.settings.num_threads,
+                    );
+                }
                 Tab::Models => {
                     self.models_panel.show(
                         ui,
@@ -2522,6 +3643,7 @@ impl eframe::App for AiDashboardApp {
                         &self.api_client,
                         &self.tx,
                         &self.rt,
+                        self.settings.num_threads,
                     );
                 }
                 Tab::Workspace => {
@@ -2581,7 +3703,19 @@ impl eframe::App for AiDashboardApp {
                         }
                     });
                     ui.add_space(4.0);
-                    self.neural_panel.show(ui, &self.network);
+                    self.neural_panel.show(ui, &mut self.network);
+                }
+                Tab::Skills => {
+                    self.skills_panel.show(ui, &self.storage, &self.tx, self.focused_slot);
+                }
+                Tab::Tools => {
+                    let ws_root = self.editor.workspace.root_path.to_str();
+                    let focused = self.focused_slot.min(self.slots.len().saturating_sub(1));
+                    let mut settings = self.settings.clone();
+                    let storage = self.storage.take();
+                    self.tools_panel.show(ui, &storage, &mut settings, &self.tx, focused, ws_root);
+                    self.storage = storage;
+                    self.settings = settings;
                 }
                 Tab::Compare => {
                     self.show_compare(ui);
@@ -2607,8 +3741,8 @@ impl eframe::App for AiDashboardApp {
         self.sync_slot_layout();
 
         // Keep the meter/spinners live, but don't burn CPU when idle:
-        // fast tick only while something animates.
-        let tick = if self.animating() { 500 } else { 2000 };
+        // 16ms (60 FPS) tick while something animates or streams tokens; 1000ms when idle.
+        let tick = if self.animating() { 16 } else { 1000 };
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(tick));
         let ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = if self.frame_ms <= 0.0 { ms } else { self.frame_ms * 0.9 + ms * 0.1 };

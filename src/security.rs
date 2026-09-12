@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 //! Outbound secrets guard: everything the user (or a pasted blob) sends to a
 //! model is scanned for credential-shaped strings first. Local models don\'t
 //! exfiltrate, but chats persist to disk and get copied around — a leaked key
@@ -69,6 +70,9 @@ fn pattern_hits(text: &str) -> Vec<SecretHit> {
         ("openai_key", "sk-"),
         ("anthropic_key", "sk-ant-"),
         ("xai_key", "xai-"),
+        ("huggingface_token", "hf_"),
+        ("cohere_key", "co-"),
+        ("discord_token", "mfa."),
         ("slack_token", "xoxb-"),
         ("slack_token", "xoxp-"),
         ("slack_token", "xoxa-"),
@@ -80,7 +84,8 @@ fn pattern_hits(text: &str) -> Vec<SecretHit> {
     ];
     // Multi-word needles hit the raw text (case-insensitive): tokenizers
     // split on the space inside "PRIVATE KEY".
-    if text.to_uppercase().contains("PRIVATE KEY") {
+    let raw_upper = text.to_uppercase();
+    if raw_upper.contains("PRIVATE KEY") || raw_upper.contains("BEGIN OPENSSH") || raw_upper.contains("BEGIN RSA") {
         out.push(SecretHit {
             kind: "private_key",
             preview: "\u{2022}\u{2022}\u{2022}\u{2026}\u{2022}\u{2022}\u{2022}".to_string(),
@@ -187,6 +192,8 @@ mod tests {
     fn catches_known_prefixes() {
         assert!(find_secrets("key is AKIAIOSFODNN7EXAMPLE ok").iter().any(|h| h.kind == "aws_access_key"));
         assert!(find_secrets("token ghp_abcdefghijklmnopqrstu1234567890").iter().any(|h| h.kind == "github_token"));
+        assert!(find_secrets("hf_abcdefghijklmnopqrstuvwxyz12345678").iter().any(|h| h.kind == "huggingface_token"));
+        assert!(find_secrets("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl...").iter().any(|h| h.kind == "private_key"));
         assert!(find_secrets("sk-abcdefghijklmnopqrstuvwxyZ0123456789abcd").iter().any(|h| h.kind == "openai_key"));
         assert!(find_secrets("-----BEGIN RSA PRIVATE KEY-----\nMIIE...").iter().any(|h| h.kind == "private_key"));
         assert!(find_secrets("Authorization: Bearer abcdefghijklmnopqrstuvwx").iter().any(|h| h.kind == "bearer_token"));
