@@ -7,3 +7,4 @@ pub mod train;
 pub mod models;
 pub mod neural_viz;
 pub mod settings;
+pub mod avatar;

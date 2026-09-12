@@ -163,6 +163,11 @@ impl ChatPanel {
         self.stream_seq
     }
 
+    /// Live streamed chars (0 while thinking); drives the avatar mouth.
+    pub fn stream_len(&self) -> usize {
+        self.stream_buf.len()
+    }
+
     /// Live token piece from the streaming task. Stale generations (after
     /// Stop / resend) are ignored via the sequence number.
     pub fn push_chunk(&mut self, seq: u64, piece: &str) {

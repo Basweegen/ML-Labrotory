@@ -1951,6 +1951,20 @@ impl AiDashboardApp {
                             .as_ref()
                             .is_some_and(|m| !known.contains_key(m));
                         ui.horizontal(|ui| {
+                            {
+                                let c = &self.slots[i].chat;
+                                let ago = c
+                                    .messages()
+                                    .last()
+                                    .filter(|m| m.role == "assistant")
+                                    .map(|m| (chrono::Utc::now() - m.timestamp).num_seconds());
+                                let mood = crate::ui::avatar::mood_for(
+                                    c.is_streaming(),
+                                    c.stream_len(),
+                                    ago,
+                                );
+                                crate::ui::avatar::show_face(ui, 24.0, mood);
+                            }
                             ui.label(
                                 egui::RichText::new(format!(
                                     "Slot {} · {}",
@@ -2179,7 +2193,25 @@ impl AiDashboardApp {
         let slot_model = self.slots[f].model.clone();
         let history_depth = self.settings.history_depth.max(1) as usize;
         let slot_role = self.slots[f].role.label();
+        let (face_mood, face_hint) = {
+            let c = &self.slots[f].chat;
+            let ago = c
+                .messages()
+                .last()
+                .filter(|m| m.role == "assistant")
+                .map(|m| (chrono::Utc::now() - m.timestamp).num_seconds());
+            let mood = crate::ui::avatar::mood_for(c.is_streaming(), c.stream_len(), ago);
+            let hint = match mood {
+                crate::ui::avatar::FaceMood::Talking => "talking…",
+                crate::ui::avatar::FaceMood::Thinking => "thinking…",
+                crate::ui::avatar::FaceMood::Happy => "happy!",
+                crate::ui::avatar::FaceMood::Idle => "idle",
+            };
+            (mood, hint)
+        };
         ui.horizontal(|ui| {
+            crate::ui::avatar::show_face(ui, 56.0, face_mood);
+            ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(format!(
                     "Chatting with {} as {}",
@@ -2192,6 +2224,12 @@ impl AiDashboardApp {
                 .size(14.0)
                 .color(egui::Color32::from_rgb(0x00, 0xaa, 0xff)),
             );
+                ui.label(
+                    egui::RichText::new(face_hint)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x99, 0x99, 0x99)),
+                );
+            });
         });
         ui.add_space(4.0);
         if let Some(slot) = self.slots.get_mut(f) {
