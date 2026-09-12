@@ -762,6 +762,58 @@
   - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 21 as COMPLETE.
 
+---
+
+## 22. Phase 3 — Autonomous Physical Tool Execution, Compiler Diagnostics Feedback Loop & Stigmergic Verification Engine (2026-09-12)
+- **Lead Architect:** Sean M. Stow (Quantum Computing Programmer & Cyber Security Specialist).
+- **Core Directives & Ecosystem Isolation:**
+  - Explicitly confirmed and documented that external repositories (`dreyvik-cyber-ops`, `SPYDER_AI_CORE`, `Pholos`, `krovyx`, `Helios`, `CEF`) are independent, standalone projects and are **NOT** integrated into ML Lab (`ML-Labrotory`).
+  - Strict zero telemetry, post-quantum encryption at rest, memory safety, loopback Ollama inference only (`127.0.0.1:11434`), strict POSIX permissions (`0o700`/`0o600`).
+- **Architecture & Technical Implementations:**
+  1. **Synchronous Tool Execution Engine with Sandbox Sandboxing (`src/tools.rs`):**
+     - Added `ToolExecutionResult` struct (`tool_id`, `command_line`, `exit_code`, `stdout`, `stderr`, `success`).
+     - Added built-in compiler and test suite tools: `cargo-check` (`cargo check --message-format=short`) and `cargo-test` (`cargo test`).
+     - Implemented `ToolRegistry::execute_sync`: validates command against `GuardrailTier` prior to execution, captures exit code, stdout, and stderr with safe Unicode 32KB truncation.
+     - Added unit test `test_tool_execute_sync_success_and_guardrail_block`.
+  2. **Swarm DAG Task Node Tool Binding (`src/swarm/dag.rs`):**
+     - Extended `SwarmTaskNode` with `tool_id: Option<String>`, `auto_exec_tool: bool`, and `tool_output: Option<String>`.
+     - Added builder helper `with_tool(id, auto_exec)`.
+     - Presets enriched with default physical tool verification:
+       - `CyberSocGrid` Forensics node bound to `hexdump`.
+       - `FullStackForge` QA node bound to `cargo-check`.
+     - Engine clears `tool_output` on DAG reset.
+     - Added unit test `test_node_tool_binding_and_reset`.
+  3. **Interactive UI & Real-Time Diagnostics Panel (`src/ui/relay.rs`):**
+     - Updated `RelayPanel::show`, `show_dag_mode`, and `show_dag_node_card` signatures to accept `tool_registry: &ToolRegistry`.
+     - Rendered Tool Binding ComboBox (allowing binding any tool from registry or `None`), `Auto-run on completion` checkbox, and manual `[▶ Run Tool]` button.
+     - Implemented collapsible syntax-highlighted diagnostics panel displaying full command line, exit code status badge, stdout, and stderr.
+  4. **Autonomous Compiler / Tool Feedback Loop into Self-Healing Engine (`src/ui/relay.rs`, `src/ui/app.rs`):**
+     - Implemented `RelayPanel::execute_node_tool`: runs bound tool, deposits `BlackboardArtifact` into Stigmergic Blackboard with elevated pheromone weight ($\tau = 2.5$) for verified passes and $\tau = 0.8$ for failures.
+     - In `src/ui/app.rs` `DAG_DONE:`: if `auto_exec_tool` is active, executes tool automatically. If tool exits non-zero (e.g. rustc syntax error or test failure), captures exact compiler diagnostics from stderr and feeds them into `relay.dag_node_failed`.
+     - Node automatically retries via the Phase 2 self-healing engine with exact compiler line numbers and diagnostics attached to `node.last_error`, enabling autonomous code correction.
+     - Added `DAG_RUN_TOOL:{node_id}` notification handler for manual execution.
+  5. **Automated Verification:**
+     - 112 unit and integration tests passing (`cargo test --bin ai-dashboard`).
+     - Added dedicated tests:
+       - `test_tool_execute_sync_success_and_guardrail_block`
+       - `test_node_tool_binding_and_reset`
+       - `test_execute_node_tool_and_blackboard_ingest`
+       - `test_execute_node_tool_failure_feedback_loop`
+- **Tasks & Status:**
+  - [x] [COMPLETE] Add `ToolExecutionResult` and `execute_sync` with guardrail validation to `ToolRegistry` in `src/tools.rs`.
+  - [x] [COMPLETE] Add `cargo-check` and `cargo-test` default presets in `src/tools.rs`.
+  - [x] [COMPLETE] Add `tool_id`, `auto_exec_tool`, `tool_output`, and `with_tool` to `SwarmTaskNode` in `src/swarm/dag.rs`.
+  - [x] [COMPLETE] Add tool bindings to `CyberSocGrid` and `FullStackForge` presets.
+  - [x] [COMPLETE] Implement `RelayPanel::execute_node_tool` with blackboard deposit ($\tau = 2.5$) in `src/ui/relay.rs`.
+  - [x] [COMPLETE] Update `RelayPanel::show` signatures to accept `tool_registry`.
+  - [x] [COMPLETE] Add tool selector, auto-run checkbox, run button, and diagnostics panel in `show_dag_node_card`.
+  - [x] [COMPLETE] Wire auto-run tool execution and compiler diagnostic failure retries in `DAG_DONE:` in `src/ui/app.rs`.
+  - [x] [COMPLETE] Wire manual `DAG_RUN_TOOL:` message handler in `src/ui/app.rs`.
+  - [x] [COMPLETE] Pass all 112 automated unit and integration tests (`cargo test --bin ai-dashboard`).
+  - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Phase 3 as COMPLETE.
+
+
 
 
 

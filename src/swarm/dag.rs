@@ -75,6 +75,9 @@ pub struct SwarmTaskNode {
     pub max_retries: u32,
     pub fallback_model: Option<String>,
     pub last_error: Option<String>,
+    pub tool_id: Option<String>,
+    pub auto_exec_tool: bool,
+    pub tool_output: Option<String>,
 }
 
 impl SwarmTaskNode {
@@ -103,6 +106,9 @@ impl SwarmTaskNode {
             max_retries: 2,
             fallback_model: None,
             last_error: None,
+            tool_id: None,
+            auto_exec_tool: false,
+            tool_output: None,
         }
     }
 
@@ -113,6 +119,12 @@ impl SwarmTaskNode {
 
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    pub fn with_tool(mut self, tool_id: impl Into<String>, auto_exec: bool) -> Self {
+        self.tool_id = Some(tool_id.into());
+        self.auto_exec_tool = auto_exec;
         self
     }
 }
@@ -474,6 +486,7 @@ impl SwarmDag {
             n.collapsed = false;
             n.retries = 0;
             n.last_error = None;
+            n.tool_output = None;
         }
     }
 
@@ -651,7 +664,7 @@ impl SwarmDag {
                         "Deep dive into network pcap patterns, memory dump anomalies, and protocol dissection for lateral movement.",
                         vec![0],
                         "forensics",
-                    ).with_tags(vec!["pcap".into(), "memory".into()]),
+                    ).with_tags(vec!["pcap".into(), "memory".into()]).with_tool("hexdump", false),
                     SwarmTaskNode::new(
                         2,
                         "Threat Hunter & ATT&CK Matrix Specialist",
@@ -774,7 +787,7 @@ impl SwarmDag {
                         "Generate regression test suites, verify API contract boundaries, and audit for edge case vulnerabilities.",
                         vec![3],
                         "audit",
-                    ).with_tags(vec!["tests".into(), "audit".into()]),
+                    ).with_tags(vec!["tests".into(), "audit".into()]).with_tool("cargo-check", false),
                     SwarmTaskNode::new(
                         5,
                         "Master Release Consolidator",
@@ -985,5 +998,39 @@ mod tests {
 
         // Child node 4 is un-skipped back to Pending!
         assert_eq!(dag.find_node(4).unwrap().status, NodeStatus::Pending);
+    }
+
+    #[test]
+    fn test_node_tool_binding_and_reset() {
+        let mut node = SwarmTaskNode::new(
+            10,
+            "Linter Node",
+            crate::ui::app::ModelRole::Coder,
+            "Lint source code",
+            vec![],
+            "qa",
+        ).with_tool("cargo-check", true);
+
+        assert_eq!(node.tool_id.as_deref(), Some("cargo-check"));
+        assert!(node.auto_exec_tool);
+        assert!(node.tool_output.is_none());
+
+        node.tool_output = Some("error[E0308]: mismatched types".to_string());
+        assert!(node.tool_output.is_some());
+
+        // Test presets binding
+        let soc_dag = SwarmDag::new(DagPreset::CyberSocGrid);
+        let forensics_node = soc_dag.find_node(1).expect("Forensics node exists");
+        assert_eq!(forensics_node.tool_id.as_deref(), Some("hexdump"));
+
+        let forge_dag = SwarmDag::new(DagPreset::FullStackForge);
+        let qa_node = forge_dag.find_node(4).expect("QA node exists");
+        assert_eq!(qa_node.tool_id.as_deref(), Some("cargo-check"));
+
+        // Test dag.reset() clears tool_output
+        let mut test_dag = SwarmDag::new(DagPreset::Diamond);
+        test_dag.find_node_mut(0).unwrap().tool_output = Some("previous tool output".to_string());
+        test_dag.reset();
+        assert!(test_dag.find_node(0).unwrap().tool_output.is_none());
     }
 }

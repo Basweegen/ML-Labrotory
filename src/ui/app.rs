@@ -1384,56 +1384,129 @@ impl AiDashboardApp {
                             let dur: f32 = parts[1].parse().unwrap_or(0.0);
                             let content = parts[2].to_string();
 
-                            // Complete node and deposit artifact into stigmergic blackboard
-                            self.relay.dag_node_completed(node_id, content, dur);
-
-                            // Stigmergic pheromone deposit in quantum / biological swarm grid
-                            if let Some(node) = self.relay.dag.find_node(node_id) {
-                                let domain_idx = match node.role {
-                                    ModelRole::Planner => 4,
-                                    ModelRole::Coder => 1,
-                                    ModelRole::Critic => 3,
-                                    ModelRole::Researcher => 2,
-                                    ModelRole::Writer => 5,
-                                    _ => 0,
-                                };
-                                let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
-                                self.network.swarm_pheromones.deposit(domain_idx, node_id.min(7), reward);
-                            }
-
-                            // Persist DAG and Blackboard encrypted at rest in local Sled vault
-                            if let Some(st) = self.storage.as_ref() {
-                                let _ = st.save_swarm_dag(&self.relay.dag);
-                                let _ = st.save_blackboard(&self.relay.blackboard);
-                            }
-
-                            // Advance DAG execution by dispatching newly ready nodes
-                            self.relay.dispatch_ready_dag_nodes(
-                                &self.api_client,
-                                &self.tx,
-                                &self.rt,
-                                self.settings.num_threads,
-                            );
-
-                            let node_name = self
+                            // Phase 3: Autonomous Physical Tool Execution Check
+                            let (auto_tool, tool_id_opt) = self
                                 .relay
                                 .dag
                                 .find_node(node_id)
-                                .map(|n| n.name.clone())
-                                .unwrap_or_else(|| format!("Node {}", node_id));
+                                .map(|n| (n.auto_exec_tool, n.tool_id.clone()))
+                                .unwrap_or((false, None));
 
-                            if self.relay.dag.is_finished() {
-                                self.status = format!(
-                                    "Swarm DAG '{}' successfully completed all nodes!",
-                                    self.relay.dag.preset.label()
+                            // Populate node output for tool examination
+                            if let Some(node) = self.relay.dag.find_node_mut(node_id) {
+                                node.output = content.clone();
+                            }
+
+                            let mut tool_failed = false;
+                            if auto_tool && tool_id_opt.is_some() {
+                                let ws_root = self.editor.workspace.root_path.to_str();
+                                match self.relay.execute_node_tool(
+                                    node_id,
+                                    &self.tools_panel.registry,
+                                    self.settings.guardrail_tier,
+                                    ws_root,
+                                ) {
+                                    Ok(res) => {
+                                        if !res.success {
+                                            tool_failed = true;
+                                            let err_msg = format!(
+                                                "Physical tool '{}' failed (exit code {}):\nSTDERR:\n{}\nSTDOUT:\n{}",
+                                                res.tool_id,
+                                                res.exit_code,
+                                                if res.stderr.is_empty() { "[empty]" } else { &res.stderr },
+                                                if res.stdout.is_empty() { "[empty]" } else { &res.stdout },
+                                            );
+                                            let will_retry = self.relay.dag_node_failed(node_id, err_msg.clone(), &self.models);
+                                            if let Some(st) = self.storage.as_ref() {
+                                                let _ = st.save_swarm_dag(&self.relay.dag);
+                                                let _ = st.save_blackboard(&self.relay.blackboard);
+                                            }
+                                            if will_retry {
+                                                self.status = format!(
+                                                    "Node #{} tool verification failed (exit {}) -> auto-retrying with compiler diagnostics",
+                                                    node_id, res.exit_code
+                                                );
+                                                self.audit(
+                                                    "swarm.dag_tool_retry",
+                                                    format!("node {} tool {}: exit {}", node_id, res.tool_id, res.exit_code),
+                                                );
+                                                self.relay.dispatch_ready_dag_nodes(
+                                                    &self.api_client,
+                                                    &self.tx,
+                                                    &self.rt,
+                                                    self.settings.num_threads,
+                                                );
+                                            } else {
+                                                self.status = format!(
+                                                    "Node #{} tool verification failed (max retries reached): {}",
+                                                    node_id, res.tool_id
+                                                );
+                                                self.audit(
+                                                    "swarm.dag_tool_failed",
+                                                    format!("node {} tool {}", node_id, res.tool_id),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.status = format!("Tool execution error on node {}: {}", node_id, e);
+                                        self.audit("swarm.dag_tool_error", format!("node {}: {}", node_id, e));
+                                    }
+                                }
+                            }
+
+                            if !tool_failed {
+                                // Complete node and deposit artifact into stigmergic blackboard
+                                self.relay.dag_node_completed(node_id, content, dur);
+
+                                // Stigmergic pheromone deposit in quantum / biological swarm grid
+                                if let Some(node) = self.relay.dag.find_node(node_id) {
+                                    let domain_idx = match node.role {
+                                        ModelRole::Planner => 4,
+                                        ModelRole::Coder => 1,
+                                        ModelRole::Critic => 3,
+                                        ModelRole::Researcher => 2,
+                                        ModelRole::Writer => 5,
+                                        _ => 0,
+                                    };
+                                    let reward = 1.0 + (1.0 - (dur / 120.0).min(1.0)) * 0.5;
+                                    self.network.swarm_pheromones.deposit(domain_idx, node_id.min(7), reward);
+                                }
+
+                                // Persist DAG and Blackboard encrypted at rest in local Sled vault
+                                if let Some(st) = self.storage.as_ref() {
+                                    let _ = st.save_swarm_dag(&self.relay.dag);
+                                    let _ = st.save_blackboard(&self.relay.blackboard);
+                                }
+
+                                // Advance DAG execution by dispatching newly ready nodes
+                                self.relay.dispatch_ready_dag_nodes(
+                                    &self.api_client,
+                                    &self.tx,
+                                    &self.rt,
+                                    self.settings.num_threads,
                                 );
-                                self.audit(
-                                    "swarm.dag_finished",
-                                    self.relay.dag.preset.label().to_string(),
-                                );
-                            } else {
-                                self.status = format!("Swarm DAG node '{}' completed in {:.1}s", node_name, dur);
-                                self.audit("swarm.dag_node_done", format!("node {} ({:.1}s)", node_id, dur));
+
+                                let node_name = self
+                                    .relay
+                                    .dag
+                                    .find_node(node_id)
+                                    .map(|n| n.name.clone())
+                                    .unwrap_or_else(|| format!("Node {}", node_id));
+
+                                if self.relay.dag.is_finished() {
+                                    self.status = format!(
+                                        "Swarm DAG '{}' successfully completed all nodes!",
+                                        self.relay.dag.preset.label()
+                                    );
+                                    self.audit(
+                                        "swarm.dag_finished",
+                                        self.relay.dag.preset.label().to_string(),
+                                    );
+                                } else {
+                                    self.status = format!("Swarm DAG node '{}' completed in {:.1}s", node_name, dur);
+                                    self.audit("swarm.dag_node_done", format!("node {} ({:.1}s)", node_id, dur));
+                                }
                             }
                         }
                     } else if let Some(rest) = s.strip_prefix("DAG_FAIL:") {
@@ -1473,6 +1546,35 @@ impl AiDashboardApp {
                             );
                             self.status = format!("Manually retrying Swarm DAG node {}", node_id);
                             self.audit("swarm.dag_node_manual_retry", format!("node {}", node_id));
+                        }
+                    } else if let Some(rest) = s.strip_prefix("DAG_RUN_TOOL:") {
+                        if let Ok(node_id) = rest.parse::<usize>() {
+                            let ws_root = self.editor.workspace.root_path.to_str();
+                            match self.relay.execute_node_tool(
+                                node_id,
+                                &self.tools_panel.registry,
+                                self.settings.guardrail_tier,
+                                ws_root,
+                            ) {
+                                Ok(res) => {
+                                    self.status = format!(
+                                        "Tool '{}' executed on node {}: exit code {}",
+                                        res.tool_id, node_id, res.exit_code
+                                    );
+                                    self.audit(
+                                        "swarm.dag_run_tool",
+                                        format!("node {}: {} (exit {})", node_id, res.tool_id, res.exit_code),
+                                    );
+                                    if let Some(st) = self.storage.as_ref() {
+                                        let _ = st.save_swarm_dag(&self.relay.dag);
+                                        let _ = st.save_blackboard(&self.relay.blackboard);
+                                    }
+                                }
+                                Err(err) => {
+                                    self.status = format!("Tool execution failed for node {}: {}", node_id, err);
+                                    self.audit("swarm.dag_run_tool_error", format!("node {}: {}", node_id, err));
+                                }
+                            }
                         }
                     } else {
                         self.status = s;
@@ -3093,6 +3195,7 @@ impl eframe::App for AiDashboardApp {
                         &self.tx,
                         &self.rt,
                         self.settings.num_threads,
+                        &self.tools_panel.registry,
                     );
                 }
                 Tab::Models => {

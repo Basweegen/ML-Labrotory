@@ -100,6 +100,17 @@ impl UserTool {
     }
 }
 
+/// Execution result returned when a tool is executed synchronously.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolExecutionResult {
+    pub tool_id: String,
+    pub command_line: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
 /// Registry managing all established user tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolRegistry {
@@ -161,6 +172,26 @@ impl ToolRegistry {
                     min_guardrail: GuardrailTier::Heavy,
                     description: "Formats Rust or source files according to style guidelines.".to_string(),
                 },
+                UserTool {
+                    id: "cargo-check".to_string(),
+                    name: "Rust Compiler Checker".to_string(),
+                    command: "cargo".to_string(),
+                    args_template: "check --message-format=short".to_string(),
+                    execution_type: ToolExecutionType::TerminalDock,
+                    sensitivity: SensitivityLevel::Low,
+                    min_guardrail: GuardrailTier::Heavy,
+                    description: "Fast syntax, type, and borrow checker for Rust codebases.".to_string(),
+                },
+                UserTool {
+                    id: "cargo-test".to_string(),
+                    name: "Cargo Test Runner".to_string(),
+                    command: "cargo".to_string(),
+                    args_template: "test".to_string(),
+                    execution_type: ToolExecutionType::TerminalDock,
+                    sensitivity: SensitivityLevel::Low,
+                    min_guardrail: GuardrailTier::Heavy,
+                    description: "Executes test suites to verify system invariants and logic.".to_string(),
+                },
             ],
         }
     }
@@ -216,6 +247,75 @@ impl ToolRegistry {
             Ok(child) => Ok(child.id()),
             Err(e) => Err(format!("Failed to spawn detached tool '{}': {}", tool.name, e)),
         }
+    }
+
+    /// Executes a registered tool synchronously, capturing exit status, stdout, and stderr.
+    /// Validates the command line against the active GuardrailTier before spawning.
+    pub fn execute_sync(
+        &self,
+        id: &str,
+        file_path: Option<&str>,
+        workspace_root: Option<&str>,
+        user_input: Option<&str>,
+        guardrail_tier: GuardrailTier,
+    ) -> Result<ToolExecutionResult, String> {
+        let tool = self.get(id).ok_or_else(|| format!("Tool '{}' not found in registry.", id))?;
+        let cmd_line = tool.format_command_line(file_path, workspace_root, user_input);
+
+        // Security: Validate command against active Guardrails sandbox
+        let ws_path = workspace_root.map(std::path::Path::new);
+        if let Err(violation) = guardrail_tier.validate_command(&cmd_line, ws_path) {
+            return Err(format!("Guardrail Block [{}]: {}", guardrail_tier.label(), violation));
+        }
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&cmd_line);
+
+        if let Some(ws) = workspace_root {
+            cmd.current_dir(ws);
+        }
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to execute tool '{}': {}", tool.name, e))?;
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let max_chars = 32_768;
+
+        let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stdout = if raw_stdout.len() > max_chars {
+            let mut cut = max_chars;
+            while cut > 0 && !raw_stdout.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}... [bounded stdout]", &raw_stdout[..cut])
+        } else {
+            raw_stdout
+        };
+
+        let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = if raw_stderr.len() > max_chars {
+            let mut cut = max_chars;
+            while cut > 0 && !raw_stderr.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}... [bounded stderr]", &raw_stderr[..cut])
+        } else {
+            raw_stderr
+        };
+
+        Ok(ToolExecutionResult {
+            tool_id: id.to_string(),
+            command_line: cmd_line,
+            exit_code,
+            stdout,
+            stderr,
+            success: exit_code == 0,
+        })
     }
 }
 
@@ -278,5 +378,48 @@ mod tests {
         assert!(reg.get("code").is_some());
         assert!(reg.get("hexdump").is_some());
         assert!(reg.get("format").is_some());
+        assert!(reg.get("cargo-check").is_some());
+        assert!(reg.get("cargo-test").is_some());
+    }
+
+    #[test]
+    fn test_tool_execute_sync_success_and_guardrail_block() {
+        let mut reg = ToolRegistry::new();
+        let echo_tool = UserTool {
+            id: "echo-test".to_string(),
+            name: "Echo Tester".to_string(),
+            command: "echo".to_string(),
+            args_template: "VERIFICATION_SUCCESS: {input}".to_string(),
+            execution_type: ToolExecutionType::TerminalDock,
+            sensitivity: SensitivityLevel::Low,
+            min_guardrail: GuardrailTier::Heavy,
+            description: "Echoes test input".to_string(),
+        };
+        reg.add_or_update(echo_tool);
+
+        // 1. Successful execution
+        let res = reg
+            .execute_sync("echo-test", None, None, Some("node-0-code"), GuardrailTier::Heavy)
+            .expect("Execution should succeed");
+        assert!(res.success);
+        assert_eq!(res.exit_code, 0);
+        assert!(res.stdout.contains("VERIFICATION_SUCCESS: node-0-code"));
+
+        // 2. Heavy Guardrail blocking destructive command
+        let bad_tool = UserTool {
+            id: "bad-tool".to_string(),
+            name: "Dangerous Tool".to_string(),
+            command: "rm".to_string(),
+            args_template: "-rf /".to_string(),
+            execution_type: ToolExecutionType::TerminalDock,
+            sensitivity: SensitivityLevel::High,
+            min_guardrail: GuardrailTier::None,
+            description: "Dangerous tool".to_string(),
+        };
+        reg.add_or_update(bad_tool);
+
+        let blocked_res = reg.execute_sync("bad-tool", None, None, None, GuardrailTier::Heavy);
+        assert!(blocked_res.is_err());
+        assert!(blocked_res.unwrap_err().contains("Guardrail Block"));
     }
 }

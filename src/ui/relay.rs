@@ -5,8 +5,10 @@
 //! superhuman synthesis by chaining specialized roles.
 
 use eframe::egui;
+use crate::guardrails::GuardrailTier;
 use crate::ollama::api::{ChatOptions, ChatRequest, Message, Model, OllamaClient};
 use crate::security::find_secrets;
+use crate::tools::{ToolExecutionResult, ToolRegistry};
 use crate::ui::app::{AppMessage, ModelRole};
 use crate::swarm::{BlackboardArtifact, DagPreset, NodeStatus, StigmergicBlackboard, SwarmDag};
 use std::collections::HashMap;
@@ -615,6 +617,7 @@ impl RelayPanel {
         tx: &mpsc::Sender<AppMessage>,
         rt: &Runtime,
         num_threads: u32,
+        tool_registry: &ToolRegistry,
     ) {
         // Mode Selector: DAG Swarm vs Sequential Relay
         ui.horizontal(|ui| {
@@ -630,7 +633,7 @@ impl RelayPanel {
         ui.add_space(4.0);
 
         match self.swarm_mode {
-            SwarmMode::Dag => self.show_dag_mode(ui, available_models, api_client, tx, rt, num_threads),
+            SwarmMode::Dag => self.show_dag_mode(ui, available_models, api_client, tx, rt, num_threads, tool_registry),
             SwarmMode::Sequential => self.show_sequential_mode(ui, available_models, api_client, tx, rt, num_threads),
         }
     }
@@ -1138,6 +1141,7 @@ impl RelayPanel {
         tx: &mpsc::Sender<AppMessage>,
         rt: &Runtime,
         num_threads: u32,
+        tool_registry: &ToolRegistry,
     ) {
         // Luxury Obsidian & Cyber Gold Header
         ui.horizontal(|ui| {
@@ -1372,7 +1376,7 @@ impl RelayPanel {
 
                     // Render node cards for this topological level
                     for &node_id in rank_nodes {
-                        self.show_dag_node_card(ui, node_id, available_models, tx);
+                        self.show_dag_node_card(ui, node_id, available_models, tx, tool_registry);
                         ui.add_space(4.0);
                     }
 
@@ -1449,6 +1453,7 @@ impl RelayPanel {
         node_id: usize,
         available_models: &[Model],
         tx: &mpsc::Sender<AppMessage>,
+        tool_registry: &ToolRegistry,
     ) {
         let node_idx = match self.dag.nodes.iter().position(|n| n.id == node_id) {
             Some(idx) => idx,
@@ -1597,10 +1602,88 @@ impl RelayPanel {
                         if let Some(fb) = &fallback_model {
                             ui.label(
                                 egui::RichText::new(format!("(Fallback from: {})", fb))
-                                    .size(10.0)
-                                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
                             );
                         }
+                    });
+                }
+
+                // Phase 3: Tool Binding & Autonomous Verification
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🛠 Tool:").size(11.0).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)));
+
+                    // Tool selection dropdown
+                    let cur_tool_label = self.dag.nodes[node_idx]
+                        .tool_id
+                        .as_deref()
+                        .unwrap_or("None (No Tool)");
+                    egui::ComboBox::from_id_salt(format!("dag_node_tool_{}", node_id))
+                        .selected_text(egui::RichText::new(cur_tool_label).size(11.0))
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            let is_none = self.dag.nodes[node_idx].tool_id.is_none();
+                            if ui.selectable_label(is_none, "None (No Tool)").clicked() {
+                                self.dag.nodes[node_idx].tool_id = None;
+                            }
+                            for tool in &tool_registry.tools {
+                                let is_sel = self.dag.nodes[node_idx].tool_id.as_deref() == Some(&tool.id);
+                                let label = format!("{} ({})", tool.name, tool.id);
+                                if ui.selectable_label(is_sel, label).clicked() {
+                                    self.dag.nodes[node_idx].tool_id = Some(tool.id.clone());
+                                }
+                            }
+                        });
+
+                    // Auto-run checkbox
+                    ui.checkbox(&mut self.dag.nodes[node_idx].auto_exec_tool, egui::RichText::new("Auto-run on completion").size(11.0))
+                        .on_hover_text("Automatically execute tool upon LLM completion to physically verify output");
+
+                    // Manual Run Tool button (available if tool is selected)
+                    if self.dag.nodes[node_idx].tool_id.is_some() {
+                        let run_btn = ui.button(
+                            egui::RichText::new("▶ Run Tool")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                        ).on_hover_text("Manually execute bound tool against current workspace & node output");
+                        if run_btn.clicked() {
+                            let _ = tx.send(AppMessage::Notice(format!("DAG_RUN_TOOL:{node_id}")));
+                        }
+                    }
+                });
+
+                // Collapsible tool diagnostics output
+                let tool_output_opt = self.dag.nodes[node_idx].tool_output.clone();
+                if let Some(tool_out) = tool_output_opt {
+                    ui.add_space(2.0);
+                    let is_success = tool_out.contains("SUCCESS") || tool_out.contains("Exit 0");
+                    let badge_color = if is_success {
+                        egui::Color32::from_rgb(0x10, 0xb9, 0x81)
+                    } else {
+                        egui::Color32::from_rgb(0xf8, 0x71, 0x71)
+                    };
+                    let header_label = if is_success {
+                        "✅ Physical Tool Diagnostics (Passed)"
+                    } else {
+                        "⚠️ Physical Tool Diagnostics (Failed / Warnings)"
+                    };
+
+                    ui.collapsing(egui::RichText::new(header_label).size(11.0).color(badge_color), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("dag_tool_diag_scroll_{}", node_id))
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&tool_out)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(0xe2, 0xe8, 0xf0)),
+                                    )
+                                    .wrap(),
+                                );
+                            });
                     });
                 }
 
@@ -1957,6 +2040,82 @@ impl RelayPanel {
         }
         will_retry
     }
+
+    /// Phase 3: Autonomous Physical Tool Execution & Feedback Loop
+    /// Executes the bound tool on the target node's code/output.
+    /// Captures stdout/stderr diagnostics, logs to node.tool_output,
+    /// deposits a Blackboard verification record, and returns the execution result.
+    pub fn execute_node_tool(
+        &mut self,
+        node_id: usize,
+        registry: &ToolRegistry,
+        guardrail_tier: GuardrailTier,
+        workspace_root: Option<&str>,
+    ) -> Result<ToolExecutionResult, String> {
+        let (node_name, node_role, node_domain, tool_id, output) = {
+            let node = self
+                .dag
+                .find_node(node_id)
+                .ok_or_else(|| format!("Node #{} not found in DAG", node_id))?;
+            let tool_id = node
+                .tool_id
+                .clone()
+                .ok_or_else(|| format!("Node #{} has no bound tool", node_id))?;
+            (
+                node.name.clone(),
+                node.role.clone(),
+                node.domain.clone(),
+                tool_id,
+                node.output.clone(),
+            )
+        };
+
+        // Execute tool synchronously through registry with sandbox security enforcement
+        let res = registry.execute_sync(
+            &tool_id,
+            None,
+            workspace_root,
+            Some(&output),
+            guardrail_tier,
+        )?;
+
+        // Format diagnostic output
+        let status_str = if res.success {
+            "SUCCESS (Exit 0)".to_string()
+        } else {
+            format!("FAILED (Exit Code {})", res.exit_code)
+        };
+
+        let formatted_diag = format!(
+            "🛠 Tool [{}]: {}\n$ {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+            res.tool_id,
+            status_str,
+            res.command_line,
+            if res.stdout.trim().is_empty() { "[empty]" } else { res.stdout.trim() },
+            if res.stderr.trim().is_empty() { "[empty]" } else { res.stderr.trim() },
+        );
+
+        if let Some(node) = self.dag.find_node_mut(node_id) {
+            node.tool_output = Some(formatted_diag.clone());
+        }
+
+        // Deposit verification artifact to Stigmergic Blackboard
+        // Physical compiler/tool verified artifacts receive elevated pheromone (tau = 2.5)
+        let pheromone_score = if res.success { 2.5 } else { 0.8 };
+        let artifact = BlackboardArtifact::new(
+            node_id,
+            node_name,
+            node_role,
+            node_domain,
+            format!("Tool Verification for Node #{} [{}]", node_id, res.tool_id),
+            formatted_diag,
+            pheromone_score,
+            vec!["tool".to_string(), res.tool_id.clone()],
+        );
+        self.blackboard.deposit(artifact);
+
+        Ok(res)
+    }
 }
 
 #[cfg(test)]
@@ -2148,5 +2307,113 @@ mod tests {
         assert_eq!(partition(8, 10), 1);
         // 0 threads configured (auto) -> defaults to optimal and strictly >= 1
         assert!(partition(0, 4) >= 1);
+    }
+
+    #[test]
+    fn test_execute_node_tool_and_blackboard_ingest() {
+        let mut panel = RelayPanel::new();
+        panel.dag.apply_preset(DagPreset::Diamond);
+
+        // Bind echo tool to node 0
+        let mut reg = ToolRegistry::new();
+        let echo_tool = crate::tools::UserTool {
+            id: "echo-check".to_string(),
+            name: "Echo Checker".to_string(),
+            command: "echo".to_string(),
+            args_template: "TEST_VERIFIED: '{input}'".to_string(),
+            execution_type: crate::tools::ToolExecutionType::TerminalDock,
+            sensitivity: crate::tools::SensitivityLevel::Low,
+            min_guardrail: GuardrailTier::Heavy,
+            description: "Echo checker".to_string(),
+        };
+        reg.add_or_update(echo_tool);
+
+        panel.dag.find_node_mut(0).unwrap().tool_id = Some("echo-check".to_string());
+        panel.dag.find_node_mut(0).unwrap().output = "verification_token_123".to_string();
+
+        let res = panel
+            .execute_node_tool(0, &reg, GuardrailTier::Heavy, None)
+            .expect("Tool execution should succeed");
+
+        assert!(res.success);
+        assert_eq!(res.exit_code, 0);
+
+        // Verify diagnostic was saved to node
+        let node = panel.dag.find_node(0).unwrap();
+        assert!(node.tool_output.is_some());
+        let diag = node.tool_output.as_ref().unwrap();
+        assert!(diag.contains("SUCCESS"));
+        assert!(diag.contains("TEST_VERIFIED: 'verification_token_123'"));
+
+        // Verify artifact was deposited to Blackboard with elevated pheromone (2.5)
+        let tool_art = panel
+            .blackboard
+            .artifacts
+            .iter()
+            .find(|a| a.tags.contains(&"echo-check".to_string()));
+        assert!(tool_art.is_some());
+        let art = tool_art.unwrap();
+        assert_eq!(art.pheromone_score, 2.5);
+    }
+
+    #[test]
+    fn test_execute_node_tool_failure_feedback_loop() {
+        let mut panel = RelayPanel::new();
+        panel.dag.apply_preset(DagPreset::Diamond);
+
+        // Bind a tool that will exit non-zero (simulating compiler / linter error)
+        let mut reg = ToolRegistry::new();
+        let fail_tool = crate::tools::UserTool {
+            id: "compiler-fail".to_string(),
+            name: "Failing Compiler".to_string(),
+            command: "sh".to_string(),
+            args_template: "-c 'echo \"error[E0308]: mismatched types at line 42\" >&2; exit 1'".to_string(),
+            execution_type: crate::tools::ToolExecutionType::TerminalDock,
+            sensitivity: crate::tools::SensitivityLevel::Low,
+            min_guardrail: GuardrailTier::Heavy,
+            description: "Simulated compiler failure".to_string(),
+        };
+        reg.add_or_update(fail_tool);
+
+        panel.dag.find_node_mut(0).unwrap().tool_id = Some("compiler-fail".to_string());
+        panel.dag.find_node_mut(0).unwrap().output = "let x: u32 = \"bad string\";".to_string();
+
+        let res = panel
+            .execute_node_tool(0, &reg, GuardrailTier::Heavy, None)
+            .expect("Tool execution itself should return Result Ok containing non-zero exit status");
+
+        assert!(!res.success);
+        assert_eq!(res.exit_code, 1);
+        assert!(res.stderr.contains("error[E0308]: mismatched types"));
+
+        // Diagnostic recorded on node
+        let node = panel.dag.find_node(0).unwrap();
+        assert!(node.tool_output.is_some());
+        let diag = node.tool_output.as_ref().unwrap();
+        assert!(diag.contains("FAILED"));
+        assert!(diag.contains("error[E0308]"));
+
+        // Artifact deposited with lower initial pheromone (0.8)
+        let tool_art = panel
+            .blackboard
+            .artifacts
+            .iter()
+            .find(|a| a.tags.contains(&"compiler-fail".to_string()))
+            .expect("Artifact deposited");
+        assert_eq!(tool_art.pheromone_score, 0.8);
+
+        // Verify DAG retry feedback cycle: feeding compiler error into dag_node_failed
+        let models = vec![
+            make_test_model("qwen2.5-coder:7b"),
+            make_test_model("deepseek-r1:8b"),
+        ];
+        panel.dag.find_node_mut(0).unwrap().model = Some("qwen2.5-coder:7b".to_string());
+
+        let will_retry = panel.dag_node_failed(0, res.stderr.trim().to_string(), &models);
+        assert!(will_retry);
+        let n0 = panel.dag.find_node(0).unwrap();
+        assert_eq!(n0.retries, 1);
+        assert_eq!(n0.last_error.as_deref(), Some("error[E0308]: mismatched types at line 42"));
+        assert_eq!(n0.model.as_deref(), Some("deepseek-r1:8b"));
     }
 }
