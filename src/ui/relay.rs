@@ -31,12 +31,71 @@ pub struct RelayStep {
     pub collapsed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwarmTemplate {
     SymbioticHive,
     AdversarialCode,
     ExecutiveResearch,
+    EngineeringTriad,
+    CyberSocTriad,
+    FullStackSwarm,
+    QuantumScientific,
     Custom,
+}
+
+impl SwarmTemplate {
+    pub fn all() -> Vec<SwarmTemplate> {
+        vec![
+            SwarmTemplate::SymbioticHive,
+            SwarmTemplate::AdversarialCode,
+            SwarmTemplate::ExecutiveResearch,
+            SwarmTemplate::EngineeringTriad,
+            SwarmTemplate::CyberSocTriad,
+            SwarmTemplate::FullStackSwarm,
+            SwarmTemplate::QuantumScientific,
+            SwarmTemplate::Custom,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SwarmTemplate::SymbioticHive => "🐝 Symbiotic Hive (Planner → Coder → Critic → Synthesis)",
+            SwarmTemplate::AdversarialCode => "⚔️ Adversarial Code (Coder → Security Auditor → Refiner)",
+            SwarmTemplate::ExecutiveResearch => "🔍 Executive Research (Scout → Epistemic Critic → Briefing)",
+            SwarmTemplate::EngineeringTriad => "📐 Engineering Triad (Planner → Coder → Reviewer)",
+            SwarmTemplate::CyberSocTriad => "🛡️ Cyber / SOC Triad (Recon → Threat Hunter → Defender)",
+            SwarmTemplate::FullStackSwarm => "🌐 Full-Stack Dev Swarm (Architect → Backend → UI → QA)",
+            SwarmTemplate::QuantumScientific => "⚛️ Quantum & Scientific (Hypothesis → Math Modeler → Reviewer → Synthesis)",
+            SwarmTemplate::Custom => "⚙️ Custom Swarm Chain",
+        }
+    }
+
+    pub fn short_id(self) -> &'static str {
+        match self {
+            SwarmTemplate::SymbioticHive => "hive",
+            SwarmTemplate::AdversarialCode => "code",
+            SwarmTemplate::ExecutiveResearch => "research",
+            SwarmTemplate::EngineeringTriad => "triad",
+            SwarmTemplate::CyberSocTriad => "soc",
+            SwarmTemplate::FullStackSwarm => "fullstack",
+            SwarmTemplate::QuantumScientific => "quantum",
+            SwarmTemplate::Custom => "custom",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<SwarmTemplate> {
+        match id.to_lowercase().trim() {
+            "hive" | "symbiotichive" => Some(SwarmTemplate::SymbioticHive),
+            "code" | "adversarialcode" => Some(SwarmTemplate::AdversarialCode),
+            "research" | "executiveresearch" => Some(SwarmTemplate::ExecutiveResearch),
+            "triad" | "engineeringtriad" => Some(SwarmTemplate::EngineeringTriad),
+            "soc" | "cybersoctriad" | "cyber" => Some(SwarmTemplate::CyberSocTriad),
+            "fullstack" | "fullstackswarm" | "dev" => Some(SwarmTemplate::FullStackSwarm),
+            "quantum" | "scientific" | "quantumscientific" => Some(SwarmTemplate::QuantumScientific),
+            "custom" => Some(SwarmTemplate::Custom),
+            _ => None,
+        }
+    }
 }
 
 pub struct RelayPanel {
@@ -71,7 +130,7 @@ impl RelayPanel {
     }
 
     pub fn apply_template(&mut self, t: SwarmTemplate) {
-        self.template = t.clone();
+        self.template = t;
         match t {
             SwarmTemplate::SymbioticHive => {
                 self.steps = vec![
@@ -169,6 +228,148 @@ impl RelayPanel {
                         role: ModelRole::Writer,
                         model: None,
                         custom_prompt: "Distill the verified intelligence into a high-level executive briefing with actionable takeaways.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                ];
+            }
+            SwarmTemplate::EngineeringTriad => {
+                self.steps = vec![
+                    RelayStep {
+                        name: "Architect Planner".to_string(),
+                        role: ModelRole::Planner,
+                        model: None,
+                        custom_prompt: "Deconstruct the user's objective into concrete engineering components, interfaces, and invariant constraints.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Lead Systems Engineer".to_string(),
+                        role: ModelRole::Coder,
+                        model: None,
+                        custom_prompt: "Implement the production solution adhering cleanly to the architecture and strict memory/type safety.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Rigorous Peer Reviewer & QA".to_string(),
+                        role: ModelRole::Critic,
+                        model: None,
+                        custom_prompt: "Conduct a rigorous peer review, identifying architectural anti-patterns, boundary edge cases, and optimization opportunities.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                ];
+            }
+            SwarmTemplate::CyberSocTriad => {
+                self.steps = vec![
+                    RelayStep {
+                        name: "Perimeter Recon Scout".to_string(),
+                        role: ModelRole::Researcher,
+                        model: None,
+                        custom_prompt: "Analyze the environmental threat surface, exposed endpoints, protocol weaknesses, and potential attack vectors.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Threat Hunter & Exploit Analyst".to_string(),
+                        role: ModelRole::Critic,
+                        model: None,
+                        custom_prompt: "Assess exploit viability, privilege escalation risks, lateral movement vectors, and persistence mechanisms.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "SOC Incident Defender & Hardener".to_string(),
+                        role: ModelRole::Coder,
+                        model: None,
+                        custom_prompt: "Engineer concrete defense configurations, SIEM detection rules, packet filters, and patched source code to eliminate vulnerabilities.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                ];
+            }
+            SwarmTemplate::FullStackSwarm => {
+                self.steps = vec![
+                    RelayStep {
+                        name: "Systems Architect".to_string(),
+                        role: ModelRole::Planner,
+                        model: None,
+                        custom_prompt: "Define comprehensive full-stack architecture, schemas, REST/WebSocket contracts, and security boundaries.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Backend Engineer".to_string(),
+                        role: ModelRole::Coder,
+                        model: None,
+                        custom_prompt: "Build concurrent, production-grade backend services with robust validation, error handling, and database integration.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Frontend & UI Specialist".to_string(),
+                        role: ModelRole::Writer,
+                        model: None,
+                        custom_prompt: "Design modern, responsive client components, state management flows, and aesthetic styling.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Integration & Security Verifier".to_string(),
+                        role: ModelRole::Critic,
+                        model: None,
+                        custom_prompt: "Verify end-to-end integration, validate client-server contracts, run vulnerability audits, and verify zero regressions.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                ];
+            }
+            SwarmTemplate::QuantumScientific => {
+                self.steps = vec![
+                    RelayStep {
+                        name: "Quantum Hypothesis Scout".to_string(),
+                        role: ModelRole::Researcher,
+                        model: None,
+                        custom_prompt: "Formulate testable quantum/scientific hypotheses, literature baselines, and state-space definitions.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Mathematical & Stochastic Modeler".to_string(),
+                        role: ModelRole::Planner,
+                        model: None,
+                        custom_prompt: "Derive mathematical proofs, state transitions, circuit representations, or algorithmic models for the problem.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Falsification Critic".to_string(),
+                        role: ModelRole::Critic,
+                        model: None,
+                        custom_prompt: "Subject equations and assumptions to strict falsification tests, boundary singularities, and decoherence analysis.".to_string(),
+                        status: StepStatus::Pending,
+                        output: String::new(),
+                        collapsed: false,
+                    },
+                    RelayStep {
+                        name: "Empirical Synthesizer".to_string(),
+                        role: ModelRole::General,
+                        model: None,
+                        custom_prompt: "Integrate derivations and critical findings into an authoritative scientific paper and executable conclusion.".to_string(),
                         status: StepStatus::Pending,
                         output: String::new(),
                         collapsed: false,
@@ -366,6 +567,20 @@ impl RelayPanel {
         md
     }
 
+    /// Extract the current swarm team roles and matched models for assignment to Chat multi-model slots
+    pub fn extract_chat_slots(&self, available_models: &[Model]) -> Vec<(ModelRole, Option<String>)> {
+        self.steps
+            .iter()
+            .map(|step| {
+                let model = step
+                    .model
+                    .clone()
+                    .or_else(|| Self::find_best_model_for_role(&step.role, available_models));
+                (step.role.clone(), model)
+            })
+            .collect()
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -399,7 +614,21 @@ impl RelayPanel {
                 {
                     self.reset_pipeline();
                 }
+                ui.add_space(4.0);
+                if ui
+                    .button(egui::RichText::new("📜 Export Audit").size(12.0))
+                    .on_hover_text("Generate Markdown audit artifact from this swarm run")
+                    .clicked()
+                {
+                    let audit_md = self.export_markdown();
+                    self.export_note = Some(format!("Audit exported ({} bytes)", audit_md.len()));
+                    let _ = tx.send(AppMessage::Audit(
+                        "swarm.relay.export".to_string(),
+                        format!("Exported swarm relay run: {} steps", self.steps.len()),
+                    ));
+                }
                 if !self.final_synthesis.is_empty() {
+                    ui.add_space(4.0);
                     if ui
                         .button(egui::RichText::new("Send to Editor").size(12.0).color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)))
                         .on_hover_text("Send final synthesis to Editor tab")
@@ -407,6 +636,7 @@ impl RelayPanel {
                     {
                         let _ = tx.send(AppMessage::ChatToEditor(self.final_synthesis.clone(), "markdown".to_string()));
                     }
+                    ui.add_space(4.0);
                     if ui
                         .button(egui::RichText::new("Copy Trace").size(12.0))
                         .on_hover_text("Copy entire Markdown swarm report to clipboard")
@@ -426,33 +656,27 @@ impl RelayPanel {
         // Template Selector & Controls Bar
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Ecosystem Template:").size(12.0).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)));
-            let mut cur_template = self.template.clone();
+            let mut cur_template = self.template;
             egui::ComboBox::from_id_salt("relay_template_combo")
-                .selected_text(match cur_template {
-                    SwarmTemplate::SymbioticHive => "🐝 Symbiotic Hive (Planner → Coder → Critic → Synthesis)",
-                    SwarmTemplate::AdversarialCode => "⚔️ Adversarial Code (Coder → Security Auditor → Refiner)",
-                    SwarmTemplate::ExecutiveResearch => "🔍 Executive Research (Scout → Epistemic Critic → Briefing)",
-                    SwarmTemplate::Custom => "⚙️ Custom Swarm Chain",
-                })
-                .width(360.0)
+                .selected_text(cur_template.label())
+                .width(420.0)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut cur_template, SwarmTemplate::SymbioticHive, "🐝 Symbiotic Hive (Planner → Coder → Critic → Synthesis)").clicked() {
-                        self.apply_template(SwarmTemplate::SymbioticHive);
-                    }
-                    if ui.selectable_value(&mut cur_template, SwarmTemplate::AdversarialCode, "⚔️ Adversarial Code (Coder → Security Auditor → Refiner)").clicked() {
-                        self.apply_template(SwarmTemplate::AdversarialCode);
-                    }
-                    if ui.selectable_value(&mut cur_template, SwarmTemplate::ExecutiveResearch, "🔍 Executive Research (Scout → Epistemic Critic → Briefing)").clicked() {
-                        self.apply_template(SwarmTemplate::ExecutiveResearch);
-                    }
-                    if ui.selectable_value(&mut cur_template, SwarmTemplate::Custom, "⚙️ Custom Swarm Chain").clicked() {
-                        self.template = SwarmTemplate::Custom;
+                    for tmpl in SwarmTemplate::all() {
+                        if ui.selectable_value(&mut cur_template, tmpl, tmpl.label()).clicked() {
+                            self.apply_template(tmpl);
+                        }
                     }
                 });
 
             ui.add_space(12.0);
             if ui.small_button("⚡ Auto-Assign Models").on_hover_text("Assign loaded local models to unfilled steps").clicked() {
                 self.auto_assign_models(available_models);
+            }
+
+            ui.add_space(8.0);
+            if ui.small_button("⚡ Populate Chat Slots").on_hover_text("Configure Chat multi-model slots with this swarm team").clicked() {
+                let slots = self.extract_chat_slots(available_models);
+                let _ = tx.send(AppMessage::ApplySwarmToChatSlots(slots));
             }
         });
 
@@ -918,5 +1142,26 @@ mod tests {
         assert!(panel.consensus_score.is_some());
         let score = panel.consensus_score.unwrap();
         assert!(score >= 0.90, "Expected high consensus on clean audit, got {score}");
+    }
+
+    #[test]
+    fn test_all_swarm_templates_and_chat_slots() {
+        let mut panel = RelayPanel::new();
+        let models = vec![
+            make_test_model("qwen2.5-coder:7b"),
+            make_test_model("deepseek-r1:8b"),
+            make_test_model("phi4:latest"),
+        ];
+
+        for tmpl in SwarmTemplate::all() {
+            if tmpl == SwarmTemplate::Custom {
+                continue;
+            }
+            panel.apply_template(tmpl);
+            assert!(!panel.steps.is_empty(), "Template {:?} has no steps", tmpl);
+            let slots = panel.extract_chat_slots(&models);
+            assert_eq!(slots.len(), panel.steps.len());
+            assert!(SwarmTemplate::from_id(tmpl.short_id()).is_some());
+        }
     }
 }

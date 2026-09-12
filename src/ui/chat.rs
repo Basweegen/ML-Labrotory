@@ -1095,9 +1095,32 @@ impl ChatPanel {
                             let _ = tx.send(crate::ui::app::AppMessage::ModelSelected(name.clone()));
                             self.push_system_note(&format!("⚡ **Switching model to `{}`** (pre-warming into RAM)...", name));
                         }
-                        crate::commands::SlashCommand::Swarm(task) => {
-                            let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
-                            self.push_system_note("🧬 **Swarm Relay dispatched.** Switching to Swarm Relay tab...");
+                        crate::commands::SlashCommand::Swarm(cmd) => match cmd {
+                            crate::commands::SwarmCommand::Dispatch(task) => {
+                                let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                                self.push_system_note("🧬 **Swarm Relay dispatched.** Switching to Swarm Relay tab...");
+                            }
+                            crate::commands::SwarmCommand::Preset { template, prompt } => {
+                                if let Some(tmpl) = crate::ui::relay::SwarmTemplate::from_id(&template) {
+                                    let _ = tx.send(crate::ui::app::AppMessage::LaunchSwarmPreset {
+                                        template: tmpl,
+                                        prompt,
+                                    });
+                                    self.push_system_note(&format!("🧬 **Swarm preset `{}` activated.** Switching to Swarm Relay tab...", tmpl.label()));
+                                } else {
+                                    self.push_system_note(&format!("❌ **Unknown swarm preset `{}`.** Use `/swarm presets` to list presets.", template));
+                                }
+                            }
+                            crate::commands::SwarmCommand::ListPresets => {
+                                let mut note = String::from("### 🧬 **Available Multi-Agent Swarm Presets**\n\n| Short ID | Preset Description |\n|---|---|\n");
+                                for t in crate::ui::relay::SwarmTemplate::all() {
+                                    if t != crate::ui::relay::SwarmTemplate::Custom {
+                                        note.push_str(&format!("| `{}` | {} |\n", t.short_id(), t.label()));
+                                    }
+                                }
+                                note.push_str("\n*Usage:* `/swarm preset <id> [prompt]` (e.g. `/swarm preset triad Build an auth system`)");
+                                self.push_system_note(&note);
+                            }
                         }
                         crate::commands::SlashCommand::Skills(sub) => {
                             let _ = tx.send(crate::ui::app::AppMessage::SkillsCommand(slot_idx, sub));

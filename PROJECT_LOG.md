@@ -603,3 +603,49 @@
   - [x] [COMPLETE] Compile optimized release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 18 as COMPLETE.
 
+---
+
+## 19. Custom Page Layout, Expanded Swarm Presets & Workspace Script Automation (2026-09-12)
+- **Pre-Implementation Security Scan & Architectural Directives:**
+  - User requested 3 core enhancements:
+    1. Custom Page Layout in Settings (`default_tab`, `visible_tabs`, `tab_order`, `chat_split_view_default`).
+    2. Complete suite of Swarm presets ("all") with 1-click loading into Relay and Chat multi-model slots.
+    3. Comprehensive workspace script automation hooks ("yes all") including turnkey `setup.sh`, `verify.sh`, `start.sh`, `clean.sh` generation and execution.
+  - Defensive guarantee: `Chat` and `Settings` remain permanently enabled in the tab strip to prevent navigation lockout.
+  - POSIX security: All generated automation scripts enforce `0o755` permissions with Sean M. Stow copyright header.
+  - Zero telemetry, local loopback, post-quantum AES-256-GCM storage encryption preserved.
+
+- **Components Implemented:**
+  1. **Custom Page Layout in Settings (`src/storage.rs`, `src/ui/settings.rs`, `src/ui/app.rs`):**
+     - Extended `AppSettings` with `default_tab`, `visible_tabs`, `tab_order`, and `chat_split_view_default`.
+     - Built dedicated `Custom Page Layout` section in Settings with startup tab selector, chat split view toggle, tab visibility matrix (with locked anchors on Chat and Settings), and reorder controls (`▲ Up` / `▼ Down`) with reset capability.
+     - Dynamically rendered tabs in `show_tabs` respecting custom order and visibility preferences.
+  2. **Comprehensive Swarm Presets & Role Pipelines (`src/ui/relay.rs`, `src/commands.rs`):**
+     - Expanded `SwarmTemplate` to support all 7 multi-agent presets: `Symbiotic Hive`, `Adversarial Code`, `Executive Research`, `Engineering Triad` (Planner -> Coder -> Critic), `Cyber / SOC Triad` (Recon -> Threat Hunter -> Defender), `Full-Stack Dev Swarm` (Architect -> Backend -> UI -> QA), and `Quantum & Scientific Ecosystem` (Hypothesis -> Math Modeler -> Reviewer -> Synthesis).
+     - Added `extract_chat_slots` and `[⚡ Populate Chat Slots]` action in Relay panel to load any swarm team directly into Chat multi-model slots.
+     - Added `/swarm preset <id> [prompt]` and `/swarm presets` across chat and headless CLI.
+  3. **Workspace Script Automation & Verification Hooks (`src/workspace.rs`, `src/ui/editor.rs`, `src/commands.rs`):**
+     - Implemented `WorkspaceAutomation` with stack detection (`rust`, `python`, `node`, `generic`) and automated generation of `setup.sh`, `verify.sh`, `start.sh`, `clean.sh`.
+     - Added pre-build and post-build verification hooks with `0o755` executable permissions.
+     - Added 1-click action buttons in editor terminal toolbar: `[🛡 Verify & Audit]`, `[🧹 Clean]`, `[🛠 Gen Scripts]`.
+     - Extended `/project` command with `setup`, `verify`, `clean`, and `generate-scripts`.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 95/95 unit and integration tests passing (`cargo test --bin ai-dashboard`).
+  - Added dedicated tests: `layout_settings_roundtrip`, `test_all_swarm_templates_and_chat_slots`, `test_workspace_automation_scripts`, `parse_project_automation_commands`.
+  - Production release binary built and verified.
+  - Zero memory leaks, zero telemetry, local loopback, strict file permissions.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Extend `AppSettings` with Custom Page Layout fields and add unit tests.
+  - [x] [COMPLETE] Implement `Custom Page Layout` configuration section in `src/ui/settings.rs`.
+  - [x] [COMPLETE] Update `Tab` enum and dynamic tab rendering in `src/ui/app.rs`.
+  - [x] [COMPLETE] Implement all 7 Swarm presets, role pipelines, and Chat slot loader in `src/ui/relay.rs`.
+  - [x] [COMPLETE] Implement `WorkspaceAutomation` and turnkey script generation in `src/workspace.rs`.
+  - [x] [COMPLETE] Add 1-click script automation buttons to IDE Terminal Dock in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Extend `/swarm` and `/project` slash commands in `src/commands.rs`.
+  - [x] [COMPLETE] Run automated tests (95/95 passed).
+  - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
+  - [x] [COMPLETE] Mark Section 19 as COMPLETE.
+
+

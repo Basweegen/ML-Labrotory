@@ -263,6 +263,40 @@ impl EditorPanel {
         self.run_terminal_command("./start.sh", tx, rt);
     }
 
+    pub fn run_verify(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        let cmd = if self.workspace.root_path.join("verify.sh").exists() {
+            "./verify.sh"
+        } else if self.workspace.root_path.join("Cargo.toml").exists() {
+            "cargo test --all"
+        } else if self.workspace.root_path.join("requirements.txt").exists() {
+            "python3 -m pytest || pytest"
+        } else if self.workspace.root_path.join("package.json").exists() {
+            "npm test"
+        } else {
+            "echo 'No verification script found — click [🛠 Gen Scripts] to generate one'"
+        };
+        self.run_terminal_command(cmd, tx, rt);
+    }
+
+    pub fn run_clean(&mut self, tx: &mpsc::Sender<crate::ui::app::AppMessage>, rt: &Runtime) {
+        let cmd = if self.workspace.root_path.join("clean.sh").exists() {
+            "./clean.sh"
+        } else if self.workspace.root_path.join("Cargo.toml").exists() {
+            "cargo clean"
+        } else {
+            "echo 'No clean script found'"
+        };
+        self.run_terminal_command(cmd, tx, rt);
+    }
+
+    pub fn generate_automation_scripts(&mut self) -> anyhow::Result<usize> {
+        let scripts = crate::workspace::WorkspaceAutomation::generate_scripts(&self.workspace.root_path)?;
+        let count = scripts.len();
+        let _ = self.workspace.refresh_tree();
+        self.file_status = format!("Generated {} turnkey automation scripts in workspace", count);
+        Ok(count)
+    }
+
     /// Autonomous Full-Fledged Application Scaffolding
     pub fn scaffold_app(
         &mut self,
@@ -881,11 +915,20 @@ impl EditorPanel {
                 if ui.small_button("🧪 Test").on_hover_text("Run test suite (cargo test / pytest)").clicked() {
                     self.run_test(tx, rt);
                 }
+                if ui.small_button("🛡 Verify & Audit").on_hover_text("Run ./verify.sh or comprehensive security & test verification").clicked() {
+                    self.run_verify(tx, rt);
+                }
                 if ui.small_button("⚙ Run setup.sh").on_hover_text("Execute ./setup.sh in workspace root").clicked() {
                     self.run_setup(tx, rt);
                 }
                 if ui.small_button("🚀 Run start.sh").on_hover_text("Execute ./start.sh in workspace root").clicked() {
                     self.run_start(tx, rt);
+                }
+                if ui.small_button("🧹 Clean").on_hover_text("Execute ./clean.sh or project cleanup").clicked() {
+                    self.run_clean(tx, rt);
+                }
+                if ui.small_button("🛠 Gen Scripts").on_hover_text("Generate turnkey setup.sh, verify.sh, start.sh, and clean.sh in workspace").clicked() {
+                    let _ = self.generate_automation_scripts();
                 }
             });
 

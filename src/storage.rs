@@ -143,6 +143,41 @@ pub struct AppSettings {
     /// Timestamp when the legal waiver was signed.
     #[serde(default)]
     pub unrestricted_waiver_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Default startup landing tab.
+    #[serde(default = "default_tab_name")]
+    pub default_tab: String,
+    /// List of tab labels visible in the navigation strip.
+    #[serde(default = "default_visible_tabs")]
+    pub visible_tabs: Vec<String>,
+    /// Custom ordering of tabs in the navigation strip.
+    #[serde(default = "default_tab_order")]
+    pub tab_order: Vec<String>,
+    /// Whether the chat view defaults to side-by-side multi-model split view.
+    #[serde(default)]
+    pub chat_split_view_default: bool,
+}
+
+pub fn default_tab_name() -> String {
+    "Chat".to_string()
+}
+
+pub fn default_tab_order() -> Vec<String> {
+    vec![
+        "Chat".to_string(),
+        "Swarm Relay".to_string(),
+        "Compare".to_string(),
+        "Editor".to_string(),
+        "Models".to_string(),
+        "History".to_string(),
+        "Neural".to_string(),
+        "Skills".to_string(),
+        "Tools".to_string(),
+        "Settings".to_string(),
+    ]
+}
+
+pub fn default_visible_tabs() -> Vec<String> {
+    default_tab_order()
 }
 
 fn default_history_depth() -> u32 {
@@ -175,6 +210,10 @@ impl Default for AppSettings {
             guardrail_tier: crate::guardrails::GuardrailTier::Heavy,
             unrestricted_waiver_accepted: false,
             unrestricted_waiver_timestamp: None,
+            default_tab: default_tab_name(),
+            visible_tabs: default_visible_tabs(),
+            tab_order: default_tab_order(),
+            chat_split_view_default: false,
         }
     }
 }
@@ -975,5 +1014,29 @@ mod tests {
         let ws = loaded.get("wireshark").expect("wireshark found");
         assert_eq!(ws.command, "wireshark");
         assert_eq!(ws.sensitivity, crate::tools::SensitivityLevel::High);
+    }
+
+    #[test]
+    fn layout_settings_roundtrip() {
+        let _guard = store_lock();
+        let dir = std::env::temp_dir().join(format!("aidash-test-layout-{}", std::process::id()));
+        let st = Storage::open_path(&dir.join("storage")).expect("open store");
+
+        let mut settings = st.load_settings().expect("load settings");
+        assert_eq!(settings.default_tab, "Chat");
+        assert!(settings.visible_tabs.contains(&"Chat".to_string()));
+
+        settings.default_tab = "Editor".to_string();
+        settings.chat_split_view_default = true;
+        settings.visible_tabs = vec!["Chat".to_string(), "Editor".to_string(), "Settings".to_string()];
+        settings.tab_order = vec!["Editor".to_string(), "Chat".to_string(), "Settings".to_string()];
+
+        st.save_settings(&settings).expect("save settings");
+
+        let reloaded = st.load_settings().expect("reload settings");
+        assert_eq!(reloaded.default_tab, "Editor");
+        assert_eq!(reloaded.chat_split_view_default, true);
+        assert_eq!(reloaded.visible_tabs, vec!["Chat", "Editor", "Settings"]);
+        assert_eq!(reloaded.tab_order, vec!["Editor", "Chat", "Settings"]);
     }
 }

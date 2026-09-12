@@ -13,6 +13,14 @@ pub enum SkillsCommand {
     Add { name: String, description: String },
 }
 
+/// Swarm multi-agent collaboration subcommands
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwarmCommand {
+    Dispatch(String),
+    Preset { template: String, prompt: Option<String> },
+    ListPresets,
+}
+
 /// Project management subcommands
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectCommand {
@@ -20,6 +28,10 @@ pub enum ProjectCommand {
     Build,
     Run,
     Test,
+    Setup,
+    Verify,
+    Clean,
+    GenerateScripts,
 }
 
 /// User-registered external tools subcommands (BYOT)
@@ -51,7 +63,7 @@ pub enum SlashCommand {
     New,
     Clear,
     Model(String),
-    Swarm(String),
+    Swarm(SwarmCommand),
     Skills(SkillsCommand),
     Audit,
     Threads(u32),
@@ -156,11 +168,34 @@ impl SlashCommand {
                 }
             }
             "swarm" | "relay" => {
-                let prompt = parts.collect::<Vec<&str>>().join(" ");
-                if prompt.is_empty() {
-                    Err("Usage: /swarm <prompt>\nExample: /swarm Analyze authentication architecture vulnerabilities".to_string())
-                } else {
-                    Ok(Some(SlashCommand::Swarm(prompt)))
+                let first = parts.next();
+                match first {
+                    None => {
+                        Err("Usage: /swarm <prompt> OR /swarm preset <template> [prompt]\nPresets: hive, code, research, triad, soc, fullstack, quantum".to_string())
+                    }
+                    Some(word) if word.eq_ignore_ascii_case("preset") || word.eq_ignore_ascii_case("presets") || word.eq_ignore_ascii_case("list") => {
+                        let tmpl = parts.next();
+                        match tmpl {
+                            Some(t) => {
+                                let prompt = parts.collect::<Vec<&str>>().join(" ");
+                                let prompt_opt = if prompt.trim().is_empty() { None } else { Some(prompt) };
+                                Ok(Some(SlashCommand::Swarm(SwarmCommand::Preset {
+                                    template: t.to_string(),
+                                    prompt: prompt_opt,
+                                })))
+                            }
+                            None => Ok(Some(SlashCommand::Swarm(SwarmCommand::ListPresets))),
+                        }
+                    }
+                    Some(word) => {
+                        let mut prompt = word.to_string();
+                        let rest = parts.collect::<Vec<&str>>().join(" ");
+                        if !rest.is_empty() {
+                            prompt.push(' ');
+                            prompt.push_str(&rest);
+                        }
+                        Ok(Some(SlashCommand::Swarm(SwarmCommand::Dispatch(prompt))))
+                    }
                 }
             }
             "skills" | "skill" => {
@@ -264,7 +299,11 @@ impl SlashCommand {
                     "build" => Ok(Some(SlashCommand::Project(ProjectCommand::Build))),
                     "test" => Ok(Some(SlashCommand::Project(ProjectCommand::Test))),
                     "run" | "start" => Ok(Some(SlashCommand::Project(ProjectCommand::Run))),
-                    other => Err(format!("Unknown project subcommand '{}'. Usage: /project [scaffold <type> <name> | build | test | run]", other)),
+                    "setup" => Ok(Some(SlashCommand::Project(ProjectCommand::Setup))),
+                    "verify" | "audit" => Ok(Some(SlashCommand::Project(ProjectCommand::Verify))),
+                    "clean" => Ok(Some(SlashCommand::Project(ProjectCommand::Clean))),
+                    "generate-scripts" | "genscripts" | "gen" => Ok(Some(SlashCommand::Project(ProjectCommand::GenerateScripts))),
+                    other => Err(format!("Unknown project subcommand '{}'. Usage: /project [scaffold <type> <name> | build | test | run | setup | verify | clean | generate-scripts]", other)),
                 }
             }
             "tools" | "tool" => {
@@ -500,42 +539,96 @@ pub async fn run_headless_cli(cmd: SlashCommand) -> Result<()> {
                 Err(e) => println!("Failed to warm model '{}': {}", name, e),
             }
         }
-        SlashCommand::Swarm(prompt) => {
-            println!("=== Swarm Relay Dispatch ===");
-            let (domain_idx, domain_name) = crate::neural::classify_prompt_domain(&prompt);
-            println!("Domain Classified: [{}] {}", domain_idx, domain_name);
-            println!("Task: {}", prompt);
-            println!("Connecting to multi-agent swarm...");
-            let client = crate::ollama::api::OllamaClient::new("http://localhost:11434", false)?;
-            let models = client.list_models().await?;
-            if models.is_empty() {
-                println!("No local models found in Ollama. Pull a model first.");
-                return Ok(());
+        SlashCommand::Swarm(swarm_cmd) => match swarm_cmd {
+            SwarmCommand::ListPresets => {
+                println!("=== Multi-Agent Swarm Presets ===");
+                for tmpl in crate::ui::relay::SwarmTemplate::all() {
+                    if tmpl != crate::ui::relay::SwarmTemplate::Custom {
+                        println!("• {:<10} : {}", tmpl.short_id(), tmpl.label());
+                    }
+                }
+                println!("\nUsage: /swarm preset <id> [prompt]");
             }
-            let chosen_model = &models[0].name;
-            println!("Executing via primary specialist '{}'...", chosen_model);
-            let req = crate::ollama::api::ChatRequest {
-                model: chosen_model.clone(),
-                messages: vec![
-                    crate::ollama::api::Message {
-                        role: "system".to_string(),
-                        content: format!("You are an elite specialist in {}. Address the following objective with rigour.", domain_name),
-                    },
-                    crate::ollama::api::Message {
-                        role: "user".to_string(),
-                        content: prompt,
-                    },
-                ],
-                stream: true,
-                options: Some(crate::ollama::api::ChatOptions::lowram()),
-                keep_alive: Some("30m".to_string()),
-            };
-            let resp = client.chat_stream(req, |chunk| {
-                print!("{}", chunk);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }).await?;
-            println!("\n\nSwarm Turn Complete. Evaluation count: {:?}", resp.eval_count);
+            SwarmCommand::Preset { template, prompt } => {
+                let tmpl_opt = crate::ui::relay::SwarmTemplate::from_id(&template);
+                match tmpl_opt {
+                    Some(tmpl) => {
+                        println!("=== Swarm Preset Activated: {} ===", tmpl.label());
+                        let prompt_str = prompt.unwrap_or_else(|| "Initialize swarm collaboration".to_string());
+                        println!("Task: {}", prompt_str);
+                        let client = crate::ollama::api::OllamaClient::new("http://localhost:11434", false)?;
+                        let models = client.list_models().await?;
+                        if models.is_empty() {
+                            println!("No local models found in Ollama.");
+                            return Ok(());
+                        }
+                        let chosen_model = &models[0].name;
+                        println!("Executing swarm lead '{}'...", chosen_model);
+                        let req = crate::ollama::api::ChatRequest {
+                            model: chosen_model.clone(),
+                            messages: vec![
+                                crate::ollama::api::Message {
+                                    role: "system".to_string(),
+                                    content: format!("You are the lead agent of a {} team.", tmpl.label()),
+                                },
+                                crate::ollama::api::Message {
+                                    role: "user".to_string(),
+                                    content: prompt_str,
+                                },
+                            ],
+                            stream: true,
+                            options: Some(crate::ollama::api::ChatOptions::lowram()),
+                            keep_alive: Some("30m".to_string()),
+                        };
+                        let resp = client.chat_stream(req, |chunk| {
+                            print!("{}", chunk);
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }).await?;
+                        println!("\n\nSwarm Preset Turn Complete. Evaluation count: {:?}", resp.eval_count);
+                    }
+                    None => {
+                        println!("Unknown swarm preset '{}'. Use `/swarm presets` to list presets.", template);
+                    }
+                }
+            }
+            SwarmCommand::Dispatch(prompt) => {
+                println!("=== Swarm Relay Dispatch ===");
+                let (domain_idx, domain_name) = crate::neural::classify_prompt_domain(&prompt);
+                println!("Domain Classified: [{}] {}", domain_idx, domain_name);
+                println!("Task: {}", prompt);
+                println!("Connecting to multi-agent swarm...");
+                let client = crate::ollama::api::OllamaClient::new("http://localhost:11434", false)?;
+                let models = client.list_models().await?;
+                if models.is_empty() {
+                    println!("No local models found in Ollama. Pull a model first.");
+                    return Ok(());
+                }
+                let chosen_model = &models[0].name;
+                println!("Executing via primary specialist '{}'...", chosen_model);
+                let req = crate::ollama::api::ChatRequest {
+                    model: chosen_model.clone(),
+                    messages: vec![
+                        crate::ollama::api::Message {
+                            role: "system".to_string(),
+                            content: format!("You are an elite specialist in {}. Address the following objective with rigour.", domain_name),
+                        },
+                        crate::ollama::api::Message {
+                            role: "user".to_string(),
+                            content: prompt,
+                        },
+                    ],
+                    stream: true,
+                    options: Some(crate::ollama::api::ChatOptions::lowram()),
+                    keep_alive: Some("30m".to_string()),
+                };
+                let resp = client.chat_stream(req, |chunk| {
+                    print!("{}", chunk);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                }).await?;
+                println!("\n\nSwarm Turn Complete. Evaluation count: {:?}", resp.eval_count);
+            }
         }
         SlashCommand::Threads(n) => {
             println!("Setting default inference CPU threads to {}...", n);
@@ -667,6 +760,52 @@ pub async fn run_headless_cli(cmd: SlashCommand) -> Result<()> {
                 };
                 let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
                 println!("{}", res.format_display());
+            }
+            ProjectCommand::Setup => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("setup.sh").exists() {
+                    "./setup.sh"
+                } else if cwd.join("Cargo.toml").exists() {
+                    "cargo check"
+                } else if cwd.join("requirements.txt").exists() {
+                    "python3 -m pip install -r requirements.txt"
+                } else {
+                    "echo 'No setup script found'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+            ProjectCommand::Verify => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("verify.sh").exists() {
+                    "./verify.sh"
+                } else if cwd.join("Cargo.toml").exists() {
+                    "cargo test --all"
+                } else {
+                    "echo 'No verification script found'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+            ProjectCommand::Clean => {
+                let cwd = std::env::current_dir()?;
+                let cmd = if cwd.join("clean.sh").exists() {
+                    "./clean.sh"
+                } else if cwd.join("Cargo.toml").exists() {
+                    "cargo clean"
+                } else {
+                    "echo 'No clean script found'"
+                };
+                let res = crate::workspace::CommandRunner::execute(cmd, &cwd).await?;
+                println!("{}", res.format_display());
+            }
+            ProjectCommand::GenerateScripts => {
+                let cwd = std::env::current_dir()?;
+                let scripts = crate::workspace::WorkspaceAutomation::generate_scripts(&cwd)?;
+                println!("Generated {} automation scripts in {:?}", scripts.len(), cwd);
+                for s in scripts {
+                    println!("• {:?}", s.file_name().unwrap_or_default());
+                }
             }
         },
         SlashCommand::Tools(sub) => match sub {
@@ -819,9 +958,40 @@ mod tests {
     fn parse_swarm_command() {
         assert_eq!(
             SlashCommand::parse("/swarm optimize memory layout").unwrap(),
-            Some(SlashCommand::Swarm("optimize memory layout".to_string()))
+            Some(SlashCommand::Swarm(SwarmCommand::Dispatch("optimize memory layout".to_string())))
+        );
+        assert_eq!(
+            SlashCommand::parse("/swarm preset triad build secure parser").unwrap(),
+            Some(SlashCommand::Swarm(SwarmCommand::Preset {
+                template: "triad".to_string(),
+                prompt: Some("build secure parser".to_string()),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/swarm presets").unwrap(),
+            Some(SlashCommand::Swarm(SwarmCommand::ListPresets))
         );
         assert!(SlashCommand::parse("/swarm").is_err());
+    }
+
+    #[test]
+    fn parse_project_automation_commands() {
+        assert_eq!(
+            SlashCommand::parse("/project setup").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::Setup))
+        );
+        assert_eq!(
+            SlashCommand::parse("/project verify").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::Verify))
+        );
+        assert_eq!(
+            SlashCommand::parse("/project clean").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::Clean))
+        );
+        assert_eq!(
+            SlashCommand::parse("/project generate-scripts").unwrap(),
+            Some(SlashCommand::Project(ProjectCommand::GenerateScripts))
+        );
     }
 
     #[test]

@@ -50,6 +50,123 @@ impl SettingsPanel {
         ui.separator();
         ui.add_space(12.0);
 
+        // Custom Page Layout section
+        ui.label(egui::RichText::new("Custom Page Layout").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Personalize dashboard navigation: choose startup tab, toggle panel visibility, arrange tab sequence, and configure split views.")
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(8.0);
+
+        // 1. Default Landing Tab
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Startup Landing Tab:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(16.0);
+
+            let cur_default = settings.default_tab.clone();
+            egui::ComboBox::from_id_salt("default_tab_selector")
+                .selected_text(&cur_default)
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for tab in crate::ui::app::Tab::all() {
+                        let label_str = tab.label().to_string();
+                        ui.selectable_value(&mut settings.default_tab, label_str, format!("{} {}", tab.icon(), tab.label()));
+                    }
+                });
+        });
+        ui.add_space(6.0);
+
+        // 2. Chat Split View Default
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut settings.chat_split_view_default,
+                "Default Chat to Side-by-Side Dual Split View (Multi-Model)",
+            );
+        });
+        ui.add_space(10.0);
+
+        // 3. Tab Visibility Matrix
+        ui.label(egui::RichText::new("Tab Visibility:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(4.0);
+        egui::Grid::new("tab_visibility_grid").spacing([16.0, 6.0]).show(ui, |ui| {
+            let all_tabs = crate::ui::app::Tab::all();
+            for (idx, tab) in all_tabs.iter().enumerate() {
+                let label = tab.label();
+                let is_locked = !tab.is_closable();
+                let mut visible = is_locked || settings.visible_tabs.iter().any(|v| v == label || (v == "Relay" && *tab == crate::ui::app::Tab::Relay));
+
+                let checkbox = ui.add_enabled(!is_locked, egui::Checkbox::new(&mut visible, format!("{} {}", tab.icon(), label)));
+                if !is_locked && checkbox.changed() {
+                    if visible {
+                        if !settings.visible_tabs.iter().any(|v| v == label) {
+                            settings.visible_tabs.push(label.to_string());
+                        }
+                    } else {
+                        settings.visible_tabs.retain(|v| v != label && !(v == "Relay" && *tab == crate::ui::app::Tab::Relay));
+                    }
+                }
+                if (idx + 1) % 4 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new("Note: Chat and Settings are permanently enabled core anchors to prevent navigation lockouts.")
+                .size(11.0)
+                .italics()
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(10.0);
+
+        // 4. Tab Display Order
+        ui.label(egui::RichText::new("Tab Display Order:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(4.0);
+
+        let mut move_up: Option<usize> = None;
+        let mut move_down: Option<usize> = None;
+        let order_len = settings.tab_order.len();
+
+        ui.vertical(|ui| {
+            for i in 0..order_len {
+                let tab_name = settings.tab_order[i].clone();
+                let icon = crate::ui::app::Tab::from_label(&tab_name).map(|t| t.icon()).unwrap_or("📌");
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{}. {} {}", i + 1, icon, tab_name)).size(12.0));
+                    ui.add_space(8.0);
+                    if i > 0 {
+                        if ui.small_button("▲").on_hover_text("Move tab up").clicked() {
+                            move_up = Some(i);
+                        }
+                    }
+                    if i + 1 < order_len {
+                        if ui.small_button("▼").on_hover_text("Move tab down").clicked() {
+                            move_down = Some(i);
+                        }
+                    }
+                });
+            }
+        });
+
+        if let Some(i) = move_up {
+            settings.tab_order.swap(i, i - 1);
+        }
+        if let Some(i) = move_down {
+            settings.tab_order.swap(i, i + 1);
+        }
+
+        ui.add_space(6.0);
+        if ui.button("↩ Reset Tab Order & Visibility").clicked() {
+            settings.tab_order = crate::storage::default_tab_order();
+            settings.visible_tabs = crate::storage::default_visible_tabs();
+            settings.default_tab = crate::storage::default_tab_name();
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
         // Font size section
         ui.label(egui::RichText::new("Editor").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
         ui.add_space(8.0);

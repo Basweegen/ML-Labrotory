@@ -73,6 +73,11 @@ pub enum AppMessage {
     ToolsCommand(usize, crate::commands::ToolsCommand),
     GuardrailCommand(usize, crate::commands::GuardrailCommand),
     RunTool { id: String, args: Option<String> },
+    ApplySwarmToChatSlots(Vec<(ModelRole, Option<String>)>),
+    LaunchSwarmPreset {
+        template: crate::ui::relay::SwarmTemplate,
+        prompt: Option<String>,
+    },
     #[allow(dead_code)]
     SetGuardrailTier(crate::guardrails::GuardrailTier),
     #[allow(dead_code)]
@@ -237,8 +242,8 @@ pub fn apply_luxury_visuals(ctx: &egui::Context, theme: &Theme) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Tab {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tab {
     Chat,
     Relay,
     Compare,
@@ -252,7 +257,7 @@ enum Tab {
 }
 
 impl Tab {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tab::Chat => "Chat",
             Tab::Relay => "Swarm Relay",
@@ -267,7 +272,7 @@ impl Tab {
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Tab::Chat => "💬",
             Tab::Relay => "🧬",
@@ -282,7 +287,27 @@ impl Tab {
         }
     }
 
-    fn all() -> Vec<Tab> {
+    pub fn from_label(label: &str) -> Option<Tab> {
+        match label.trim() {
+            "Chat" => Some(Tab::Chat),
+            "Swarm Relay" | "Relay" => Some(Tab::Relay),
+            "Compare" => Some(Tab::Compare),
+            "Editor" => Some(Tab::Editor),
+            "Models" => Some(Tab::Models),
+            "History" => Some(Tab::History),
+            "Neural" => Some(Tab::Neural),
+            "Skills" => Some(Tab::Skills),
+            "Tools" => Some(Tab::Tools),
+            "Settings" => Some(Tab::Settings),
+            _ => None,
+        }
+    }
+
+    pub fn is_closable(self) -> bool {
+        !matches!(self, Tab::Chat | Tab::Settings)
+    }
+
+    pub fn all() -> Vec<Tab> {
         vec![
             Tab::Chat,
             Tab::Relay,
@@ -374,11 +399,11 @@ impl AiDashboardApp {
             status: "Ready".to_string(),
             slots: Self::restore_slots(&settings),
             show_model_slots: true,
-            split_chat_view: true,
+            split_chat_view: settings.chat_split_view_default,
             dual_run_mode: true,
             next_slot_id: settings.slot_layout.len().max(2),
             focused_slot: 0,
-            tab: Tab::Chat,
+            tab: Tab::from_label(&settings.default_tab).unwrap_or(Tab::Chat),
             editor: EditorPanel::new(),
             relay: RelayPanel::new(),
             models_panel: ModelsPanel::new(),
@@ -930,8 +955,19 @@ impl AiDashboardApp {
                                 crate::commands::SlashCommand::Model(name) => {
                                     let _ = self.tx.send(crate::ui::app::AppMessage::ModelSelected(name.clone()));
                                 }
-                                crate::commands::SlashCommand::Swarm(task) => {
-                                    let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                                crate::commands::SlashCommand::Swarm(cmd) => match cmd {
+                                    crate::commands::SwarmCommand::Dispatch(task) => {
+                                        let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmTask(task));
+                                    }
+                                    crate::commands::SwarmCommand::Preset { template, prompt } => {
+                                        if let Some(tmpl) = crate::ui::relay::SwarmTemplate::from_id(&template) {
+                                            let _ = self.tx.send(crate::ui::app::AppMessage::LaunchSwarmPreset {
+                                                template: tmpl,
+                                                prompt,
+                                            });
+                                        }
+                                    }
+                                    crate::commands::SwarmCommand::ListPresets => {}
                                 }
                                 crate::commands::SlashCommand::Skills(sub) => {
                                     let f0 = self.focused_slot.min(self.slots.len().saturating_sub(1));
@@ -1435,6 +1471,30 @@ impl AiDashboardApp {
                     self.tab = Tab::Relay;
                     self.status = "Swarm Relay loaded with task".to_string();
                 }
+                AppMessage::ApplySwarmToChatSlots(roles) => {
+                    if !roles.is_empty() {
+                        self.slots.clear();
+                        for (idx, (role, model)) in roles.into_iter().enumerate() {
+                            let mut slot = ModelSlot::new(idx, role);
+                            slot.model = model;
+                            self.slots.push(slot);
+                        }
+                        self.focused_slot = 0;
+                        self.split_chat_view = self.slots.len() > 1;
+                        self.tab = Tab::Chat;
+                        self.status = format!("Loaded {} swarm roles into Chat slots", self.slots.len());
+                        self.audit("swarm.chat_slots_applied", format!("{} slots", self.slots.len()));
+                    }
+                }
+                AppMessage::LaunchSwarmPreset { template, prompt } => {
+                    self.relay.apply_template(template);
+                    if let Some(p) = prompt {
+                        self.relay.prompt = p;
+                    }
+                    self.tab = Tab::Relay;
+                    self.status = format!("Loaded Swarm preset: {}", template.label());
+                    self.audit("swarm.preset_launched", template.short_id().to_string());
+                }
                 AppMessage::SetThreads(n) => {
                     self.settings.num_threads = n;
                     if let Some(st) = self.storage.as_ref() {
@@ -1820,6 +1880,25 @@ impl AiDashboardApp {
                     crate::commands::ProjectCommand::Run => {
                         self.editor.run_start(&self.tx, &self.rt);
                     }
+                    crate::commands::ProjectCommand::Setup => {
+                        self.editor.run_setup(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Verify => {
+                        self.editor.run_verify(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::Clean => {
+                        self.editor.run_clean(&self.tx, &self.rt);
+                    }
+                    crate::commands::ProjectCommand::GenerateScripts => {
+                        match self.editor.generate_automation_scripts() {
+                            Ok(n) => {
+                                self.status = format!("Generated {} automation scripts in workspace", n);
+                            }
+                            Err(e) => {
+                                self.status = format!("Script generation failed: {}", e);
+                            }
+                        }
+                    }
                 },
                 AppMessage::DeployApp { template, name } => {
                     match self.editor.scaffold_app(template, &name) {
@@ -1981,7 +2060,28 @@ impl AiDashboardApp {
 
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
+        let mut ordered_tabs = Vec::new();
+        for label in &self.settings.tab_order {
+            if let Some(tab) = Tab::from_label(label) {
+                if !ordered_tabs.contains(&tab) {
+                    ordered_tabs.push(tab);
+                }
+            }
+        }
         for tab in Tab::all() {
+            if !ordered_tabs.contains(&tab) {
+                ordered_tabs.push(tab);
+            }
+        }
+
+        for tab in ordered_tabs {
+            // Visibility check: Chat and Settings are permanently visible anchors
+            let is_visible = !tab.is_closable()
+                || self.settings.visible_tabs.iter().any(|v| v == tab.label() || (v == "Relay" && tab == Tab::Relay));
+            if !is_visible {
+                continue;
+            }
+
             let selected = self.tab == tab;
             let resp = ui.selectable_label(
                 selected,
