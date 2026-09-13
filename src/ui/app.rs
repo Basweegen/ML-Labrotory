@@ -1914,7 +1914,24 @@ impl AiDashboardApp {
                             self.settings.num_threads,
                         );
                         self.status = format!("🐝 Swarm Audit initiated using model '{}'", model);
-                        self.audit("editor.swarm_audit", file);
+                        self.audit("editor.swarm_audit", file.clone());
+
+                        // Stigmergic Blackboard memory deposit for ecosystem handoff
+                        let entropy = crate::ui::editor::EditorPanel::calculate_entropy(&code);
+                        let art = crate::swarm::blackboard::BlackboardArtifact::new(
+                            0,
+                            "Editor Security Sentinel",
+                            crate::ui::app::ModelRole::Critic,
+                            "security.audit",
+                            format!("Swarm Audit: {}", file),
+                            format!("File: {}\nLanguage: {}\nEntropy: {:.2} b/B\nPrompt:\n{}", file, lang, entropy, audit_prompt),
+                            7.5,
+                            vec!["editor".to_string(), "audit".to_string(), lang, "stigmergy".to_string()],
+                        );
+                        self.relay.blackboard.deposit(art);
+                        if let Some(st) = self.storage.as_ref() {
+                            let _ = st.save_blackboard(&self.relay.blackboard);
+                        }
                     } else {
                         self.status = "Swarm Audit failed: No model available.".to_string();
                     }

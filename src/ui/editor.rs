@@ -17,6 +17,48 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompilerDiagnostic {
+    pub language: String,
+    pub error_code: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<usize>,
+    pub message: String,
+    pub raw_snippet: String,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct TerminalSession {
+    pub id: usize,
+    pub name: String,
+    pub working_dir: PathBuf,
+    pub logs: Vec<CommandResult>,
+    pub history: Vec<String>,
+    pub history_idx: Option<usize>,
+    pub prompt_input: String,
+    pub is_running: bool,
+    pub running_cmd: String,
+    pub filter_query: String,
+}
+
+impl TerminalSession {
+    pub fn new(id: usize, name: &str, working_dir: PathBuf) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            working_dir,
+            logs: Vec::new(),
+            history: Vec::new(),
+            history_idx: None,
+            prompt_input: String::new(),
+            is_running: false,
+            running_cmd: String::new(),
+            filter_query: String::new(),
+        }
+    }
+}
+
 pub struct EditorPanel {
     pub code: String,
     pub language: String,
@@ -64,6 +106,10 @@ pub struct EditorPanel {
     pub terminal_is_running: bool,
     pub terminal_running_cmd: String,
     pub terminal_height_ratio: f32,
+    pub terminal_sessions: Vec<TerminalSession>,
+    pub active_terminal_idx: usize,
+    pub next_terminal_id: usize,
+    pub terminal_filter: String,
 
     // Application Scaffolding & Deployment State
     pub show_scaffold_modal: bool,
@@ -122,12 +168,158 @@ impl EditorPanel {
             terminal_is_running: false,
             terminal_running_cmd: String::new(),
             terminal_height_ratio: 0.55,
+            terminal_sessions: vec![TerminalSession::new(1, "bash 1", ws_dest)],
+            active_terminal_idx: 0,
+            next_terminal_id: 1,
+            terminal_filter: String::new(),
 
             show_scaffold_modal: false,
             scaffold_selected_template: AppTemplateType::RustHighPerformance,
             scaffold_app_name: "my_application".to_string(),
             last_deploy_report: None,
         }
+    }
+
+    /// Spawn a new terminal tab session
+    pub fn new_terminal_session(&mut self) {
+        self.next_terminal_id += 1;
+        let id = self.next_terminal_id;
+        let name = format!("bash {}", id);
+        let ws = self.workspace.root_path.clone();
+        let session = TerminalSession::new(id, &name, ws);
+        self.terminal_sessions.push(session);
+        self.active_terminal_idx = self.terminal_sessions.len().saturating_sub(1);
+        self.sync_active_session_fields();
+    }
+
+    /// Close a terminal tab session (preserves at least 1 session)
+    pub fn close_terminal_session(&mut self, idx: usize) {
+        if self.terminal_sessions.len() > 1 && idx < self.terminal_sessions.len() {
+            self.terminal_sessions.remove(idx);
+            if self.active_terminal_idx >= self.terminal_sessions.len() {
+                self.active_terminal_idx = self.terminal_sessions.len().saturating_sub(1);
+            } else if self.active_terminal_idx > idx {
+                self.active_terminal_idx -= 1;
+            }
+            self.sync_active_session_fields();
+        }
+    }
+
+    /// Sync active session data into top-level editor fields
+    pub fn sync_active_session_fields(&mut self) {
+        let idx = self.active_terminal_idx.min(self.terminal_sessions.len().saturating_sub(1));
+        if let Some(s) = self.terminal_sessions.get(idx) {
+            self.terminal_logs = s.logs.clone();
+            self.terminal_history = s.history.clone();
+            self.terminal_prompt_input = s.prompt_input.clone();
+            self.terminal_is_running = s.is_running;
+            self.terminal_running_cmd = s.running_cmd.clone();
+            self.terminal_history_idx = s.history_idx;
+            self.terminal_filter = s.filter_query.clone();
+        }
+    }
+
+    /// Sync top-level fields back into active session struct
+    pub fn update_active_session_from_fields(&mut self) {
+        let idx = self.active_terminal_idx.min(self.terminal_sessions.len().saturating_sub(1));
+        if let Some(s) = self.terminal_sessions.get_mut(idx) {
+            s.logs = self.terminal_logs.clone();
+            s.history = self.terminal_history.clone();
+            s.prompt_input = self.terminal_prompt_input.clone();
+            s.is_running = self.terminal_is_running;
+            s.running_cmd = self.terminal_running_cmd.clone();
+            s.history_idx = self.terminal_history_idx;
+            s.filter_query = self.terminal_filter.clone();
+        }
+    }
+
+    /// Calculate Shannon entropy (bits per byte) for code security auditing
+    pub fn calculate_entropy(s: &str) -> f32 {
+        if s.is_empty() {
+            return 0.0;
+        }
+        let mut counts = [0usize; 256];
+        for &b in s.as_bytes() {
+            counts[b as usize] += 1;
+        }
+        let len = s.len() as f32;
+        let mut entropy = 0.0_f32;
+        for &c in &counts {
+            if c > 0 {
+                let p = c as f32 / len;
+                entropy -= p * p.log2();
+            }
+        }
+        entropy
+    }
+
+    /// Extract structured compiler / runtime diagnostics from terminal output
+    pub fn extract_compiler_diagnostic(log: &CommandResult) -> Option<CompilerDiagnostic> {
+        if log.success || log.exit_code == Some(0) {
+            return None;
+        }
+        let combined = format!("{}\n{}", log.stdout, log.stderr);
+        if combined.trim().is_empty() {
+            return None;
+        }
+
+        // Rust compiler diagnostic pattern
+        if let Some(err_idx) = combined.find("error[E") {
+            let snippet = &combined[err_idx..];
+            let line_end = snippet.find('\n').unwrap_or(snippet.len());
+            let err_line = &snippet[..line_end];
+            let code = err_line.split(':').next().map(|s| s.trim().to_string());
+
+            let mut file_found = None;
+            let mut line_found = None;
+            if let Some(arrow_idx) = snippet.find("--> ") {
+                let arrow_sub = &snippet[arrow_idx + 4..];
+                let arrow_line = arrow_sub.lines().next().unwrap_or("");
+                let parts: Vec<&str> = arrow_line.split(':').collect();
+                if parts.len() >= 2 {
+                    file_found = Some(parts[0].trim().to_string());
+                    line_found = parts[1].trim().parse::<usize>().ok();
+                }
+            }
+
+            return Some(CompilerDiagnostic {
+                language: "rust".to_string(),
+                error_code: code,
+                file: file_found,
+                line: line_found,
+                message: err_line.to_string(),
+                raw_snippet: snippet.lines().take(12).collect::<Vec<_>>().join("\n"),
+            });
+        }
+
+        // Python traceback pattern
+        if let Some(tb_idx) = combined.find("Traceback (most recent call last):") {
+            let snippet = &combined[tb_idx..];
+            let last_line = snippet.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("Python Error");
+            return Some(CompilerDiagnostic {
+                language: "python".to_string(),
+                error_code: None,
+                file: None,
+                line: None,
+                message: last_line.trim().to_string(),
+                raw_snippet: snippet.lines().take(14).collect::<Vec<_>>().join("\n"),
+            });
+        }
+
+        // Generic error snippet
+        let first_err = combined
+            .lines()
+            .find(|l| l.contains("error") || l.contains("Error") || l.contains("FAIL") || l.contains("failed"))
+            .unwrap_or_else(|| combined.lines().next().unwrap_or("Process failed with non-zero exit"));
+
+        Some(CompilerDiagnostic {
+            language: "generic".to_string(),
+            error_code: None,
+            file: None,
+            line: None,
+            message: first_err.trim().to_string(),
+            raw_snippet: combined.lines().take(10).collect::<Vec<_>>().join("\n"),
+        })
     }
 
     pub fn push_coder_message(&mut self, msg: ChatMessage) {
@@ -198,6 +390,10 @@ impl EditorPanel {
         // Built-in terminal commands for native VS Code terminal behavior
         if trimmed == "clear" || trimmed == "cls" {
             self.terminal_logs.clear();
+            let idx = self.active_terminal_idx.min(self.terminal_sessions.len().saturating_sub(1));
+            if let Some(s) = self.terminal_sessions.get_mut(idx) {
+                s.logs.clear();
+            }
             return;
         }
 
@@ -271,6 +467,7 @@ impl EditorPanel {
 
         self.terminal_is_running = true;
         self.terminal_running_cmd = trimmed.to_string();
+        self.update_active_session_from_fields();
 
         let working_dir = self.workspace.root_path.clone();
         let cmd_str = trimmed.to_string();
@@ -297,9 +494,18 @@ impl EditorPanel {
     pub fn on_terminal_finished(&mut self, result: CommandResult) {
         self.terminal_is_running = false;
         self.terminal_running_cmd.clear();
-        self.terminal_logs.push(result);
+        self.terminal_logs.push(result.clone());
         if self.terminal_logs.len() > 100 {
             self.terminal_logs.remove(0);
+        }
+        let idx = self.active_terminal_idx.min(self.terminal_sessions.len().saturating_sub(1));
+        if let Some(s) = self.terminal_sessions.get_mut(idx) {
+            s.is_running = false;
+            s.running_cmd.clear();
+            s.logs.push(result);
+            if s.logs.len() > 100 {
+                s.logs.remove(0);
+            }
         }
     }
 
@@ -581,7 +787,16 @@ impl EditorPanel {
                 |ui| {
                     ui.set_width(center_width);
                     ui.set_height(total_h);
-                    self.show_editor_and_terminal_pane(ui, tx, rt);
+                    self.show_editor_and_terminal_pane(
+                        ui,
+                        models,
+                        selected_model,
+                        system_prompt,
+                        api_client,
+                        tx,
+                        rt,
+                        num_threads,
+                    );
                 },
             );
 
@@ -833,8 +1048,13 @@ impl EditorPanel {
     fn show_editor_and_terminal_pane(
         &mut self,
         ui: &mut egui::Ui,
+        models: &[crate::ollama::api::Model],
+        selected_model: &Option<String>,
+        system_prompt: &str,
+        api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        num_threads: u32,
     ) {
         let frame = egui::Frame::NONE
             .fill(egui::Color32::from_rgb(0x0a, 0x0f, 0x18))
@@ -854,7 +1074,16 @@ impl EditorPanel {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
-                self.show_terminal_dock(ui, tx, rt);
+                self.show_terminal_dock(
+                    ui,
+                    models,
+                    selected_model,
+                    system_prompt,
+                    api_client,
+                    tx,
+                    rt,
+                    num_threads,
+                );
             }
         });
     }
@@ -993,7 +1222,7 @@ impl EditorPanel {
             });
         });
 
-        // Secondary Toolbar Row: Templates & Live Metrics / Hints
+        // Secondary Toolbar Row: Templates & Live Quantum Code Health HUD
         ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.label(
@@ -1019,6 +1248,19 @@ impl EditorPanel {
             if ui.small_button("JS").clicked() {
                 self.apply_template("javascript");
             }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Quantum Code Health HUD: Shannon Entropy, Memory Safety, Guardrail
+            let entropy = Self::calculate_entropy(&self.code);
+            let (entropy_text, entropy_color) = if entropy <= 4.7 {
+                (format!("🛡 Entropy: {:.2} b/B (Safe)", entropy), egui::Color32::from_rgb(0x10, 0xb9, 0x81))
+            } else {
+                (format!("⚠️ Entropy: {:.2} b/B (High Secret Risk)", entropy), egui::Color32::from_rgb(0xf5, 0x9e, 0x0b))
+            };
+            ui.label(egui::RichText::new(entropy_text).size(10.5).monospace().color(entropy_color));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let hint = self.run_hint();
@@ -1128,8 +1370,13 @@ impl EditorPanel {
     fn show_terminal_dock(
         &mut self,
         ui: &mut egui::Ui,
+        models: &[crate::ollama::api::Model],
+        selected_model: &Option<String>,
+        system_prompt: &str,
+        api_client: &Option<OllamaClient>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
+        num_threads: u32,
     ) {
         let frame = egui::Frame::NONE
             .fill(egui::Color32::from_rgb(0x08, 0x0c, 0x14))
@@ -1243,22 +1490,94 @@ impl EditorPanel {
                 self.workspace.root_path.to_string_lossy().to_string()
             };
 
-            // Terminal Sub-header Bar (Active Shell Tab & Working Directory)
-            ui.horizontal(|ui| {
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(0x0f, 0x17, 0x2a))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0xbd, 0xf8)))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(" bash (Integrated Terminal)")
-                                .size(11.0)
-                                .monospace()
-                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
-                        );
-                    });
+            // Multi-Terminal Sub-header Bar (Session Tabs, Filter, Working Dir, & Controls)
+            let mut switch_to_idx = None;
+            let mut close_session_idx = None;
 
+            ui.horizontal(|ui| {
+                for (idx, sess) in self.terminal_sessions.iter().enumerate() {
+                    let is_active = idx == self.active_terminal_idx;
+                    let (fill, stroke_col, text_col) = if is_active {
+                        (
+                            egui::Color32::from_rgb(0x0f, 0x27, 0x44),
+                            egui::Color32::from_rgb(0x38, 0xbd, 0xf8),
+                            egui::Color32::from_rgb(0x38, 0xbd, 0xf8),
+                        )
+                    } else {
+                        (
+                            egui::Color32::from_rgb(0x0b, 0x11, 0x20),
+                            egui::Color32::from_rgb(0x1e, 0x29, 0x3b),
+                            egui::Color32::from_rgb(0x94, 0xa3, 0xb8),
+                        )
+                    };
+
+                    egui::Frame::NONE
+                        .fill(fill)
+                        .stroke(egui::Stroke::new(1.0, stroke_col))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let tab_label = format!(" {}", sess.name);
+                                if ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(tab_label)
+                                            .size(11.0)
+                                            .monospace()
+                                            .color(text_col),
+                                    ).sense(egui::Sense::click())
+                                ).clicked() {
+                                    switch_to_idx = Some(idx);
+                                }
+                                if self.terminal_sessions.len() > 1 {
+                                    if ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new("✕")
+                                                .size(9.5)
+                                                .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                                        ).sense(egui::Sense::click())
+                                    ).on_hover_text("Close terminal tab").clicked() {
+                                        close_session_idx = Some(idx);
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(2.0);
+                }
+
+                if let Some(idx) = close_session_idx {
+                    self.close_terminal_session(idx);
+                } else if let Some(idx) = switch_to_idx {
+                    self.update_active_session_from_fields();
+                    self.active_terminal_idx = idx;
+                    self.sync_active_session_fields();
+                }
+
+                // [+] Add new terminal session tab
+                if ui.small_button("＋").on_hover_text("Spawn new integrated terminal session").clicked() {
+                    self.update_active_session_from_fields();
+                    self.new_terminal_session();
+                }
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Inline log filter
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.terminal_filter)
+                        .id_salt("ide_terminal_filter_input")
+                        .hint_text("🔍 Filter logs...")
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(110.0),
+                );
+                if !self.terminal_filter.is_empty() {
+                    if ui.small_button("✕").on_hover_text("Clear filter").clicked() {
+                        self.terminal_filter.clear();
+                    }
+                }
+
+                ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!("📁 {}", ws_display))
                         .size(11.0)
@@ -1338,6 +1657,9 @@ impl EditorPanel {
                 .corner_radius(egui::CornerRadius::same(5))
                 .inner_margin(egui::Margin::symmetric(8, 6));
 
+            let mut auto_fix_trigger: Option<(String, Option<i32>, CompilerDiagnostic)> = None;
+            let filter_term = self.terminal_filter.trim().to_lowercase();
+
             term_frame.show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 let term_screen_h = (ui.available_height() - 40.0).max(120.0);
@@ -1361,6 +1683,15 @@ impl EditorPanel {
                             );
                         } else {
                             for log in &self.terminal_logs {
+                                if !filter_term.is_empty() {
+                                    let c_match = log.cmd.to_lowercase().contains(&filter_term);
+                                    let o_match = log.stdout.to_lowercase().contains(&filter_term);
+                                    let e_match = log.stderr.to_lowercase().contains(&filter_term);
+                                    if !c_match && !o_match && !e_match {
+                                        continue;
+                                    }
+                                }
+
                                 // Prompt line
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
@@ -1399,18 +1730,46 @@ impl EditorPanel {
                                     );
                                 }
 
-                                // Status line
+                                // Status line & Auto-Fix Trigger
+                                let is_err = !log.success || log.exit_code != Some(0);
                                 let (status_str, status_col) = match log.exit_code {
                                     Some(0) => (format!("➜ Process exited with code 0 ({}ms)", log.duration_ms), egui::Color32::from_rgb(0x05, 0x96, 0x69)),
                                     Some(c) => (format!("✖ Process exited with code {} ({}ms)", c, log.duration_ms), egui::Color32::from_rgb(0xef, 0x44, 0x44)),
                                     None => (format!("⚠ Process terminated ({}ms)", log.duration_ms), egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)),
                                 };
-                                ui.label(
-                                    egui::RichText::new(status_str)
-                                        .size(10.0)
-                                        .monospace()
-                                        .color(status_col),
-                                );
+
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(status_str)
+                                            .size(10.0)
+                                            .monospace()
+                                            .color(status_col),
+                                    );
+
+                                    if is_err {
+                                        if let Some(diag) = Self::extract_compiler_diagnostic(log) {
+                                            let btn_label = if let Some(code) = &diag.error_code {
+                                                format!("⚡ Auto-Fix [{}]", code)
+                                            } else {
+                                                "⚡ Swarm Auto-Fix & Patch".to_string()
+                                            };
+                                            let btn = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(btn_label)
+                                                        .size(10.0)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                )
+                                                .fill(egui::Color32::from_rgb(0x99, 0x1b, 0x1b))
+                                                .corner_radius(egui::CornerRadius::same(3)),
+                                            ).on_hover_text(format!("Send diagnostic '{}' directly to AI Coder to generate an autonomous fix patch", diag.message));
+
+                                            if btn.clicked() {
+                                                auto_fix_trigger = Some((log.cmd.clone(), log.exit_code, diag));
+                                            }
+                                        }
+                                    }
+                                });
                                 ui.add_space(4.0);
                             }
                         }
@@ -1433,6 +1792,40 @@ impl EditorPanel {
                             });
                         }
                     });
+
+                // Trigger autonomous auto-fix if requested
+                if let Some((cmd, code, diag)) = auto_fix_trigger {
+                    let loc_str = match (&diag.file, &diag.line) {
+                        (Some(f), Some(l)) => format!("{}:{}", f, l),
+                        (Some(f), None) => f.clone(),
+                        _ => "unknown".to_string(),
+                    };
+                    let fix_prompt = format!(
+                        "Autonomous Compiler Fix Request:\n\
+                        The command `{}` failed with exit code {:?}.\n\
+                        Diagnostic: {}\n\
+                        Location: {}\n\n\
+                        Compiler / Runtime Output Snippet:\n```\n{}\n```\n\n\
+                        Please analyze this failure, explain the root cause, and provide the complete fixed replacement code in a clean code block.",
+                        cmd,
+                        code.unwrap_or(1),
+                        diag.message,
+                        loc_str,
+                        diag.raw_snippet
+                    );
+                    self.coder_input = fix_prompt.clone();
+                    self.show_coder_chat = true;
+                    self.send_coder_message(
+                        &fix_prompt,
+                        models,
+                        selected_model,
+                        system_prompt,
+                        api_client,
+                        tx,
+                        rt,
+                        num_threads,
+                    );
+                }
 
                 // Interactive Bottom Terminal Prompt
                 ui.separator();
@@ -2761,5 +3154,135 @@ mod tests {
 
         // Restore initial
         let _ = e.workspace.set_root(initial_root);
+    }
+
+    #[test]
+    fn test_terminal_multi_sessions() {
+        let mut e = EditorPanel::new();
+        assert_eq!(e.terminal_sessions.len(), 1);
+        assert_eq!(e.active_terminal_idx, 0);
+
+        // Spawn a new session tab
+        e.new_terminal_session();
+        assert_eq!(e.terminal_sessions.len(), 2);
+        assert_eq!(e.active_terminal_idx, 1);
+        assert_eq!(e.terminal_sessions[1].name, "bash 2");
+
+        // Write log in active session 1
+        e.terminal_logs.push(CommandResult {
+            cmd: "echo 'in session 2'".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            exit_code: Some(0),
+            success: true,
+            stdout: "in session 2\n".to_string(),
+            stderr: String::new(),
+            duration_ms: 5,
+            executed_at: chrono::Utc::now(),
+        });
+        e.update_active_session_from_fields();
+
+        // Switch to session 0
+        e.active_terminal_idx = 0;
+        e.sync_active_session_fields();
+        assert!(e.terminal_logs.is_empty(), "Session 0 should have no logs yet");
+
+        // Switch back to session 1
+        e.active_terminal_idx = 1;
+        e.sync_active_session_fields();
+        assert_eq!(e.terminal_logs.len(), 1);
+        assert_eq!(e.terminal_logs[0].cmd, "echo 'in session 2'");
+
+        // Close session 0
+        e.close_terminal_session(0);
+        assert_eq!(e.terminal_sessions.len(), 1);
+        assert_eq!(e.active_terminal_idx, 0);
+        assert_eq!(e.terminal_sessions[0].name, "bash 2");
+
+        // Closing the only remaining session should be a no-op
+        e.close_terminal_session(0);
+        assert_eq!(e.terminal_sessions.len(), 1);
+    }
+
+    #[test]
+    fn test_shannon_entropy_calculation() {
+        // Empty string
+        assert_eq!(EditorPanel::calculate_entropy(""), 0.0);
+
+        // Single repetitive character -> 0 entropy
+        let low = EditorPanel::calculate_entropy("aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(low, 0.0);
+
+        // Moderate natural code
+        let code = "fn main() { println!(\"Hello, world!\"); }";
+        let code_entropy = EditorPanel::calculate_entropy(code);
+        assert!(code_entropy > 3.0 && code_entropy < 4.8);
+
+        // High entropy (e.g. base64 / encrypted secret / token)
+        let high_secret = "VjhzKzFhMmJjZDNlZjQ1Njc4OTAqJiZeJSQjQCExMjM0NTY3ODkw";
+        let secret_entropy = EditorPanel::calculate_entropy(high_secret);
+        assert!(secret_entropy > 4.5, "High random tokens have high Shannon entropy");
+    }
+
+    #[test]
+    fn test_compiler_diagnostic_extraction() {
+        // 1. Successful result returns None
+        let ok_res = CommandResult {
+            cmd: "cargo check".to_string(),
+            working_dir: PathBuf::from("/test"),
+            exit_code: Some(0),
+            success: true,
+            stdout: "Finished dev profile".to_string(),
+            stderr: String::new(),
+            duration_ms: 100,
+            executed_at: chrono::Utc::now(),
+        };
+        assert!(EditorPanel::extract_compiler_diagnostic(&ok_res).is_none());
+
+        // 2. Rust compiler diagnostic
+        let rust_err = CommandResult {
+            cmd: "cargo check".to_string(),
+            working_dir: PathBuf::from("/test"),
+            exit_code: Some(101),
+            success: false,
+            stdout: String::new(),
+            stderr: "error[E0308]: mismatched types\n  --> src/main.rs:42:15\n   |\n42 |     let x: u32 = \"str\";\n".to_string(),
+            duration_ms: 250,
+            executed_at: chrono::Utc::now(),
+        };
+        let diag = EditorPanel::extract_compiler_diagnostic(&rust_err).expect("Must extract Rust error");
+        assert_eq!(diag.language, "rust");
+        assert_eq!(diag.error_code, Some("error[E0308]".to_string()));
+        assert_eq!(diag.file, Some("src/main.rs".to_string()));
+        assert_eq!(diag.line, Some(42));
+
+        // 3. Python traceback
+        let py_err = CommandResult {
+            cmd: "python3 test.py".to_string(),
+            working_dir: PathBuf::from("/test"),
+            exit_code: Some(1),
+            success: false,
+            stdout: String::new(),
+            stderr: "Traceback (most recent call last):\n  File \"test.py\", line 12, in <module>\nZeroDivisionError: division by zero\n".to_string(),
+            duration_ms: 80,
+            executed_at: chrono::Utc::now(),
+        };
+        let py_diag = EditorPanel::extract_compiler_diagnostic(&py_err).expect("Must extract Python error");
+        assert_eq!(py_diag.language, "python");
+        assert!(py_diag.message.contains("ZeroDivisionError"));
+
+        // 4. Generic error snippet
+        let gen_err = CommandResult {
+            cmd: "./verify.sh".to_string(),
+            working_dir: PathBuf::from("/test"),
+            exit_code: Some(2),
+            success: false,
+            stdout: "Execution failed due to missing dependency".to_string(),
+            stderr: String::new(),
+            duration_ms: 30,
+            executed_at: chrono::Utc::now(),
+        };
+        let gen_diag = EditorPanel::extract_compiler_diagnostic(&gen_err).expect("Must extract generic error");
+        assert_eq!(gen_diag.language, "generic");
+        assert!(gen_diag.message.contains("Execution failed"));
     }
 }
