@@ -595,7 +595,13 @@ impl CommandRunner {
         let start = Instant::now();
         let executed_at = Utc::now();
 
-        let output = tokio::process::Command::new("sh")
+        let shell = if Path::new("/bin/bash").exists() || Path::new("/usr/bin/bash").exists() {
+            "bash"
+        } else {
+            "sh"
+        };
+
+        let output = tokio::process::Command::new(shell)
             .arg("-c")
             .arg(trimmed)
             .current_dir(working_dir)

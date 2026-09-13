@@ -57,10 +57,13 @@ pub struct EditorPanel {
     // Terminal & Command Runner State
     pub show_terminal: bool,
     pub terminal_input: String,
+    pub terminal_prompt_input: String,
     pub terminal_history: Vec<String>,
+    pub terminal_history_idx: Option<usize>,
     pub terminal_logs: Vec<CommandResult>,
     pub terminal_is_running: bool,
     pub terminal_running_cmd: String,
+    pub terminal_height_ratio: f32,
 
     // Application Scaffolding & Deployment State
     pub show_scaffold_modal: bool,
@@ -112,10 +115,13 @@ impl EditorPanel {
 
             show_terminal: true,
             terminal_input: String::new(),
+            terminal_prompt_input: String::new(),
             terminal_history: Vec::new(),
+            terminal_history_idx: None,
             terminal_logs: Vec::new(),
             terminal_is_running: false,
             terminal_running_cmd: String::new(),
+            terminal_height_ratio: 0.55,
 
             show_scaffold_modal: false,
             scaffold_selected_template: AppTemplateType::RustHighPerformance,
@@ -185,9 +191,86 @@ impl EditorPanel {
         }
 
         self.terminal_history.push(trimmed.to_string());
+        self.terminal_input.clear();
+        self.terminal_prompt_input.clear();
+        self.terminal_history_idx = None;
+
+        // Built-in terminal commands for native VS Code terminal behavior
+        if trimmed == "clear" || trimmed == "cls" {
+            self.terminal_logs.clear();
+            return;
+        }
+
+        if trimmed == "pwd" {
+            let res = CommandResult {
+                cmd: trimmed.to_string(),
+                working_dir: self.workspace.root_path.clone(),
+                exit_code: Some(0),
+                success: true,
+                stdout: self.workspace.root_path.display().to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+                executed_at: chrono::Utc::now(),
+            };
+            self.on_terminal_finished(res);
+            return;
+        }
+
+        if trimmed == "cd" || trimmed.starts_with("cd ") {
+            let target_str = if trimmed == "cd" {
+                "~"
+            } else {
+                trimmed[3..].trim()
+            };
+
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            let target_path = if target_str == "~" || target_str.starts_with("~/") {
+                if target_str == "~" {
+                    home
+                } else {
+                    home.join(&target_str[2..])
+                }
+            } else {
+                let p = Path::new(target_str);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.workspace.root_path.join(p)
+                }
+            };
+
+            let target_canonical = target_path.canonicalize().unwrap_or(target_path);
+            if target_canonical.is_dir() {
+                let _ = self.workspace.set_root(target_canonical.clone());
+                let res = CommandResult {
+                    cmd: trimmed.to_string(),
+                    working_dir: target_canonical,
+                    exit_code: Some(0),
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                    executed_at: chrono::Utc::now(),
+                };
+                self.on_terminal_finished(res);
+            } else {
+                let res = CommandResult {
+                    cmd: trimmed.to_string(),
+                    working_dir: self.workspace.root_path.clone(),
+                    exit_code: Some(1),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("cd: no such file or directory: {}", target_str),
+                    duration_ms: 1,
+                    executed_at: chrono::Utc::now(),
+                };
+                self.on_terminal_finished(res);
+            }
+            return;
+        }
+
         self.terminal_is_running = true;
         self.terminal_running_cmd = trimmed.to_string();
-        self.terminal_input.clear();
 
         let working_dir = self.workspace.root_path.clone();
         let cmd_str = trimmed.to_string();
@@ -959,16 +1042,18 @@ impl EditorPanel {
 
         ui.add_space(4.0);
 
-        // Dynamic Height Editor Sizing: Fills 100% of remaining vertical space
+        // Dynamic Height Editor Sizing: Apportioned with Terminal Height Ratio
         let syntax = Self::syntax_for_language(&self.language);
         let avail_h = ui.available_height();
         let reserved_for_diff = if self.pending_suggestion.is_some() { 130.0 } else { 0.0 };
+        let term_ratio = self.terminal_height_ratio.clamp(0.20, 0.80);
+        let editor_ratio = (1.0 - term_ratio).clamp(0.20, 0.80);
         let target_editor_h = if self.show_terminal {
-            (avail_h * 0.78 - reserved_for_diff).max(360.0)
+            (avail_h * editor_ratio - reserved_for_diff).max(180.0)
         } else {
             (avail_h - 10.0 - reserved_for_diff).max(250.0)
         };
-        let editor_rows = ((target_editor_h / 17.5) as usize).max(12);
+        let editor_rows = ((target_editor_h / 17.5) as usize).max(10);
 
         let mut editor = CodeEditor::default()
             .id_source("code_editor_main")
@@ -1056,7 +1141,7 @@ impl EditorPanel {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("⚡ Terminal Dock")
+                    egui::RichText::new("⚡ Command Runner")
                         .size(12.5)
                         .strong()
                         .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
@@ -1067,6 +1152,12 @@ impl EditorPanel {
                         egui::RichText::new(format!("⏳ Running '{}'...", self.terminal_running_cmd))
                             .size(11.0)
                             .color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("● Terminal Console Ready")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x34, 0xd3, 0x99)),
                     );
                 }
 
@@ -1109,7 +1200,8 @@ impl EditorPanel {
             ui.horizontal(|ui| {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.terminal_input)
-                        .hint_text("Enter terminal command... (e.g. cargo check, python3 main.py, sh setup.sh)")
+                        .id_salt("ide_terminal_top_cmd_input")
+                        .hint_text("Enter command... (e.g. cargo check, git status, python3 main.py)")
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width() - 75.0),
                 );
@@ -1134,79 +1226,282 @@ impl EditorPanel {
                 self.run_terminal_command(&cmd, tx, rt);
             }
 
-            ui.add_space(3.0);
-            // Log output viewport
-            let term_scroll_h = (ui.available_height() - 4.0).max(65.0);
-            egui::ScrollArea::vertical()
-                .id_salt("terminal_log_scroll")
-                .max_height(term_scroll_h)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    if self.terminal_logs.is_empty() {
+            // Divider line below command runner part
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(2.0);
+
+            // Integrated Terminal Section (VS Code Style)
+            let ws_display = if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+                let p_str = self.workspace.root_path.to_string_lossy();
+                if let Some(rel) = p_str.strip_prefix(&home) {
+                    format!("~{}", rel)
+                } else {
+                    p_str.to_string()
+                }
+            } else {
+                self.workspace.root_path.to_string_lossy().to_string()
+            };
+
+            // Terminal Sub-header Bar (Active Shell Tab & Working Directory)
+            ui.horizontal(|ui| {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(0x0f, 0x17, 0x2a))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0xbd, 0xf8)))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Terminal console ready. Click a quick action or enter a command above.")
+                            egui::RichText::new(" bash (Integrated Terminal)")
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b))
-                                .monospace(),
+                                .monospace()
+                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
                         );
-                    } else {
+                    });
+
+                ui.label(
+                    egui::RichText::new(format!("📁 {}", ws_display))
+                        .size(11.0)
+                        .monospace()
+                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                );
+
+                if self.terminal_is_running {
+                    ui.label(
+                        egui::RichText::new(format!("● RUNNING: {}", self.terminal_running_cmd))
+                            .size(10.5)
+                            .strong()
+                            .color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("● ONLINE")
+                            .size(10.5)
+                            .strong()
+                            .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("📋 Copy Terminal").on_hover_text("Copy terminal buffer to clipboard").clicked() {
+                        let mut full_term = String::new();
                         for log in &self.terminal_logs {
-                            let (badge_bg, badge_text) = match log.exit_code {
-                                Some(0) => (egui::Color32::from_rgb(0x06, 0x4e, 0x3b), "SUCCESS (0)"),
-                                Some(_c) => (egui::Color32::from_rgb(0x7f, 0x1d, 0x1d), "FAILED"),
-                                None => (egui::Color32::from_rgb(0x78, 0x35, 0x0f), "TERMINATED"),
-                            };
+                            full_term.push_str(&format!("$ {}\n", log.cmd));
+                            if !log.stdout.is_empty() { full_term.push_str(&log.stdout); full_term.push('\n'); }
+                            if !log.stderr.is_empty() { full_term.push_str(&log.stderr); full_term.push('\n'); }
+                        }
+                        ui.ctx().copy_text(full_term);
+                    }
 
-                            egui::Frame::NONE
-                                .fill(egui::Color32::from_rgb(0x0f, 0x17, 0x2a))
-                                .corner_radius(egui::CornerRadius::same(4))
-                                .inner_margin(egui::Margin::same(6))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(badge_text)
-                                                .size(10.0)
-                                                .strong()
-                                                .background_color(badge_bg)
-                                                .color(egui::Color32::WHITE),
-                                        );
-                                        ui.label(
-                                            egui::RichText::new(&log.cmd)
-                                                .size(11.0)
-                                                .strong()
-                                                .monospace()
-                                                .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
-                                        );
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("{}ms", log.duration_ms))
-                                                    .size(10.0)
-                                                    .color(egui::Color32::GRAY),
-                                            );
-                                        });
-                                    });
-
-                                    if !log.stdout.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(&log.stdout)
-                                                .size(10.5)
-                                                .monospace()
-                                                .color(egui::Color32::from_rgb(0xa7, 0xf3, 0xd0)),
-                                        );
-                                    }
-                                    if !log.stderr.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(&log.stderr)
-                                                .size(10.5)
-                                                .monospace()
-                                                .color(egui::Color32::from_rgb(0xfc, 0xa5, 0xa5)),
-                                        );
-                                    }
-                                });
-                            ui.add_space(3.0);
+                    ui.add_space(6.0);
+                    // Height presets & expand toggle
+                    if self.terminal_height_ratio < 0.62 {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("⤢ Expand Height").size(11.0).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0x1e, 0x3a, 0x8a)))
+                            .on_hover_text("Expand terminal dock to commanding 70% height")
+                            .clicked()
+                        {
+                            self.terminal_height_ratio = 0.70;
+                        }
+                    } else {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("⤡ Balance Height").size(11.0).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+                            .on_hover_text("Return terminal dock to balanced 55% height")
+                            .clicked()
+                        {
+                            self.terminal_height_ratio = 0.55;
                         }
                     }
+
+                    if ui.selectable_label((self.terminal_height_ratio - 0.70).abs() < 0.05, "70%").on_hover_text("70% Terminal / 30% Editor (Maximized)").clicked() {
+                        self.terminal_height_ratio = 0.70;
+                    }
+                    if ui.selectable_label((self.terminal_height_ratio - 0.55).abs() < 0.05, "55%").on_hover_text("55% Terminal / 45% Editor (Expanded)").clicked() {
+                        self.terminal_height_ratio = 0.55;
+                    }
+                    if ui.selectable_label((self.terminal_height_ratio - 0.35).abs() < 0.05, "35%").on_hover_text("35% Terminal / 65% Editor (Compact)").clicked() {
+                        self.terminal_height_ratio = 0.35;
+                    }
+                    ui.label(egui::RichText::new("Dock Height:").size(10.5).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)));
                 });
+            });
+
+            ui.add_space(2.0);
+
+            // Integrated Terminal Screen Box spanning cleanly to dock borders
+            let user_name = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+            let prompt_prefix = format!("{}@krovyx:{}$", user_name, ws_display);
+
+            let term_frame = egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(0x05, 0x09, 0x14))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+                .corner_radius(egui::CornerRadius::same(5))
+                .inner_margin(egui::Margin::symmetric(8, 6));
+
+            term_frame.show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let term_screen_h = (ui.available_height() - 40.0).max(120.0);
+
+                egui::ScrollArea::vertical()
+                    .id_salt("ide_terminal_screen_scroll")
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(term_screen_h)
+                    .max_height(term_screen_h)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if self.terminal_logs.is_empty() && !self.terminal_is_running {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "⚡ Krovyx Terminal v1.0 [Ready]\nWorking directory: {}\nEnter commands at prompt below or use quick actions above.",
+                                    ws_display
+                                ))
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+                            );
+                        } else {
+                            for log in &self.terminal_logs {
+                                // Prompt line
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&prompt_prefix)
+                                            .size(11.0)
+                                            .monospace()
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(&log.cmd)
+                                            .size(11.0)
+                                            .monospace()
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                    );
+                                });
+
+                                // Stdout
+                                if !log.stdout.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&log.stdout)
+                                            .size(10.5)
+                                            .monospace()
+                                            .color(egui::Color32::from_rgb(0xec, 0xfd, 0xf5)),
+                                    );
+                                }
+
+                                // Stderr
+                                if !log.stderr.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&log.stderr)
+                                            .size(10.5)
+                                            .monospace()
+                                            .color(egui::Color32::from_rgb(0xf8, 0x71, 0x71)),
+                                    );
+                                }
+
+                                // Status line
+                                let (status_str, status_col) = match log.exit_code {
+                                    Some(0) => (format!("➜ Process exited with code 0 ({}ms)", log.duration_ms), egui::Color32::from_rgb(0x05, 0x96, 0x69)),
+                                    Some(c) => (format!("✖ Process exited with code {} ({}ms)", c, log.duration_ms), egui::Color32::from_rgb(0xef, 0x44, 0x44)),
+                                    None => (format!("⚠ Process terminated ({}ms)", log.duration_ms), egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)),
+                                };
+                                ui.label(
+                                    egui::RichText::new(status_str)
+                                        .size(10.0)
+                                        .monospace()
+                                        .color(status_col),
+                                );
+                                ui.add_space(4.0);
+                            }
+                        }
+
+                        if self.terminal_is_running {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&prompt_prefix)
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&self.terminal_running_cmd)
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                );
+                                ui.spinner();
+                            });
+                        }
+                    });
+
+                // Interactive Bottom Terminal Prompt
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&prompt_prefix)
+                            .size(11.0)
+                            .monospace()
+                            .strong()
+                            .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
+                    );
+
+                    let mut exec_term_prompt = false;
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.terminal_prompt_input)
+                            .id_salt("ide_terminal_interactive_prompt")
+                            .hint_text("Enter shell command... (Enter to run, ↑/↓ history)")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(ui.available_width() - 50.0),
+                    );
+
+                    // Up / Down arrow history recall
+                    if resp.has_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && !self.terminal_history.is_empty() {
+                            let next_idx = match self.terminal_history_idx {
+                                None => self.terminal_history.len().saturating_sub(1),
+                                Some(0) => 0,
+                                Some(i) => i.saturating_sub(1),
+                            };
+                            self.terminal_history_idx = Some(next_idx);
+                            if let Some(cmd) = self.terminal_history.get(next_idx) {
+                                self.terminal_prompt_input = cmd.clone();
+                            }
+                        } else if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                            if let Some(i) = self.terminal_history_idx {
+                                if i + 1 < self.terminal_history.len() {
+                                    self.terminal_history_idx = Some(i + 1);
+                                    if let Some(cmd) = self.terminal_history.get(i + 1) {
+                                        self.terminal_prompt_input = cmd.clone();
+                                    }
+                                } else {
+                                    self.terminal_history_idx = None;
+                                    self.terminal_prompt_input.clear();
+                                }
+                            }
+                        }
+                    }
+
+                    if (resp.lost_focus() || resp.has_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        exec_term_prompt = true;
+                    }
+
+                    if ui.add_enabled(!self.terminal_is_running && !self.terminal_prompt_input.trim().is_empty(),
+                        egui::Button::new(egui::RichText::new("↵").size(11.0).color(egui::Color32::WHITE))
+                            .fill(egui::Color32::from_rgb(0x05, 0x96, 0x69))
+                            .corner_radius(egui::CornerRadius::same(3))
+                    ).clicked() {
+                        exec_term_prompt = true;
+                    }
+
+                    if exec_term_prompt {
+                        let cmd = self.terminal_prompt_input.clone();
+                        self.terminal_prompt_input.clear();
+                        self.terminal_history_idx = None;
+                        self.run_terminal_command(&cmd, tx, rt);
+                        resp.request_focus();
+                    }
+                });
+            });
         });
     }
 
@@ -2413,14 +2708,58 @@ mod tests {
         assert_eq!(coder_narrow, 260.0);
         assert_eq!(center_narrow, 320.0);
 
-        // Test dynamic row calculation filling viewport
+        // Test dynamic row calculation filling viewport across terminal height ratios
         let avail_h = 900.0_f32;
         let target_h_no_term = (avail_h - 10.0).max(250.0);
-        let rows_no_term = ((target_h_no_term / 17.5) as usize).max(12);
+        let rows_no_term = ((target_h_no_term / 17.5) as usize).max(10);
         assert!(rows_no_term >= 50, "Without terminal, editor should fill 50+ rows on 900px height");
 
-        let target_h_with_term = (avail_h * 0.78).max(360.0);
-        let rows_with_term = ((target_h_with_term / 17.5) as usize).max(12);
-        assert!(rows_with_term >= 40, "With terminal lowered, editor should allocate 40+ rows");
+        // Expanded default terminal ratio (55% terminal, 45% editor)
+        let ratio_default = 0.55_f32;
+        let target_h_default = (avail_h * (1.0 - ratio_default)).max(180.0);
+        let rows_default = ((target_h_default / 17.5) as usize).max(10);
+        assert!(rows_default >= 23, "With 55% terminal, editor should comfortably display 23+ rows");
+
+        // Maximized terminal ratio (70% terminal, 30% editor)
+        let ratio_max = 0.70_f32;
+        let target_h_max = (avail_h * (1.0 - ratio_max)).max(180.0);
+        let rows_max = ((target_h_max / 17.5) as usize).max(10);
+        assert!(rows_max >= 15, "With 70% terminal, editor should allocate 15+ rows");
+
+        // Compact terminal ratio (35% terminal, 65% editor)
+        let ratio_compact = 0.35_f32;
+        let target_h_compact = (avail_h * (1.0 - ratio_compact)).max(180.0);
+        let rows_compact = ((target_h_compact / 17.5) as usize).max(10);
+        assert!(rows_compact >= 33, "With 35% terminal, editor should allocate 33+ rows");
+    }
+
+    #[test]
+    fn test_terminal_builtins_and_integrated_session() {
+        let (tx, _rx) = mpsc::channel();
+        let rt = Runtime::new().unwrap();
+        let mut e = EditorPanel::new();
+
+        // 1. Test pwd command
+        e.run_terminal_command("pwd", &tx, &rt);
+        assert_eq!(e.terminal_logs.len(), 1);
+        assert_eq!(e.terminal_logs[0].cmd, "pwd");
+        assert!(e.terminal_logs[0].success);
+        assert_eq!(e.terminal_logs[0].stdout, e.workspace.root_path.display().to_string());
+
+        // 2. Test clear command
+        e.run_terminal_command("clear", &tx, &rt);
+        assert!(e.terminal_logs.is_empty(), "clear must empty the terminal buffer");
+
+        // 3. Test cd command
+        let initial_root = e.workspace.root_path.clone();
+        let temp_dir = std::env::temp_dir();
+        e.run_terminal_command(&format!("cd {}", temp_dir.display()), &tx, &rt);
+        assert_eq!(e.terminal_logs.len(), 1);
+        assert!(e.terminal_logs[0].success);
+        let canonical_temp = temp_dir.canonicalize().unwrap_or(temp_dir);
+        assert_eq!(e.workspace.root_path, canonical_temp);
+
+        // Restore initial
+        let _ = e.workspace.set_root(initial_root);
     }
 }

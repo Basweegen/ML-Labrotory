@@ -659,7 +659,7 @@ impl ChatPanel {
         // everything ABOVE the reserve but never more, so Send always has
         // room. Scales with the Settings zoom factor so large text can't
         // overflow the reserve.
-        let input_reserve = 170.0 * ui.ctx().zoom_factor();
+        let input_reserve = 175.0 * ui.ctx().zoom_factor();
         let list_h = (ui.available_height() - input_reserve).max(80.0);
         self.show_message_list(ui, tx, list_h);
 
@@ -670,8 +670,9 @@ impl ChatPanel {
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.input)
                 .id_salt(format!("chat_input_textedit_slot_{}", slot_idx))
-                .desired_rows(3)
+                .desired_rows(4)
                 .desired_width(f32::INFINITY)
+                .min_size(egui::vec2(ui.available_width(), 72.0))
                 .hint_text(if dual_run_mode {
                     "Type your message for ALL active models... (Enter to send to both, Shift+Enter for newline)"
                 } else {

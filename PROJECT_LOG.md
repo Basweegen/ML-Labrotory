@@ -1007,10 +1007,127 @@
   - [x] [COMPLETE] Verify unit tests (138/138 passed) and compile optimized release binary.
   - [x] [COMPLETE] Mark Section 28 as COMPLETE.
 
+## 29. Hermes Agent Git Diagnostics, Remote Divergence Resolution & Swarm Collaboration Phases Validation (2026-09-13)
+- **Pre-Implementation Scan & Diagnostics:**
+  - **Hermes Git Merge Conflict & Block Analysis:**
+    - The active Hermes agent process (`/home/daddy/.hermes/hermes-agent/hermes`) attempted to synchronize local `master` with GitHub `origin/master`.
+    - Local `master` (7 commits ahead with recent UI, swarm handoff, neural memory, and editor layout enhancements) and `origin/master` (22 commits ahead) had diverged.
+    - An automatic merge attempt stalled with 8 unmerged paths: `src/storage.rs`, `src/ui/app.rs`, `src/ui/avatar.rs`, `src/ui/chat.rs`, `src/ui/settings.rs`, `src/ui/train.rs`, `src/ui/workspace.rs`, and `src/workspace.rs`.
+    - Investigation revealed that while textual conflicts were merged, `src/ui/app.rs` retained a duplicated match arm `Tab::Workspace => { ... }` triggering compiler unreachable pattern warnings.
+    - Git remained in an unmerged `MERGE_HEAD` state because files had not been staged (`git add`) and the merge commit had not been finalized, blocking `git push`.
+  - **Hermes Ollama Model Performance Profile:**
+    - Tested local model `hermes3:latest` (8.0B, Q4_0, 4.66 GB). Cold load duration was 18.8s with a total prompt response time of 38.3s due to VRAM/RAM paging. Once resident in memory, generation completed at ~4.2 tokens/s.
+    - Recommended using `hermes3:3b` (3.2B, 2.0 GB) or `hermes3:optimized` when running parallel multi-model slots to prevent VRAM eviction and context swapping delays.
+  - **Multi-Model Collaboration Build Plan (`ML_LAB_BUILD_PLAN.md`) Audit:**
+    - **Phase 1 (Per-Slot Send Readiness):** Send button and Enter key in Split View check `active_slots.iter().any(|&s| !self.slots[s].chat.is_streaming())`, allowing prompt delivery to idle slots while peer slots are actively streaming. Added per-slot direct triggers (`Slot X Only` / `Slot X (Busy)`).
+    - **Phase 2 (Role Divergence Lever):** Slot cards and column headers surface model name and role simultaneously (`Slot X · model [Role]`). Active overlap detection (`find_overlap_pair`) flags duplicate model/role combinations with one-click `[↔ Diversify Slot X]` role rotation.
+    - **Phase 3 (Per-Prompt Contrast Angles):** Persistent `🔀 Contrast angles` toggle injects role-specific angles (e.g. Coder: "code first", Critic: "edge cases and vulnerabilities", Planner: "phases and risks").
+    - **Phase 4 (Team Flow & Swarm Handoff):** Integrated one-click `⚡ Team: Planner·Coder·Critic` lineup, `🤝 Swarm Handoff` (sequential 100% GPU handoff to peer slot), `⚡ Synthesize` (consensus merge), and `⚖ Compare` tab.
+    - **Phase 5 (Concurrency Hygiene):** Implemented `shared_model_note` alerting users when identical models share hardware inference budgets.
+- **Code Remediation & Cleanliness:**
+  - Removed duplicate `Tab::Workspace` match arm in `src/ui/app.rs`.
+  - Verified compilation: `cargo check` completed with 0 errors and 0 warnings.
+  - Executed full test suite: 138/138 unit tests passed cleanly (`test result: ok. 138 passed; 0 failed; 0 ignored`).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Diagnose Hermes Git synchronization issue and identify unmerged paths.
+  - [x] [COMPLETE] Fix duplicated `Tab::Workspace` match arm in `src/ui/app.rs`.
+  - [x] [COMPLETE] Profile Hermes 3 Ollama model load latency and memory footprint.
+  - [x] [COMPLETE] Validate completion of all 5 phases in `ML_LAB_BUILD_PLAN.md`.
+  - [x] [COMPLETE] Verify 100% test pass rate across all 138 unit tests.
+  - [x] [COMPLETE] Mark Section 29 as COMPLETE.
 
+---
 
+## 30. Chatbox Layout Extension & Avatar Placement Hardening (2026-09-13)
+- **Directives & Scoping:**
+  - Strict preservation of the reactive companion avatar in the navigation tabs (`show_tabs` sidebar and `show_horizontal_tabs` top bar) and within each model card chip (`show_face(ui, 24.0, ...)`).
+  - Complete removal of the large reactive avatar and metadata block directly above the chat box (`Tab::Chat` main viewport).
+  - Extension of the chat box input field and message scroll viewport to reclaim all vertical space and provide maximum screen real estate for conversations.
+  - Strict scope restriction: zero collateral modifications to unrelated project modules.
+- **Code Modifications:**
+  - `src/ui/app.rs`:
+    - Removed lines 4251–4341: eliminated the large Stack-chan avatar block, mood calculation, and verbose status labels above the chat box.
+    - Seamlessly connected the slot and model selector header directly to the extended chat box.
+    - Kept both tab avatars (`show_tabs` and `show_horizontal_tabs`) completely intact and functional.
+  - `src/ui/chat.rs`:
+    - Extended chat input multiline textedit (`desired_rows(4)`, `.min_size(egui::vec2(ui.available_width(), 72.0))`).
+    - Recalibrated `input_reserve` to `175.0 * ui.ctx().zoom_factor()` so message history smoothly stretches to fill all available vertical viewport height without clipping.
+- **Verification:**
+  - `cargo check`: 0 errors, 0 warnings.
+  - `cargo test --bin ai-dashboard`: 145/145 unit tests passing cleanly.
+  - `cargo build --release --bin ai-dashboard`: compiled in 1m 59s.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Remove avatar directly above the chat box in `src/ui/app.rs`.
+  - [x] [COMPLETE] Preserve companion avatars in vertical tabs, horizontal tabs, and model slot cards.
+  - [x] [COMPLETE] Extend chatbox multiline input and message history vertical viewing area in `src/ui/chat.rs`.
+  - [x] [COMPLETE] Re-verify all 145 unit tests and build production release binary.
+  - [x] [COMPLETE] Mark Section 30 as COMPLETE.
 
+---
 
+## 31. VS Code-Style Fully Integrated Terminal & Command Runner in Code Editor Dock (2026-09-13)
+- **Pre-Implementation Scan & Objectives:**
+  - **Integrated Terminal Architecture:** Fully integrate a VS Code-style interactive terminal directly inside the Code Editor dock below the command runner bar and dividing separator line.
+  - **Seamless Perimeter Spanning:** Extend the terminal console frame smoothly to the dock borders, providing a dedicated monospace buffer with full stdout/stderr capture, ANSI color formatting, chronological execution history, process exit codes, and duration metrics.
+  - **Interactive Terminal Prompt:** Implement an interactive shell prompt (`user@krovyx:~/path$ `) directly at the bottom with single-line monospace input, Enter-key execution, automatic focus restoration, and Up/Down arrow command history recall.
+  - **Built-in Shell Primitives:** Provide native handling for `cd` (changing active directory and dynamically refreshing the workspace file tree and prompt), `pwd` (printing active root), and `clear`/`cls` (clearing the terminal scroll buffer).
+  - **Defensive Command Execution:** Execute asynchronous shell operations via `bash -c` (falling back to `sh -c`) in Tokio background tasks with sanitized outputs, bounded log buffers (100 entries max), and zero blocking of the egui render loop.
+- **Implementation & Code Modifications:**
+  - `src/ui/editor.rs`:
+    - Added `terminal_prompt_input: String` and `terminal_history_idx: Option<usize>` fields to `EditorPanel`.
+    - Augmented `run_terminal_command` with built-in command handlers (`clear`, `pwd`, and directory-changing `cd` with canonical resolution and file tree refresh).
+    - Added header status chip: `● Terminal Console Ready` when idle and `⏳ Running '<cmd>'...` when active.
+    - Added crisp dividing separator line below the top command runner bar.
+    - Constructed VS Code-style terminal sub-header (` bash (Integrated Terminal)`, `📁 <workspace_path>`, `● ONLINE`/`● RUNNING`, and `📋 Copy Terminal`).
+    - Implemented `#050914` terminal screen buffer with scroll area sticking to bottom, prompt prefix lines, stdout/stderr display, and exit code labels.
+    - Integrated interactive prompt line with Enter key submission, singleline text editing, and `↑`/`↓` history navigation.
+    - Updated proportional layout in `show_editor_pane` allocating 65% height to Code Editor and 35% height (~280–320px) to the integrated terminal dock.
+    - Added unit test `test_terminal_builtins_and_integrated_session` testing `pwd`, `clear`, and `cd`.
+  - `src/workspace.rs`:
+    - Upgraded `CommandRunner::execute` to prioritize `/bin/bash` or `/usr/bin/bash` over `/bin/sh` for enhanced shell script compatibility.
+- **Verification:**
+  - `cargo check`: 0 errors, 0 warnings.
+  - `cargo test --bin ai-dashboard`: 146/146 unit tests passed cleanly (3.91s).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement VS Code-style integrated terminal below command runner divider in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Add interactive bottom terminal prompt with bash prompt prefix and Up/Down history recall.
+  - [x] [COMPLETE] Add native `cd`, `pwd`, and `clear` built-in command handling.
+  - [x] [COMPLETE] Add `test_terminal_builtins_and_integrated_session` unit test (146/146 unit tests passing).
+  - [x] [COMPLETE] Mark Section 31 as COMPLETE.
 
+---
+
+## 32. Expanded Terminal Size & Configurable Height Engine in Code Studio Dock (2026-09-13)
+- **Pre-Implementation Scan & Objectives:**
+  - **Expanded Terminal Viewport:** The terminal dock previously occupied only ~35% of the center pane, which, combined with default `ScrollArea` auto-shrinking behavior, constrained the visible monospace log buffer to only 5-6 lines.
+  - **Full-Height Buffer Expansion:** Disable `auto_shrink([false, false])` and enforce `min_scrolled_height(term_screen_h)` on the terminal `ScrollArea` so that the obsidian terminal buffer always expands to 100% of the allocated height from the moment it opens, keeping the interactive bottom prompt firmly docked flush to the perimeter border.
+  - **Configurable Height Proportions:** Expand default terminal height allocation from 35% to 55% (~280–380px terminal buffer, 18–25+ visible lines), while preserving comfortable editor editing room (24+ rows).
+  - **Dynamic Height Presets & Toggle:** Add interactive height controls directly to the terminal sub-header:
+    - `[⤢ Expand Height]` / `[⤡ Balance Height]` one-click toggle.
+    - Quick ratio selector chips: `[35% Compact]`, `[55% Expanded]`, `[70% Maximized]`.
+  - **Encrypted Persistence:** Store `terminal_height_ratio` in `AppSettings` encrypted with AES-256-GCM in Sled vault so user height preferences persist across restarts.
+- **Code Modifications:**
+  - `src/storage.rs`:
+    - Added `pub terminal_height_ratio: f32` to `AppSettings` (default `0.55`).
+    - Added `default_terminal_height_ratio() -> f32`.
+    - Updated `AppSettings::default()` and verified roundtrip in `layout_settings_roundtrip`.
+  - `src/ui/editor.rs`:
+    - Added `pub terminal_height_ratio: f32` to `EditorPanel` and constructor.
+    - Updated `target_editor_h` in `show_editor_pane` to calculate editor rows dynamically based on `terminal_height_ratio.clamp(0.20, 0.80)`.
+    - Added terminal height preset chips (`35%`, `55%`, `70%`) and `⤢ Expand Height` / `⤡ Balance Height` buttons in the terminal sub-header bar.
+    - Configured `ScrollArea` with `.auto_shrink([false, false])` and `.min_scrolled_height(term_screen_h)` (`term_screen_h = (ui.available_height() - 40.0).max(120.0)`), guaranteeing full-height buffer presentation.
+    - Updated `test_editor_proportional_layout_and_dynamic_rows` to assert row capacity across 35%, 55%, and 70% ratios.
+  - `src/ui/app.rs`:
+    - Synchronized `self.editor.terminal_height_ratio` with `self.settings.terminal_height_ratio` in `show_editor`, persisting user adjustments automatically.
+- **Verification:**
+  - `cargo check`: 0 errors, 0 warnings.
+  - `cargo test --bin ai-dashboard`: 146/146 unit tests passed cleanly (3.87s).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Expand default terminal dock height from 35% to 55% in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Enforce `auto_shrink([false, false])` and `min_scrolled_height` on terminal buffer.
+  - [x] [COMPLETE] Add interactive 35%/55%/70% height presets and `Expand Height` toggle to terminal header.
+  - [x] [COMPLETE] Persist `terminal_height_ratio` in `AppSettings` with AES-256-GCM encryption.
+  - [x] [COMPLETE] Update and verify unit tests (146/146 tests passing).
+  - [x] [COMPLETE] Mark Section 32 as COMPLETE.
 
 

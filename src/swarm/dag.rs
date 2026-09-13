@@ -7,7 +7,7 @@ use crate::ollama::api::Model;
 use crate::ui::app::ModelRole;
 use crate::ui::relay::RelayPanel;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub type NodeId = usize;
 
@@ -57,6 +57,32 @@ impl NodeStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EdgeCondition {
+    #[default]
+    Always,
+    OnSuccess,
+    OnFailure,
+}
+
+impl EdgeCondition {
+    pub fn label(&self) -> &'static str {
+        match self {
+            EdgeCondition::Always => "Always",
+            EdgeCondition::OnSuccess => "On Success",
+            EdgeCondition::OnFailure => "On Failure (Remediation)",
+        }
+    }
+
+    pub fn badge(&self) -> &'static str {
+        match self {
+            EdgeCondition::Always => "➜ Always",
+            EdgeCondition::OnSuccess => "✔ If Pass",
+            EdgeCondition::OnFailure => "✖ If Fail",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmTaskNode {
     pub id: NodeId,
@@ -78,6 +104,7 @@ pub struct SwarmTaskNode {
     pub tool_id: Option<String>,
     pub auto_exec_tool: bool,
     pub tool_output: Option<String>,
+    pub edge_condition: EdgeCondition,
 }
 
 impl SwarmTaskNode {
@@ -109,6 +136,7 @@ impl SwarmTaskNode {
             tool_id: None,
             auto_exec_tool: false,
             tool_output: None,
+            edge_condition: EdgeCondition::Always,
         }
     }
 
@@ -125,6 +153,11 @@ impl SwarmTaskNode {
     pub fn with_tool(mut self, tool_id: impl Into<String>, auto_exec: bool) -> Self {
         self.tool_id = Some(tool_id.into());
         self.auto_exec_tool = auto_exec;
+        self
+    }
+
+    pub fn with_condition(mut self, condition: EdgeCondition) -> Self {
+        self.edge_condition = condition;
         self
     }
 }
@@ -342,22 +375,37 @@ impl SwarmDag {
     }
 
     /// Evaluates which nodes are currently ready to execute:
-    /// Status is `Pending` or `Ready`, and all dependencies are `Completed`.
+    /// Status is `Pending` or `Ready`, all dependencies are terminal,
+    /// and `edge_condition` is satisfied.
     pub fn get_ready_nodes(&mut self) -> Vec<NodeId> {
-        let completed_ids: HashSet<NodeId> = self
+        let terminal_statuses: HashMap<NodeId, NodeStatus> = self
             .nodes
             .iter()
-            .filter(|n| n.status.is_completed())
-            .map(|n| n.id)
+            .filter(|n| n.status.is_terminal())
+            .map(|n| (n.id, n.status.clone()))
             .collect();
 
         let mut ready = Vec::new();
         for n in &mut self.nodes {
             if matches!(n.status, NodeStatus::Pending | NodeStatus::Ready) {
-                let all_deps_met = n.dependencies.iter().all(|dep| completed_ids.contains(dep));
-                if all_deps_met {
-                    n.status = NodeStatus::Ready;
-                    ready.push(n.id);
+                let all_deps_terminal = n.dependencies.iter().all(|dep| terminal_statuses.contains_key(dep));
+                if all_deps_terminal {
+                    let should_run = match n.edge_condition {
+                        EdgeCondition::Always => true,
+                        EdgeCondition::OnSuccess => n.dependencies.iter().all(|dep| {
+                            terminal_statuses.get(dep).map_or(false, |st| st.is_completed())
+                        }),
+                        EdgeCondition::OnFailure => n.dependencies.iter().any(|dep| {
+                            terminal_statuses.get(dep).map_or(false, |st| st.is_failed())
+                        }),
+                    };
+
+                    if should_run {
+                        n.status = NodeStatus::Ready;
+                        ready.push(n.id);
+                    } else {
+                        n.status = NodeStatus::Skipped;
+                    }
                 }
             }
         }
@@ -467,7 +515,8 @@ impl SwarmDag {
         let mut to_skip = vec![failed_id];
         while let Some(parent) = to_skip.pop() {
             for n in &mut self.nodes {
-                if n.dependencies.contains(&parent) && !n.status.is_terminal() {
+                // If child node has OnFailure condition, parent failure is its trigger so do not skip it!
+                if n.dependencies.contains(&parent) && !n.status.is_terminal() && n.edge_condition != EdgeCondition::OnFailure {
                     n.status = NodeStatus::Skipped;
                     to_skip.push(n.id);
                 }
@@ -1032,5 +1081,42 @@ mod tests {
         test_dag.find_node_mut(0).unwrap().tool_output = Some("previous tool output".to_string());
         test_dag.reset();
         assert!(test_dag.find_node(0).unwrap().tool_output.is_none());
+    }
+
+    #[test]
+    fn test_dynamic_edge_conditions_and_remediation_branching() {
+        let mut dag = SwarmDag::new(DagPreset::Custom);
+        // Node 0: Build (root)
+        let n0 = SwarmTaskNode::new(0, "Build", crate::ui::app::ModelRole::Coder, "Build", vec![], "dev");
+        // Node 1: Deploy (triggers OnSuccess of Node 0)
+        let n1 = SwarmTaskNode::new(1, "Deploy", crate::ui::app::ModelRole::Planner, "Deploy", vec![0], "ops")
+            .with_condition(EdgeCondition::OnSuccess);
+        // Node 2: Remediate (triggers OnFailure of Node 0)
+        let n2 = SwarmTaskNode::new(2, "Remediate", crate::ui::app::ModelRole::Critic, "Fix", vec![0], "cyber")
+            .with_condition(EdgeCondition::OnFailure);
+
+        dag.nodes = vec![n0, n1, n2];
+
+        // Initially Node 0 is ready
+        let ready = dag.get_ready_nodes();
+        assert_eq!(ready, vec![0]);
+
+        // Case A: Node 0 succeeds -> Node 1 is Ready, Node 2 is Skipped!
+        dag.mark_completed(0, "Build ok".to_string(), 1.2);
+        let ready = dag.get_ready_nodes();
+        assert_eq!(ready, vec![1]);
+        assert_eq!(dag.find_node(1).unwrap().status, NodeStatus::Ready);
+        assert_eq!(dag.find_node(2).unwrap().status, NodeStatus::Skipped);
+
+        // Case B: Reset and Node 0 fails -> Node 1 is Skipped, Node 2 (Remediation) is Ready!
+        dag.reset();
+        dag.find_node_mut(0).unwrap().max_retries = 0; // force terminal fail
+        dag.record_failure(0, "Compilation syntax error".to_string());
+        assert!(dag.find_node(0).unwrap().status.is_failed());
+
+        let ready = dag.get_ready_nodes();
+        assert_eq!(ready, vec![2]);
+        assert_eq!(dag.find_node(2).unwrap().status, NodeStatus::Ready);
+        assert_eq!(dag.find_node(1).unwrap().status, NodeStatus::Skipped);
     }
 }

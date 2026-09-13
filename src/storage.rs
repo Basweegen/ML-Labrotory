@@ -135,7 +135,7 @@ pub struct AppSettings {
     /// confined under this dir (no `..` escapes, no absolute paths).
     #[serde(default)]
     pub workspace_root: String,
-    /// Reactive companion face above chat + minis on slot cards. Default on.
+    /// Reactive companion face (Stack-chan style) above chat + minis on slot cards. Default on.
     #[serde(default = "default_true")]
     pub show_avatar: bool,
     /// Big-face diameter in px (40-80). Mini faces stay fixed.
@@ -182,6 +182,13 @@ pub struct AppSettings {
     /// When true, navigation tabs rotate to a horizontal top strip to maximize horizontal real estate.
     #[serde(default)]
     pub tabs_at_top: bool,
+    /// Height ratio allocated to the terminal dock in the Code Editor (0.25 to 0.80). Default 0.55.
+    #[serde(default = "default_terminal_height_ratio")]
+    pub terminal_height_ratio: f32,
+}
+
+fn default_terminal_height_ratio() -> f32 {
+    0.55
 }
 
 fn default_true() -> bool {
@@ -261,6 +268,7 @@ impl Default for AppSettings {
             auto_assist_rules: true,
             swarm_auto_assist: true,
             tabs_at_top: false,
+            terminal_height_ratio: default_terminal_height_ratio(),
         }
     }
 }
@@ -687,6 +695,46 @@ impl Storage {
         }
     }
 
+    /// Save Swarm DAG graph state encrypted with AES-256-GCM
+    pub fn save_swarm_dag(&self, dag: &crate::swarm::SwarmDag) -> Result<()> {
+        let serialized = bincode::serialize(dag)?;
+        let encrypted = self.vault.encrypt(&serialized)?;
+        self.config_tree.insert("swarm_dag_current", encrypted)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    /// Load Swarm DAG graph state decrypted from the post-quantum vault
+    pub fn load_swarm_dag(&self) -> Result<Option<crate::swarm::SwarmDag>> {
+        if let Some(value) = self.config_tree.get("swarm_dag_current")? {
+            let decrypted = self.vault.decrypt(&value)?;
+            let dag: crate::swarm::SwarmDag = bincode::deserialize(&decrypted)?;
+            Ok(Some(dag))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Save Stigmergic Blackboard memory snapshot encrypted with AES-256-GCM
+    pub fn save_blackboard(&self, blackboard: &crate::swarm::StigmergicBlackboard) -> Result<()> {
+        let serialized = bincode::serialize(blackboard)?;
+        let encrypted = self.vault.encrypt(&serialized)?;
+        self.config_tree.insert("blackboard_current", encrypted)?;
+        self.config_tree.flush()?;
+        Ok(())
+    }
+
+    /// Load Stigmergic Blackboard memory snapshot decrypted from the vault
+    pub fn load_blackboard(&self) -> Result<Option<crate::swarm::StigmergicBlackboard>> {
+        if let Some(value) = self.config_tree.get("blackboard_current")? {
+            let decrypted = self.vault.decrypt(&value)?;
+            let bb: crate::swarm::StigmergicBlackboard = bincode::deserialize(&decrypted)?;
+            Ok(Some(bb))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn save_skill(&self, skill: &Skill) -> Result<()> {
         let key = skill.id.as_bytes().to_vec();
         let sanitized = skill.clone().sanitize();
@@ -1081,6 +1129,7 @@ mod tests {
         settings.auto_assist_rules = false;
         settings.swarm_auto_assist = false;
         settings.tabs_at_top = true;
+        settings.terminal_height_ratio = 0.68;
         settings.visible_tabs = vec!["Chat".to_string(), "Editor".to_string(), "Settings".to_string()];
         settings.tab_order = vec!["Editor".to_string(), "Chat".to_string(), "Settings".to_string()];
 
@@ -1094,6 +1143,7 @@ mod tests {
         assert_eq!(reloaded.auto_assist_rules, false);
         assert_eq!(reloaded.swarm_auto_assist, false);
         assert_eq!(reloaded.tabs_at_top, true);
+        assert!((reloaded.terminal_height_ratio - 0.68).abs() < 0.001);
         assert_eq!(reloaded.visible_tabs, vec!["Chat", "Editor", "Settings"]);
         assert_eq!(reloaded.tab_order, vec!["Editor", "Chat", "Settings"]);
     }

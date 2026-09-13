@@ -50,7 +50,7 @@ impl SettingsPanel {
         ui.horizontal(|ui| {
             ui.checkbox(&mut settings.show_avatar, "Show assistant face (reactive avatar)");
         });
-        ui.label(egui::RichText::new("Reactive companion face atop navigation tabs + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.label(egui::RichText::new("Reactive companion face (Stack-chan style) atop navigation tabs + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Face size:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
