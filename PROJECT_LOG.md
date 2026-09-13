@@ -1185,3 +1185,31 @@
   - [x] [COMPLETE] Verify swarm attachment and network isolation (isolated to local Atlas models; Krovyx swarm config empty).
   - [x] [COMPLETE] Mark Section 34 as COMPLETE.
 
+---
+
+## 35. Complete Project Remediation, Boilerplate Purge & Boundary Isolation (2026-09-13)
+- **Pre-Implementation Scan & Remediation Goals:**
+  - Full remediation across all affected directories executed one project at a time.
+  - Purge all unauthorized Hermes-generated boilerplate folders and test artifacts.
+  - Restore Atlas AI runtime scripts to clean direct-execution mode with no coordinator dependencies.
+  - Verify isolation across all separate workspaces (SPYDER, Dreyvik, Krovyx, Atlas, ML Lab).
+- **Execution Details:**
+  - **Phase 1: Atlas AI Clean-Up & Rollback (`ATLAS_AI_Data/config`):**
+    - Purged `task_router.py`, `swarm_coordinator.py`, `verify_routing.py`, `verify_coordinator.py`, and compiled bytecode.
+    - Reverted `model_integration.py` back to direct execution: removed `_get_coordinator`, `_run_coordinated`, and restored standard `run_inference(specialty, prompt)`.
+    - Hardened `load_hardware_limits()` to handle `"AUTO"` cleanly and prevent runtime type errors. Added copyright header `Copyright 2026 Sean M. Stow. All rights reserved.`.
+    - Validated `model_integration.py` and `model_selector.py` executing cleanly with exit code 0.
+  - **Phase 2: Krovyx_Workspace Boilerplate Purge (`Documents/Projects/Krovyx_Workspace`):**
+    - Safely purged 11 generic template directories created by Hermes overnight: `bash/`, `code_graveyard/`, `cpp/`, `ml_training/`, `python/`, `rust/`, `SecurityPlusStudyGuide/` (removed malformed quote filenames), `SwarmAIImprovement/`, `swarm_projects/`, `TelemetryHardening/`, and `web/`.
+    - Preserved 100% of user's genuine pre-existing projects: `earth_glob/`, `Krovyx_test_projects/`, `quantum_pulse/`, `test_agent/`.
+  - **Phase 3: Verify & Lock Boundary Isolation:**
+    - Confirmed `Dashboard_Portfolio/Active_KROVYX/state/swarm_config.json` is clean and unlinked (`{"layers": []}`).
+    - Confirmed `SPYDER_AI_v2` and `Dreyvik-CyberSec` are 100% untouched and unintegrated.
+    - Confirmed ML-Labrotory clean: 149/149 unit tests passed cleanly (100% pass rate).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Phase 1: Revert Atlas AI config and delete coordinator scripts.
+  - [x] [COMPLETE] Phase 2: Purge 11 Hermes boilerplate folders from Krovyx_Workspace.
+  - [x] [COMPLETE] Phase 3: Verify system-wide isolation and zero cross-project links.
+  - [x] [COMPLETE] Mark Section 35 as COMPLETE.
+
+
