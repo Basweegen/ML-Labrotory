@@ -105,24 +105,46 @@ fn parse_text_and_code(input: &str) -> Vec<MessageSegment> {
     segments
 }
 
+const THINK_TAG_PAIRS: &[(&str, &str)] = &[
+    ("<think>", "</think>"),
+    ("<thought>", "</thought>"),
+    ("<reasoning>", "</reasoning>"),
+];
+
+/// Find earliest opening think/thought/reasoning tag case-insensitively.
+fn find_earliest_think_tag(s: &str) -> Option<(usize, usize, &'static str)> {
+    let s_lower = s.to_ascii_lowercase();
+    let mut earliest: Option<(usize, usize, &'static str)> = None;
+    for &(open, close) in THINK_TAG_PAIRS {
+        if let Some(pos) = s_lower.find(open) {
+            if earliest.as_ref().map_or(true, |(p, _, _)| pos < *p) {
+                earliest = Some((pos, open.len(), close));
+            }
+        }
+    }
+    earliest
+}
+
 /// Parse full message into Text, Think, and Code segments.
+/// Supports `<think>`, `<thought>`, and `<reasoning>` tags (both completed and active streaming).
 pub fn parse_segments(content: &str) -> Vec<MessageSegment> {
     let mut segments = Vec::new();
     let mut rest = content;
 
-    while let Some(think_start) = rest.find("<think>") {
+    while let Some((think_start, open_len, close_tag)) = find_earliest_think_tag(rest) {
         let before_think = &rest[..think_start];
         if !before_think.is_empty() {
             segments.extend(parse_text_and_code(before_think));
         }
 
-        let after_think_tag = &rest[think_start + 7..];
-        if let Some(think_end) = after_think_tag.find("</think>") {
-            let think_content = after_think_tag[..think_end].trim();
+        let after_think_tag = &rest[think_start + open_len..];
+        let after_lower = after_think_tag.to_ascii_lowercase();
+        if let Some(close_pos) = after_lower.find(close_tag) {
+            let think_content = after_think_tag[..close_pos].trim();
             if !think_content.is_empty() {
                 segments.push(MessageSegment::Think(think_content.to_string()));
             }
-            rest = &after_think_tag[think_end + 8..];
+            rest = &after_think_tag[close_pos + close_tag.len()..];
         } else {
             // Active unclosed think block (streaming)
             let think_content = after_think_tag.trim();
@@ -272,6 +294,7 @@ pub struct ChatPanel {
     reply_count: u32,
     pub history_depth: usize,
     pub num_threads: u32,
+    pub slot_idx: usize,
     cached_stream_segs: Vec<MessageSegment>,
     stream_dirty: bool,
 }
@@ -294,6 +317,7 @@ impl ChatPanel {
             reply_count: 0,
             history_depth: 20,
             num_threads: 0,
+            slot_idx: 0,
             cached_stream_segs: Vec::new(),
             stream_dirty: false,
         }
@@ -329,6 +353,7 @@ impl ChatPanel {
             reply_count: self.reply_count,
             history_depth: self.history_depth,
             num_threads: self.num_threads,
+            slot_idx: self.slot_idx,
             cached_stream_segs: Vec::new(),
             stream_dirty: false,
         }
@@ -544,7 +569,7 @@ impl ChatPanel {
                     } else {
                         &[]
                     };
-                    self.show_message(ui, &self.messages[i], segs, tx);
+                    self.show_message(ui, &self.messages[i], segs, tx, false, i);
                 }
                 if !self.stream_buf.is_empty() {
                     if self.stream_dirty || self.cached_stream_segs.is_empty() {
@@ -557,7 +582,7 @@ impl ChatPanel {
                         content: format!("{}▍", self.stream_buf),
                         timestamp: chrono::Utc::now(),
                     };
-                    self.show_message(ui, &tmp, &self.cached_stream_segs, tx);
+                    self.show_message(ui, &tmp, &self.cached_stream_segs, tx, true, total);
                 }
                 if self.is_streaming && self.stream_buf.is_empty() {
                     ui.horizontal(|ui| {
@@ -940,12 +965,14 @@ impl ChatPanel {
         msg: &ChatMessage,
         segments: &[MessageSegment],
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
+        is_streaming: bool,
+        msg_idx: usize,
     ) {
         let is_user = msg.role == "user";
         // Light-theme aware: hardcoded dark fills + white text turn
         // unreadable on a light background, so pick per visuals.
         let dark = ui.visuals().dark_mode;
-        let (bg_color, align, body) = if is_user {
+        let (bg_color, align, _body) = if is_user {
             (
                 egui::Color32::from_rgb(0x00, 0x44, 0x88),
                 egui::Align::RIGHT,
@@ -1040,26 +1067,74 @@ impl ChatPanel {
                                 }
                             }
                             MessageSegment::Think(th) => {
-                                egui::CollapsingHeader::new(
-                                    egui::RichText::new("💭 Thought Process")
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
-                                )
-                                .default_open(false)
-                                .show(ui, |ui| {
+                                let word_count = th.split_whitespace().count();
+                                let is_active_stream_think = is_streaming && seg_idx == actual_segs.len() - 1;
+                                if is_active_stream_think {
+                                    // Actively streaming thoughts in real-time before answer displays
                                     egui::Frame::NONE
-                                        .fill(egui::Color32::from_rgb(0x13, 0x18, 0x24))
-                                        .corner_radius(egui::CornerRadius::same(4))
-                                        .inner_margin(egui::Margin::same(6))
+                                        .fill(egui::Color32::from_rgb(0x0a, 0x10, 0x1f))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x25, 0x63, 0xeb)))
+                                        .corner_radius(egui::CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
                                         .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(
+                                                    egui::RichText::new("💭 Reasoning Stream (Thinking...)")
+                                                        .size(12.0)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!("({} words)", word_count))
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+                                                );
+                                            });
+                                            ui.add_space(4.0);
+                                            ui.separator();
+                                            ui.add_space(4.0);
                                             ui.label(
                                                 egui::RichText::new(th)
-                                                    .size(11.0)
+                                                    .size(11.5)
                                                     .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
                                                     .italics(),
                                             );
                                         });
-                                });
+                                } else {
+                                    // Thinking completed (or historical message)
+                                    let header_title = if is_streaming {
+                                        format!("💭 Thought Process ({} words · complete)", word_count)
+                                    } else {
+                                        format!("💭 Thought Process ({} words)", word_count)
+                                    };
+                                    egui::CollapsingHeader::new(
+                                        egui::RichText::new(header_title)
+                                            .size(11.0)
+                                            .color(if is_streaming {
+                                                egui::Color32::from_rgb(0x38, 0xbd, 0xf8)
+                                            } else {
+                                                egui::Color32::from_rgb(0x94, 0xa3, 0xb8)
+                                            }),
+                                    )
+                                    .id_salt(format!("think_hdr_{}_{}", msg_idx, seg_idx))
+                                    .default_open(is_streaming)
+                                    .show(ui, |ui| {
+                                        egui::Frame::NONE
+                                            .fill(egui::Color32::from_rgb(0x13, 0x18, 0x24))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+                                            .corner_radius(egui::CornerRadius::same(4))
+                                            .inner_margin(egui::Margin::symmetric(8, 6))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(th)
+                                                        .size(11.5)
+                                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
+                                                        .italics(),
+                                                );
+                                            });
+                                    });
+                                }
                             }
                             MessageSegment::Code { lang, code } => {
                                 let block_id = format!("chat_cb_{}", seg_idx);
@@ -1077,6 +1152,22 @@ impl ChatPanel {
                         {
                             ui.ctx().copy_text(msg.content.clone());
                         }
+                        let think_blocks: Vec<&str> = actual_segs
+                            .iter()
+                            .filter_map(|s| match s {
+                                MessageSegment::Think(th) => Some(th.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !think_blocks.is_empty() {
+                            if ui
+                                .small_button("💭 Copy thoughts")
+                                .on_hover_text("Copy reasoning / thought trace to clipboard")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(think_blocks.join("\n\n"));
+                            }
+                        }
                         if !is_user && msg.role == "assistant" {
                             let speak = ui.small_button("\u{1F50A}");
                             if speak.on_hover_text("Read this message aloud").clicked()
@@ -1084,6 +1175,16 @@ impl ChatPanel {
                                 let _ = tx.send(
                                     crate::ui::app::AppMessage::SpeakText(msg.content.clone()),
                                 );
+                            }
+                            if ui
+                                .small_button(egui::RichText::new("🐝 Swarm Assist").color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24)))
+                                .on_hover_text("Delegate this response to the peer model: auto-assist with missing parts or validate and optimize")
+                                .clicked()
+                            {
+                                let _ = tx.send(crate::ui::app::AppMessage::SwarmAssist {
+                                    source_slot: self.slot_idx,
+                                    content: msg.content.clone(),
+                                });
                             }
                         }
                         if !is_user && msg.role == "assistant" && !code_blocks.is_empty() {
@@ -1595,6 +1696,29 @@ mod panel_tests {
         assert_eq!(p.messages.len(), 1);
         p.clear_chat();
         assert_eq!(p.messages.len(), 0);
+    }
+
+    #[test]
+    fn parse_segments_multi_tag_thought_and_reasoning() {
+        let thought_msg = "<thought>\nInternal hypothesis\n</thought>\nFinal response.";
+        let segs1 = parse_segments(thought_msg);
+        assert_eq!(segs1.len(), 2);
+        assert_eq!(segs1[0], MessageSegment::Think("Internal hypothesis".to_string()));
+        assert_eq!(segs1[1], MessageSegment::Text("\nFinal response.".to_string()));
+
+        let reasoning_msg = "<reasoning>\nQuantum state vector analysis\n</reasoning>\nState collapsed.";
+        let segs2 = parse_segments(reasoning_msg);
+        assert_eq!(segs2.len(), 2);
+        assert_eq!(segs2[0], MessageSegment::Think("Quantum state vector analysis".to_string()));
+        assert_eq!(segs2[1], MessageSegment::Text("\nState collapsed.".to_string()));
+    }
+
+    #[test]
+    fn parse_segments_active_streaming_think_chunk() {
+        let stream_chunk = "<think>\nSynthesizing model weights live...▍";
+        let segs = parse_segments(stream_chunk);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], MessageSegment::Think("Synthesizing model weights live...▍".to_string()));
     }
 }
 

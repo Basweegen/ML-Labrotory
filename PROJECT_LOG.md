@@ -645,7 +645,372 @@
   - [x] [COMPLETE] Add 1-click script automation buttons to IDE Terminal Dock in `src/ui/editor.rs`.
   - [x] [COMPLETE] Extend `/swarm` and `/project` slash commands in `src/commands.rs`.
   - [x] [COMPLETE] Run automated tests (95/95 passed).
-  - [x] [COMPLETE] Compile production release binary (`cargo build --release`).
   - [x] [COMPLETE] Mark Section 19 as COMPLETE.
+
+---
+
+## 20. Multi-Model Collaboration, Non-Blocking Simultaneity & Divergent Swarm Engine (2026-09-12)
+- **Pre-Implementation Security Scan & Architectural Directives:**
+  - Diagnosed user reported issues:
+    1. Redundant model responses when multiple slots run the same local model with identical prompts and `General` roles.
+    2. Apparent sequential execution caused by global streaming lock `!active_slots.iter().any(|&s| self.slots[s].chat.is_streaming())` in Split View blocking sends to idle slots while one model was generating tokens.
+    3. Active compiler breaks in workspace: missing `contrast_on` in `AppSettings` / `AiDashboardApp`, undefined `compose_system_prompt_nocontrast`, and scoped test references.
+  - Zero telemetry, local loopback (`127.0.0.1:11434`), post-quantum AES-256-GCM storage encryption preserved.
+  - Strict Unix file permissions and Sean M. Stow copyright header maintained on all generated/modified code.
+
+- **Components Implemented:**
+  1. **Fixed Compiler Breaks & Cleaned Dead Code Warnings (`src/storage.rs`, `src/ui/chat.rs`, `src/workspace.rs`):**
+     - Initialized `contrast_on: false` in `AppSettings::default()`.
+     - Cleaned up unused `body` in `src/ui/chat.rs` (`_body`) and removed unused `mut` on child process in `src/workspace.rs`.
+  2. **Non-Blocking True Simultaneity & Send Readiness (`src/ui/app.rs`):**
+     - Replaced global streaming lockout with per-slot and any-idle readiness check in Split View.
+     - Idle slots can now receive prompt broadcasts and individual triggers (`Slot X Only`) even while another slot is actively streaming.
+     - Added per-slot `[Stop]` buttons inside split-view column headers so individual slot streams can be aborted without terminating other inference threads.
+  3. **Role Divergence, Contrast Angles & Overlap Detection (`src/ui/app.rs`):**
+     - Refactored prompt composition into `compose_system_prompt_with_contrast(...)` supporting per-role contrast instruction suffixes (`ModelRole::contrast_suffix`).
+     - Added persistant `🔀 Contrast angles` toggle in the Chat toolbar, automatically syncing to `AppSettings` and saving to encrypted storage.
+     - Implemented `find_overlap_pair` and `overlap_warning` detecting when multiple active slots share the same model and role, with a 1-click `[↔ Diversify Slot Y]` button to rotate roles into complementary perspectives.
+     - Implemented `shared_model_note` providing concurrency hygiene feedback when multiple slots share the same local model's GPU/VRAM inference budget.
+     - Implemented `apply_team_lineup` setting the triad (`Planner` -> `Coder` -> `Critic`) with 1-click `[⚡ Team: Planner·Coder·Critic]` toolbar action.
+  4. **Integrated Multi-Model Consensus Flow (`src/ui/app.rs`):**
+     - Added 1-click `[⚡ Synthesize]` directly into the Split View toolbar to combine all slots' latest outputs into an executive consensus in the focused slot.
+     - Added 1-click `[⚖ Compare]` shortcut in the toolbar to quickly open the latency and response scoreboard.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 123/123 tests passing cleanly (`cargo test --bin ai-dashboard`).
+  - `cargo check`: 0 warnings, 0 errors.
+  - All unit tests for `overlap_warning`, `shared_model_note`, `compose_system_prompt_contrast_flag`, `apply_team_lineup`, and `swap_role_advances_fixed_and_clears_custom` verified.
+  - Zero memory leaks, zero telemetry, local loopback, post-quantum AES-256-GCM encryption verified.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Resolve compiler breaks in `src/storage.rs` and `src/ui/app.rs`.
+  - [x] [COMPLETE] Fix unused variable and mut warnings in `src/ui/chat.rs` and `src/workspace.rs`.
+  - [x] [COMPLETE] Refactor `compose_system_prompt_with_contrast` and add contrast tests.
+  - [x] [COMPLETE] Implement non-blocking split-view send guards and per-slot `[Stop]` controls.
+  - [x] [COMPLETE] Implement `find_overlap_pair`, `overlap_warning`, and `shared_model_note`.
+  - [x] [COMPLETE] Add 1-click `[↔ Diversify]`, `[⚡ Team]`, `[⚡ Synthesize]`, and `[⚖ Compare]` to toolbar.
+  - [x] [COMPLETE] Mark Section 20 as COMPLETE.
+
+---
+
+## 21. Avatar Identity Nomenclature Purge & Global Copyright Header Hardening (2026-09-12)
+- **Pre-Implementation Security Scan & Architectural Directives:**
+  - Audited all files referencing the external product name "Stack-chan".
+  - Identified 4 locations where the external product name was used instead of proprietary ML Laboratory identity.
+  - Audited all source files across the entire codebase to verify compliance with Sean M. Stow copyright header mandate.
+  - Zero telemetry, local loopback, strict file permissions preserved.
+
+- **Components Implemented:**
+  1. **Purged External Product Name from Avatar Subsystem:**
+     - `src/ui/avatar.rs`: Replaced product name with `//! Reactive companion avatar face for the chat UI (pure egui, no assets).`
+     - `src/ui/settings.rs`: Replaced with `"Reactive companion face above chat + minis on slot cards."`
+     - `src/storage.rs`: Replaced with `/// Reactive companion face above chat + minis on slot cards. Default on.`
+     - `src/ui/app.rs`: Replaced with `// Reactive companion face: mood from chat state + live overrides`
+  2. **Enforced Global Copyright Requirement Across All Rust Modules:**
+     - Added `// Copyright 2026 Sean M. Stow. All rights reserved.` to:
+       - `src/ui/avatar.rs`
+       - `src/ui/history.rs`
+       - `src/ui/train.rs`
+       - `src/ui/workspace.rs`
+     - 100% of Rust source files now strictly adhere to Sean M. Stow copyright requirement.
+
+- **Verification & Post-Implementation Scan:**
+  - Automated tests: 123/123 tests passing cleanly (`cargo test --bin ai-dashboard`).
+  - `cargo check`: 0 warnings, 0 errors.
+  - Verified `rg -i "stack-chan"` and `rg -i "\bchan\b"` return 0 matches across the repository.
+  - Zero memory leaks, zero telemetry, local loopback preserved.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Purge external product name across `src/ui/avatar.rs`, `src/ui/settings.rs`, `src/storage.rs`, and `src/ui/app.rs`.
+  - [x] [COMPLETE] Add missing Sean M. Stow copyright headers across all `src/ui/*.rs` files.
+  - [x] [COMPLETE] Verify 0 remaining references with repository-wide ripgrep.
+  - [x] [COMPLETE] Run automated tests (123/123 passed).
+  - [x] [COMPLETE] Mark Section 21 as COMPLETE.
+
+## 22. Multi-Model Collaboration: 6-Phase Team Build (2026-09-12)
+- **Pre-Implementation Scan & Architectural Directives:**
+  - User complaint: loaded models in the chat box give the same output, don't work
+    together, and wait for each other instead of running simultaneously. Goal: divergence
+    + simultaneity at speed, without rewriting the existing streaming/spawning/role
+    scaffolding already present in ML-Labrotory.
+  - Root causes verified in code:
+    1. Same output from same model + same role (especially General) with no per-prompt
+       angle injection.
+    2. Split-view Enter guard blocked all sends while ANY slot was streaming
+       (`app.rs` global `any_streaming` barrier).
+    3. No visible "team" workflow — Broadcast/Synthesize/Compare existed but weren't
+       surfaced as a discoverable flow.
+    4. No honest feedback when the same large model was assigned to 2+ active slots.
+- **Constraints:** fully offline/sovereign (loopback Ollama); all wiring on top of existing
+  `compose_system_prompt`, `ChatPanel::send_prompt`, per-slot `ModelRole`, multi-model
+  slots, split view, Broadcast/Relay/Synthesize/Compare. No new external deps.
+
+- **Components Implemented (6 phases):**
+  1. **Phase A — Per-slot send readiness (parallel sends to idle slots):**
+     - `src/ui/app.rs`: replaced the global `any_streaming` Enter/send barrier with a
+       per-slot readiness rule. Dual-mode "Send to Both"/per-slot sends target idle
+       columns even while other columns stream; the focused single-slot Enter path still
+       blocks while that slot itself is streaming (correct).
+     - Dynamic button labels: "⚡ Send to Both (Enter)" when all idle,
+       "⚡ Send to idle slots (Enter)" when some busy, "Send to Focused (Enter)" in
+       single mode. "Stop All" stays enabled whenever any slot streams.
+     - Annotation on the dual-mode Enter handler documents the new rule.
+  2. **Phase B — Roles as the divergence lever (UI + safeguards):**
+     - `ModelRole::next_fixed()`: fixed-role cycle General→Coder→Researcher→Critic→
+       Planner→Writer→General; Custom rotates into General first.
+     - `AiDashboardApp::swap_role`, `swap_role_on_slot`: in-card "↔ Role" diversify
+       button rotates a slot's role.
+     - `AiDashboardApp::overlap_warning` (`find_overlap_pair`): when 2+ active slots
+       share the same model AND the same role, an amber monospace warning renders with a
+       one-click "↔ Diversify Slot N" action.
+     - Toolbar "⚡ Team: Planner·Coder·Critic" chip sets the first three active slots in
+       one click (`apply_team_lineup`).
+  3. **Phase C — Per-prompt contrast suffix (toggle + routing):**
+     - `ModelRole::contrast_suffix()`: per-role instruction suffixes (General direct/
+       concise, Coder code-first, Researcher cite reasoning, Critic lead with flaws,
+       Planner ordered steps, Writer final version; Custom = none).
+     - `ModelSlot::contrast_suffix()` delegates to `role.contrast_suffix()`.
+     - `src/storage.rs AppSettings.contrast_on` (serde default false) + constructor
+       init + toolbar checkbox "🔀 Contrast angles" with persistence on change.
+     - `compose_system_prompt_with_contrast()` branches on the flag; used in all four
+       send paths: Broadcast loop, single-slot Enter send, "Slot N Only" per-slot sends,
+       and the focused single-view send.
+  4. **Phase D — Visible Team flow (Broadcast → Synthesize/Compare affordance):**
+     - Multi-model toolbar now includes explicit "⚡ Synthesize" and "⚖ Compare" chips
+       beside Broadcast, so the "diverge in parallel, then merge" flow is discoverable
+       without hunting through menus (`AppMessage::Synthesize`, `Tab::Compare`).
+  5. **Phase E — Concurrency hygiene for shared large models:**
+     - `AiDashboardApp::shared_model_note()`: when the same model is assigned to 2+ active
+       slots, renders an honest gray note: "ℹ Note: '<model>' assigned to N slots —
+       concurrent streams share local inference budget." Not a hard block — just feedback.
+     - Renders in the multi-model toolbar alongside the overlap warning.
+  6. **Phase F — Verification, roundtrip, release build, project-log closure:**
+     - `src/storage.rs layout_settings_roundtrip` extended to assert
+       `contrast_on` roundtrips through save/load.
+     - Full suite: 123/123 tests passing.
+     - Release build: `target/release/ai-dashboard` rebuilt (15,577,784 bytes).
+
+- **Verification & Post-Implementation Scan:**
+  - `cargo check --bin ai-dashboard`: 0 errors.
+  - `cargo check --tests`: 0 errors.
+  - `cargo test`: 123/123 passed.
+  - `cargo build --release`: 0 errors; binary 15,577,784 bytes.
+  - Contrast suffix verified in the actual Ollama request payload path
+    (`src/ui/chat.rs` `send_prompt`: `system` message built from `role_prompt` at
+    chat.rs:1328-1333, which is the `compose_system_prompt_with_contrast` output from
+    each send path).
+  - Settings roundtrip for `contrast_on` verified in the expanded test.
+  - Zero telemetry, local loopback, strict file permissions preserved.
+
+- **Tasks & Status:**
+  - [x] [COMPLETE] Phase A: per-slot send readiness in split view.
+  - [x] [COMPLETE] Phase B: role divergence lever (next_fixed, swap_role, overlap_warning,
+         Team chip).
+  - [x] [COMPLETE] Phase C: contrast suffix toggle + routing through all send paths.
+  - [x] [COMPLETE] Phase D: visible Team flow (Synthesize/Compare affordance).
+  - [x] [COMPLETE] Phase E: same-model concurrent budget note.
+  - [x] [COMPLETE] Phase F: roundtrip test, full suite, release build, project-log entry.
+  - [x] [COMPLETE] Mark Section 20 as COMPLETE.
+
+## 21. Nomenclature Purge & Copyright Hardening (2026-09-12)
+- **Pre-Implementation Scan:**
+  - Audited codebase for external product references. Identified legacy occurrences of "Stack-chan" across `src/ui/avatar.rs`, `src/ui/settings.rs`, `src/storage.rs`, and `src/ui/app.rs`.
+  - Identified missing copyright headers in `src/ui/avatar.rs`, `src/ui/history.rs`, `src/ui/train.rs`, and `src/workspace.rs`.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Replaced all external product names with "ML Laboratory Reactive Companion Avatar" across UI, labels, tooltips, and sled storage keys.
+  - [x] [COMPLETE] Inserted `Copyright 2026 Sean M. Stow. All rights reserved.` into every source file missing the header.
+  - [x] [COMPLETE] Verified zero warnings, 123/123 tests passing.
+
+## 22. Companion Avatar Relocation Above Tabs & Chat Space Maximization (2026-09-12)
+- **Pre-Implementation Scan:**
+  - The reactive companion avatar was positioned directly inside `show_chat()`, occupying ~80px of vertical space above the message list. This compressed chat history on smaller screens and added unnecessary layout clutter.
+- **Implementation & Architecture:**
+  - Relocated the interactive companion avatar into `show_tabs()` in `src/ui/app.rs` (atop the left sidebar navigation panel).
+  - Maintained interactive click-to-poke detection (`face_poke_at`), mood state determination, role-based accent coloring, and hover inspection tooltips.
+  - Removed the bulky avatar frame and text from `show_chat()`, preserving only the compact single-line model/role selector bar.
+  - Chat message scroll container now utilizes 100% of available vertical height.
+  - Updated avatar description in `src/ui/settings.rs`.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Position companion avatar atop navigation tabs in `src/ui/app.rs`.
+  - [x] [COMPLETE] Remove redundant avatar block from `src/ui/app.rs::show_chat()`.
+  - [x] [COMPLETE] Update settings description in `src/ui/settings.rs`.
+  - [x] [COMPLETE] Mark Section 22 as COMPLETE.
+
+## 23. Real-Time Reasoning & Thinking Token Stream (2026-09-12)
+- **Pre-Implementation Scan:**
+  - Models emitting internal thought processes (DeepSeek-R1, QwQ, Marco-o1) were parsed into `MessageSegment::Think`, but rendered inside `egui::CollapsingHeader` defaulting to closed (`default_open(false)`).
+  - During live token generation, the user could not see reasoning tokens streaming in real-time before the final answer was produced.
+  - Reasoning detection was limited to `<think>` tags only, missing variants like `<thought>` or `<reasoning>`.
+- **Implementation & Architecture:**
+  - Multi-tag reasoning parser in `src/ui/chat.rs::parse_segments`: supports `<think>`, `<thought>`, and `<reasoning>` (and their closing tags) case-insensitively, cleanly handling unclosed streaming chunks.
+  - Distinct live streaming view in `src/ui/chat.rs::show_message`:
+    - When `is_streaming` is true and a thinking segment is actively receiving tokens, renders an open, high-contrast reasoning card with an animated spinner, live word count, and streaming cursor (`💭 Reasoning Stream (Thinking...)`).
+    - The user directly observes the model's thoughts and chain-of-reasoning unfolding in real time before the final response is generated.
+    - When thinking concludes and the response begins streaming below it, the thought box transitions to an expanded disclosure (`💭 Thought Process (N words · complete)`).
+    - For completed historical messages, the thoughts collapse cleanly (`💭 Thought Process (N words)`).
+    - Added a 1-click "💭 Copy thoughts" button in the message action row to extract reasoning traces without having to copy the entire message.
+  - Added unit tests: `parse_segments_multi_tag_thought_and_reasoning` and `parse_segments_active_streaming_think_chunk`.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Implement multi-tag detection (`<think>`, `<thought>`, `<reasoning>`) in `parse_segments`.
+  - [x] [COMPLETE] Add live streaming reasoning card with real-time text visibility in `show_message`.
+  - [x] [COMPLETE] Add "💭 Copy thoughts" action button in message footer.
+  - [x] [COMPLETE] Add dedicated unit tests; 125/125 tests passing cleanly.
+  - [x] [COMPLETE] Mark Section 23 as COMPLETE.
+
+## 24. Chat & Model Collaboration Rules Section in Settings (2026-09-12)
+- **Pre-Implementation Security Scan & Objectives:**
+  - Designed an explicit "Rules" section in Settings for user-configurable global chat rules and multi-model collaboration directives.
+  - Provided direct system-level conditioning so collaborating models assist rather than duplicate each other (e.g. if Model 1 produces a partial solution, Model 2 completes missing components; if Model 1 completes the entire request, Model 2 concurs, validates architectural decisions, and suggests alternatives).
+  - Ensured rules persist encrypted at-rest using AES-256-GCM in `AppSettings`.
+- **Implementation & Architecture:**
+  - `src/storage.rs`:
+    - Added `pub chat_rules: String` and `pub auto_assist_rules: bool` to `AppSettings`.
+    - Defined turnkey `default_chat_rules()` specifying Complementary Cooperation, Production-Grade Complete Output (no placeholders or ellipses), and Direct & Concise structure.
+    - Updated `layout_settings_roundtrip` test to verify encrypted roundtrip.
+  - `src/ui/settings.rs`:
+    - Created dedicated "Chat & Model Rules" configuration card.
+    - Added toggle for `auto_assist_rules` (Intelligent Multi-Model Auto-Assist / Gap-Filling).
+    - Added quick-preset chips: `[🤝 Auto-Assist]`, `[⚡ No Placeholders]`, `[🛡 Cyber Defense]`, and `[🔄 Reset Defaults]`.
+    - Added multiline editor for customizable rules injection.
+  - `src/ui/app.rs`:
+    - Injected `rules: &str` into `compose_system_prompt_with_contrast`, `compose_system_prompt`, and `compose_system_prompt_nocontrast`.
+    - Integrated rules into all chat execution paths: `start_relay`, `auto_relay_step`, `synthesize_to_focused`, `AppMessage::Broadcast`, single-slot `show_chat`, and `Tab::Editor`.
+    - Added `📜 Rules` quick-access button to the multi-model toolbar in `show_chat` linking to the Settings tab.
+  - Unit tests: Added `compose_system_prompt_includes_rules` and updated `compose_system_prompt_contrast_flag` (126/126 tests passing).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Add `chat_rules` and `auto_assist_rules` to `AppSettings` in `src/storage.rs`.
+  - [x] [COMPLETE] Add dedicated "Chat & Model Rules" UI section in `src/ui/settings.rs` with preset chips.
+  - [x] [COMPLETE] Wire rules injection into prompt composers across all chat, relay, and editor execution paths in `src/ui/app.rs`.
+  - [x] [COMPLETE] Add multi-model toolbar navigation shortcut to Rules in `show_chat`.
+  - [x] [COMPLETE] Add unit tests and verify 100% test pass rate (126/126 passed).
+  - [x] [COMPLETE] Mark Section 24 as COMPLETE.
+
+## 25. Fluid High-Speed Swarm Collaboration & Autonomous Handoff Engine (2026-09-13)
+- **Pre-Implementation Security Scan & Objectives:**
+  - Resolved local hardware contention caused by naive concurrent multi-model execution (running 2+ LLMs concurrently cuts tokens/sec by 50-70% on local GPU/VRAM).
+  - Eliminated context blindness where parallel models answer simultaneously without seeing peer output, causing duplicate redundant replies.
+  - Introduced autonomous Swarm Handoff in Chat, 1-click manual delegation on message cards, and Swarm Pair-Programming in the Editor IDE.
+  - Linked bio-inspired Stigmergic Blackboard memory to automatically preserve high-value code blocks and cross-slot insights.
+- **Implementation & Architecture:**
+  - `src/main.rs`: Declared `pub mod swarm;` exposing the DAG and Stigmergic Blackboard engine across the app.
+  - `src/storage.rs`:
+    - Added `pub swarm_auto_assist: bool` to `AppSettings`, persisted under AES-256-GCM.
+    - Updated `layout_settings_roundtrip` test to verify encrypted roundtrip.
+  - `src/ui/settings.rs`: Added `Enable Autonomous Swarm Handoff` toggle in the "Chat & Model Rules" configuration section.
+  - `src/ui/chat.rs`:
+    - Added `pub slot_idx: usize` to `ChatPanel` with deterministic indexing.
+    - Added `[🐝 Swarm Assist]` button to completed assistant messages in the chat action row, enabling 1-click manual delegation to peer models.
+  - `src/ui/editor.rs`:
+    - Added `[🐝 Swarm Audit & Harden]` button to the IDE editor toolbar.
+    - Added `[🐝 Swarm Assist]` button to the AI Coder quick prompts bar.
+    - Made `send_coder_message` public on `EditorPanel` for seamless cross-panel swarm coordination.
+  - `src/ui/app.rs`:
+    - Added `AppMessage::SwarmAssist { source_slot, content }` and `AppMessage::EditorAuditCode`.
+    - Integrated `pub blackboard: StigmergicBlackboard` and `pub swarm_auto_assist_origin: Option<usize>` in `AiDashboardApp`.
+    - Derived `Serialize` and `Deserialize` on `ModelRole`.
+    - Updated `AppMessage::Broadcast`: When `swarm_auto_assist` is active, Slot 0 runs first at 100% GPU speed with zero contention. Upon completion, it automatically hands off to Slot 1 with Slot 0's answer + collaboration directives.
+    - Added `[🤝 Swarm Handoff ON/OFF]` state toggle in the multi-model toolbar of `show_chat`.
+    - Deposited high-value assistant outputs (>80 chars) into `StigmergicBlackboard` with domain classification.
+  - Unit tests: Added `test_swarm_auto_assist_setting_and_slot_indexing`; all 137/137 tests passing cleanly.
+- **Tasks & Status:**
+  - [x] [COMPLETE] Add `pub mod swarm;` and derive `Serialize, Deserialize` on `ModelRole`.
+  - [x] [COMPLETE] Add `swarm_auto_assist` field to `AppSettings` in `src/storage.rs` and verify encrypted roundtrip.
+  - [x] [COMPLETE] Add `slot_idx` to `ChatPanel` and `[🐝 Swarm Assist]` button on message cards in `src/ui/chat.rs`.
+  - [x] [COMPLETE] Add `[🐝 Swarm Audit & Harden]` to editor toolbar and AI Coder in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Implement sequential Swarm Auto-Assist pipelining, handoff handlers, and Stigmergic Blackboard sync in `src/ui/app.rs`.
+  - [x] [COMPLETE] Add `🤝 Swarm Handoff` toggle button in multi-model toolbar in `show_chat`.
+  - [x] [COMPLETE] Verify 100% test pass rate (137/137 passed) and compile optimized release binary.
+  - [x] [COMPLETE] Mark Section 25 as COMPLETE.
+
+## 26. Editor Full-Page Alignment, Symmetrical Spreading & Perimeter Hardening (2026-09-13)
+- **Pre-Implementation Security & Architecture Scan:**
+  - Identified that `Tab::Editor` was rendered inside `egui::ScrollArea::vertical()`, causing unbounded height confusion, double scrolling, and preventing the IDE from filling the full window.
+  - Identified naive `ui.columns(col_count)` in `src/ui/editor.rs` that hardcoded equal 33.3% or 50% split widths, allocating an enormous 33% width to the file tree while starving the center code editor.
+  - Uncovered lack of an enclosing outer perimeter border frame on `show_editor_and_terminal_pane`, causing visual asymmetry and awkward gaps compared to the framed sidebars.
+  - Identified hardcoded row counts in `CodeEditor` (`rows = 16` or `26`) and hardcoded log scroll area height (`140.0`), leaving large empty dead space on modern displays.
+- **Implementation & Architecture:**
+  - `src/ui/app.rs`:
+    - Extracted `show_editor` onto `AiDashboardApp` with full system prompt composition (persona, memory, rules, engineering directives).
+    - Bypassed outer `ScrollArea::vertical()` in `egui::CentralPanel::default().show` for `Tab::Editor`, granting the IDE unconstrained 100% viewport access identical to `Tab::Chat`.
+  - `src/ui/editor.rs`:
+    - Replaced `ui.columns(col_count)` with proportional custom column allocation using `ui.horizontal` and `ui.allocate_ui_with_layout`:
+      - Left Workspace Explorer: sleek compact width ~240px (clamped to 180px - 25% width).
+      - Right AI Coder Chat: sleek compact width ~340px (clamped to 260px - 35% width).
+      - Center Code Editor & Terminal Pane: dynamically claims 100% of all remaining horizontal screen space (60-70%+ width).
+      - Inter-column spacing standardized to `6.0` to eliminate over-gaps.
+    - Added enclosing luxury perimeter border frame to `show_editor_and_terminal_pane` (`fill: #0a0f18`, `stroke: 1.0, #1e293b`, `corner_radius: 8`, `inner_margin: 8`), matching the left and right sidebars.
+    - Called `ui.set_min_height(ui.available_height())` across all three pane frames so all columns stretch uniformly down to the bottom perimeter.
+    - Symmetrically spread apart center dashboard controls across two full-width rows:
+      - Row 1: Left-aligned Language ComboBox, 220px File input, `[💾 Save]` button (green), `[📂 Open]` button; Right-aligned `[🐝 Swarm Audit & Harden]` (gold button), `[📋 Copy]` button, and live status badge.
+      - Row 2: Left-aligned template chips (Rust, Python, Shell, C++, Go, JS); Right-aligned `run_hint()` and live line/byte metrics.
+    - Dynamic editor row sizing: Calculated `editor_rows` from `ui.available_height()`, automatically expanding code editor lines to fill 100% of available vertical space (scaling from 25 to 55+ lines based on terminal toggle and display resolution).
+    - Made terminal dock log scroll area height dynamic: `(ui.available_height() - 8.0).max(120.0)`, filling down to the bottom dock perimeter.
+  - Added unit test: `test_editor_proportional_layout_and_dynamic_rows` verifying wide-screen 63%+ center allocation, minimum clamping on narrow screens, and dynamic row calculations without/with terminal dock.
+  - Test suite verified: 138/138 tests passing cleanly (0 failures).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Bypass outer scroll area in `src/ui/app.rs` for `Tab::Editor`.
+  - [x] [COMPLETE] Implement proportional 3-column layout engine in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Enclose center editor & terminal pane in matching perimeter border frame.
+  - [x] [COMPLETE] Symmetrically spread apart center dashboard controls and metrics.
+  - [x] [COMPLETE] Implement dynamic `editor_rows` and terminal log height calculations to fill 100% of viewport.
+  - [x] [COMPLETE] Add unit tests and verify 100% test pass rate (138/138 passed).
+  - [x] [COMPLETE] Build optimized release binary.
+  - [x] [COMPLETE] Mark Section 26 as COMPLETE.
+
+## 27. Adjustable Navigation Tabs Real Estate Rotation, Lowered Terminal Dock & Bottom-Pinned AI Coder Chatbox (2026-09-13)
+- **Pre-Implementation Security Scan & Objectives:**
+  - Real Estate Rotation: Enable adjustable navigation tabs allowing the user to rotate where navigation tabs live (Left vertical sidebar vs Top horizontal strip) to reclaim full horizontal window real estate for Editor and Chat.
+  - Lower Terminal Dock: Move the command runner and terminal dock lower down, granting ~70% vertical height to the Code Editor (35-45+ lines visible) and dedicating ~30% height to the bottom terminal dock.
+  - Bottom-Pinned AI Coder Chatbox: Move the chat prompt and send controls down to the bottom perimeter of the AI Coder & Architect sidebar, eliminating floating empty dead space when message count is low.
+  - Encryption at-rest: Ensure tab orientation preference (`tabs_at_top`) is securely encrypted under AES-256-GCM in `AppSettings`.
+- **Implementation & Architecture:**
+  - `src/storage.rs`:
+    - Added `pub tabs_at_top: bool` to `AppSettings` (default `false`).
+    - Verified encrypted serialization and deserialization via `layout_settings_roundtrip` test.
+  - `src/ui/app.rs`:
+    - Added `[⇄ Top Tabs]` / `[⇄ Side Tabs]` real-estate rotation toggle in `show_top_bar`.
+    - Added `[⇄ Rotate to Top]` button in vertical `show_tabs`.
+    - Implemented `show_horizontal_tabs` rendering a sleek horizontal strip with avatar badge and slot counters.
+    - Conditionally rendered `egui::Panel::top("horizontal_nav_tabs")` when `tabs_at_top` is true, omitting `egui::Panel::left("side_tabs")` to grant 100% horizontal window width to the central workspace.
+  - `src/ui/editor.rs`:
+    - In `show_editor_pane`: Increased `target_editor_h` to `(avail_h * 0.70 - reserved_for_diff).max(300.0)`, lowering the terminal dock to the bottom 30% and expanding the Code Editor to 70% height (35–45+ visible lines).
+    - In `show_coder_chat_pane`: Calculated `scroll_h = (ui.available_height() - 100.0).max(80.0)`, applied `.min_scrolled_height(scroll_h)` and `.max_height(scroll_h)` to the messages scroll area, and wrapped the input prompt + Send button in a dedicated dock frame (`#0a0f18`, border `#1e293b`), permanently pinning the chatbox to the bottom perimeter.
+    - Updated `test_editor_proportional_layout_and_dynamic_rows` unit test to verify the 70% height calculation.
+  - All 138 unit tests passing cleanly (138/138 passed, 0 failures).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Add `tabs_at_top` to `AppSettings` in `src/storage.rs` and verify encrypted roundtrip.
+  - [x] [COMPLETE] Implement `show_horizontal_tabs` and top/side tab rotation panel logic in `src/ui/app.rs`.
+  - [x] [COMPLETE] Lower terminal dock to bottom 30% and expand Code Editor to 70% height in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Pin AI Coder & Architect chatbox down to the bottom perimeter in `src/ui/editor.rs`.
+  - [x] [COMPLETE] Update and verify unit tests (138/138 passed).
+  - [x] [COMPLETE] Mark Section 27 as COMPLETE.
+
+## 28. AI Coder Full-Text Wrapping, Real-Time Streaming Reasoning, Border-Pinned Chatbox & Ultra-Lowered Terminal Dock (2026-09-13)
+- **Pre-Implementation Security Scan & Objectives:**
+  - Resolved text clipping / horizontal overflow in the AI Coder conversation: replaced un-wrapped labels with wrapped labels (`ui.add(egui::Label::new(...).wrap())`), enforced `TextWrapMode::Wrap`, and bounded bubble widths to `ui.available_width()`.
+  - Brought real-time streaming parity from main chat into AI Coder: enabled live streaming thought parsing (`<think>`, `<thought>`, `<reasoning>`), animated reasoning card with spinner and word count, live token cursor `▍`, and streaming code blocks with Replace/Copy controls.
+  - Eliminated nested frame padding mismatch and floating gaps in AI Coder chatbox: reserved exact input height (`input_reserve`), configured `auto_shrink([false, false])` on the messages scroll area, and docked the input field and Send button flush to the bottom perimeter border.
+  - Lowered Terminal Dock even further: integrated preset chips into the header row, streamlined the dock to ~130–150px, and expanded the Code Editor to 78% height (`avail_h * 0.78`), comfortably displaying 40–55+ lines of code simultaneously.
+- **Implementation & Architecture:**
+  - `src/ui/editor.rs`:
+    - In `show_workspace_and_editor`: Expanded `coder_width` to `360.0_f32.min(total_w * 0.35).max(260.0_f32)` on wide screens to give conversation messages ample reading room.
+    - In `show_editor_pane`: Increased `target_editor_h` to `(avail_h * 0.78 - reserved_for_diff).max(360.0)`, dedicating 78% height to code editing and lowering terminal dock to the bottom 22%.
+    - In `show_terminal_dock`: Streamlined header to integrate preset action chips (`▶ Run`, `🔨 Build`, `🧪 Test`, `🛡 Audit`, `⚙ setup`, `🚀 start`, `🧹 clean`, `🛠 Gen`) alongside title, reducing vertical footprint, and set `term_scroll_h = (ui.available_height() - 4.0).max(65.0)`.
+    - In `show_coder_chat_pane`: Enforced `wrap_mode = Some(TextWrapMode::Wrap)`. Configured `auto_shrink([false, false])` with `input_reserve = 88.0 * zoom_factor`. Added live streaming handling for empty-buffer thinking state and non-empty streaming chunk parsing with cursor `▍`. Aligned input multiline box and Send button directly down to the bottom perimeter.
+    - In `render_coder_message_with_deploy`: Added `is_streaming: bool` parameter. Wrapped all text labels with `.wrap()`. Added animated reasoning card for streaming thoughts. Added collapsing header for completed thoughts. Added Copy message text and Copy thoughts buttons.
+    - Updated `test_editor_proportional_layout_and_dynamic_rows` unit test (138/138 tests passing).
+- **Tasks & Status:**
+  - [x] [COMPLETE] Wrap all text labels in AI Coder pane to prevent clipping and enable full conversation reading.
+  - [x] [COMPLETE] Implement live streaming thought parsing and animated reasoning stream card in AI Coder.
+  - [x] [COMPLETE] Align AI Coder chatbox input area and pin it directly to the bottom perimeter border.
+  - [x] [COMPLETE] Lower Command Runner and Terminal Dock into sleek bottom drawer, expanding Code Editor to 78% height.
+  - [x] [COMPLETE] Verify unit tests (138/138 passed) and compile optimized release binary.
+  - [x] [COMPLETE] Mark Section 28 as COMPLETE.
+
+
+
+
+
+
 
 

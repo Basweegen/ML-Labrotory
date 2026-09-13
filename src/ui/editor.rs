@@ -447,30 +447,82 @@ impl EditorPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        // Layout Configuration based on active sidebars
-        let col_count = 1 + (if self.show_workspace_tree { 1 } else { 0 }) + (if self.show_coder_chat { 1 } else { 0 });
+        // Proportional 3-Column Layout Engine with Perimeter Hardening
+        let total_w = ui.available_width();
+        let total_h = ui.available_height();
+        let spacing = 6.0;
 
-        if col_count == 3 {
-            ui.columns(3, |cols| {
-                self.show_workspace_pane(&mut cols[0], tx);
-                self.show_editor_and_terminal_pane(&mut cols[1], tx, rt);
-                self.show_coder_chat_pane(&mut cols[2], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
-            });
-        } else if col_count == 2 {
-            if self.show_workspace_tree {
-                ui.columns(2, |cols| {
-                    self.show_workspace_pane(&mut cols[0], tx);
-                    self.show_editor_and_terminal_pane(&mut cols[1], tx, rt);
-                });
-            } else {
-                ui.columns(2, |cols| {
-                    self.show_editor_and_terminal_pane(&mut cols[0], tx, rt);
-                    self.show_coder_chat_pane(&mut cols[1], models, selected_model, system_prompt, api_client, tx, rt, num_threads);
-                });
-            }
+        let show_ws = self.show_workspace_tree;
+        let show_coder = self.show_coder_chat;
+
+        let ws_width = if show_ws {
+            240.0_f32.min(total_w * 0.25).max(180.0_f32)
         } else {
-            self.show_editor_and_terminal_pane(ui, tx, rt);
+            0.0
+        };
+
+        let coder_width = if show_coder {
+            360.0_f32.min(total_w * 0.35).max(260.0_f32)
+        } else {
+            0.0
+        };
+
+        let mut active_sidebars = 0.0;
+        if show_ws {
+            active_sidebars += 1.0;
         }
+        if show_coder {
+            active_sidebars += 1.0;
+        }
+
+        let center_width = (total_w - ws_width - coder_width - (active_sidebars * spacing)).max(320.0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = spacing;
+
+            if show_ws {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ws_width, total_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(ws_width);
+                        ui.set_height(total_h);
+                        self.show_workspace_pane(ui, tx);
+                    },
+                );
+            }
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(center_width, total_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(center_width);
+                    ui.set_height(total_h);
+                    self.show_editor_and_terminal_pane(ui, tx, rt);
+                },
+            );
+
+            if show_coder {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(coder_width, total_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(coder_width);
+                        ui.set_height(total_h);
+                        self.show_coder_chat_pane(
+                            ui,
+                            models,
+                            selected_model,
+                            system_prompt,
+                            api_client,
+                            tx,
+                            rt,
+                            num_threads,
+                        );
+                    },
+                );
+            }
+        });
     }
 
     /// Left Pane: Workspace File Tree & File System CRUD
@@ -482,6 +534,8 @@ impl EditorPanel {
             .inner_margin(egui::Margin::same(8));
 
         frame.show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("📁 Workspace Explorer")
@@ -699,83 +753,171 @@ impl EditorPanel {
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
         rt: &Runtime,
     ) {
-        // Upper part: Code Editor
-        self.show_editor_pane(ui, tx);
+        let frame = egui::Frame::NONE
+            .fill(egui::Color32::from_rgb(0x0a, 0x0f, 0x18))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(8));
 
-        // Lower part: Terminal / Command Runner Dock (if active)
-        if self.show_terminal {
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-            self.show_terminal_dock(ui, tx, rt);
-        }
+        frame.show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            ui.set_min_width(ui.available_width());
+
+            // Upper part: Code Editor
+            self.show_editor_pane(ui, tx);
+
+            // Lower part: Terminal / Command Runner Dock (if active)
+            if self.show_terminal {
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.show_terminal_dock(ui, tx, rt);
+            }
+        });
     }
 
     fn show_editor_pane(&mut self, ui: &mut egui::Ui, tx: &mpsc::Sender<crate::ui::app::AppMessage>) {
+        // Primary Center Toolbar: Spread apart across the entire width
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Language:").size(12.5).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
-            ui.add_space(4.0);
+            // Left Group: Language selector, file path input, Save, Open
+            ui.label(
+                egui::RichText::new("Language:")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+            );
             egui::ComboBox::from_id_salt("editor_language")
-                .selected_text(egui::RichText::new(&self.language).size(12.5))
-                .width(110.0)
+                .selected_text(egui::RichText::new(&self.language).size(12.0))
+                .width(105.0)
                 .show_ui(ui, |ui| {
-                    for lang in ["rust", "python", "javascript", "typescript", "go", "c", "cpp", "java", "sql", "shell", "lua", "asm"] {
-                        ui.selectable_value(&mut self.language, lang.to_string(), egui::RichText::new(lang).size(12.5));
+                    for lang in [
+                        "rust", "python", "javascript", "typescript", "go", "c", "cpp", "java",
+                        "sql", "shell", "lua", "asm",
+                    ] {
+                        ui.selectable_value(
+                            &mut self.language,
+                            lang.to_string(),
+                            egui::RichText::new(lang).size(12.0),
+                        );
                     }
                 });
 
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("File:").size(12.5).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
-            ui.add_space(4.0);
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("File:")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut self.file_path)
-                    .desired_width(180.0)
+                    .desired_width(220.0)
                     .font(egui::TextStyle::Monospace)
                     .hint_text("path/to/file.rs"),
             );
 
             ui.add_space(4.0);
-            if ui
-                .button(egui::RichText::new("Save").size(12.0).strong().color(egui::Color32::WHITE))
+            let save_btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("💾 Save")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0x05, 0x96, 0x69))
+                .corner_radius(egui::CornerRadius::same(5)),
+            );
+            if save_btn
                 .on_hover_text("Write editor content to this file")
                 .clicked()
             {
                 let ok = self.save_to_file();
                 if !self.file_path.trim().is_empty() {
                     let _ = tx.send(crate::ui::app::AppMessage::Audit(
-                        if ok { "file.save".to_string() } else { "file.save_failed".to_string() },
+                        if ok {
+                            "file.save".to_string()
+                        } else {
+                            "file.save_failed".to_string()
+                        },
                         self.file_path.trim().to_string(),
                     ));
                 }
             }
-            if ui
-                .button(egui::RichText::new("Open").size(12.0))
+
+            ui.add_space(2.0);
+            let open_btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("📂 Open")
+                        .size(12.0)
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0x1e, 0x29, 0x3b))
+                .corner_radius(egui::CornerRadius::same(5)),
+            );
+            if open_btn
                 .on_hover_text("Load this file into the editor")
                 .clicked()
             {
                 let ok = self.open_from_file();
                 if !self.file_path.trim().is_empty() {
                     let _ = tx.send(crate::ui::app::AppMessage::Audit(
-                        if ok { "file.open".to_string() } else { "file.open_failed".to_string() },
+                        if ok {
+                            "file.open".to_string()
+                        } else {
+                            "file.open_failed".to_string()
+                        },
                         self.file_path.trim().to_string(),
                     ));
                 }
             }
+
+            // Right-aligned group: Swarm Audit, Copy, Live file status
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let audit_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("🐝 Swarm Audit & Harden")
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(0x0a, 0x0f, 0x18)),
+                    )
+                    .fill(egui::Color32::from_rgb(0xfb, 0xbf, 0x24))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)))
+                    .corner_radius(egui::CornerRadius::same(5)),
+                );
+                if audit_btn
+                    .on_hover_text("Dispatch active code to Swarm Security Auditor to inspect memory safety, logic flaws, and generate an instant patch")
+                    .clicked()
+                {
+                    let _ = tx.send(crate::ui::app::AppMessage::EditorAuditCode);
+                }
+
+                ui.add_space(4.0);
+                if ui
+                    .small_button("📋 Copy")
+                    .on_hover_text("Copy active editor code to clipboard")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(self.code.clone());
+                    self.file_status = "Code copied to clipboard.".to_string();
+                }
+
+                if !self.file_status.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(&self.file_status)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x34, 0xd3, 0x99)),
+                    );
+                }
+            });
         });
 
-        if !self.file_status.is_empty() {
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(&self.file_status)
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(0x00, 0xcc, 0x88)),
-            );
-        }
-
-        ui.add_space(4.0);
+        // Secondary Toolbar Row: Templates & Live Metrics / Hints
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Templates:").size(11.5).color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)));
-            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Templates:")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+            );
             if ui.small_button("Rust").clicked() {
                 self.apply_template("rust");
             }
@@ -785,18 +927,49 @@ impl EditorPanel {
             if ui.small_button("Shell").clicked() {
                 self.apply_template("shell");
             }
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(self.run_hint())
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
-            );
+            if ui.small_button("C++").clicked() {
+                self.apply_template("cpp");
+            }
+            if ui.small_button("Go").clicked() {
+                self.apply_template("go");
+            }
+            if ui.small_button("JS").clicked() {
+                self.apply_template("javascript");
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let hint = self.run_hint();
+                if !hint.is_empty() {
+                    ui.label(
+                        egui::RichText::new(hint)
+                            .size(11.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                    );
+                }
+                let lines = self.code.lines().count();
+                let bytes = self.code.len();
+                ui.label(
+                    egui::RichText::new(format!("{} lines | {} B", lines, bytes))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+                );
+            });
         });
 
         ui.add_space(4.0);
 
+        // Dynamic Height Editor Sizing: Fills 100% of remaining vertical space
         let syntax = Self::syntax_for_language(&self.language);
-        let editor_rows = if self.show_terminal { 16 } else { 26 };
+        let avail_h = ui.available_height();
+        let reserved_for_diff = if self.pending_suggestion.is_some() { 130.0 } else { 0.0 };
+        let target_editor_h = if self.show_terminal {
+            (avail_h * 0.78 - reserved_for_diff).max(360.0)
+        } else {
+            (avail_h - 10.0 - reserved_for_diff).max(250.0)
+        };
+        let editor_rows = ((target_editor_h / 17.5) as usize).max(12);
+
         let mut editor = CodeEditor::default()
             .id_source("code_editor_main")
             .with_rows(editor_rows)
@@ -877,13 +1050,14 @@ impl EditorPanel {
             .fill(egui::Color32::from_rgb(0x08, 0x0c, 0x14))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b)))
             .corner_radius(egui::CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(8));
+            .inner_margin(egui::Margin::symmetric(8, 6));
 
         frame.show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("⚡ Command Runner & Terminal Dock")
-                        .size(13.0)
+                    egui::RichText::new("⚡ Terminal Dock")
+                        .size(12.5)
                         .strong()
                         .color(egui::Color32::from_rgb(0x10, 0xb9, 0x81)),
                 );
@@ -896,17 +1070,8 @@ impl EditorPanel {
                     );
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Clear Console").clicked() {
-                        self.terminal_logs.clear();
-                    }
-                });
-            });
-
-            ui.add_space(4.0);
-            // Quick preset execution buttons
-            ui.horizontal_wrapped(|ui| {
-                if ui.small_button("▶ Run Current File").on_hover_text("Execute active file in editor").clicked() {
+                // Quick preset execution buttons integrated in header row
+                if ui.small_button("▶ Run").on_hover_text("Execute active file in editor").clicked() {
                     self.run_current_file(tx, rt);
                 }
                 if ui.small_button("🔨 Build").on_hover_text("Run project build (cargo build / npm build)").clicked() {
@@ -915,24 +1080,30 @@ impl EditorPanel {
                 if ui.small_button("🧪 Test").on_hover_text("Run test suite (cargo test / pytest)").clicked() {
                     self.run_test(tx, rt);
                 }
-                if ui.small_button("🛡 Verify & Audit").on_hover_text("Run ./verify.sh or comprehensive security & test verification").clicked() {
+                if ui.small_button("🛡 Audit").on_hover_text("Run ./verify.sh or comprehensive security verification").clicked() {
                     self.run_verify(tx, rt);
                 }
-                if ui.small_button("⚙ Run setup.sh").on_hover_text("Execute ./setup.sh in workspace root").clicked() {
+                if ui.small_button("⚙ setup").on_hover_text("Execute ./setup.sh in workspace root").clicked() {
                     self.run_setup(tx, rt);
                 }
-                if ui.small_button("🚀 Run start.sh").on_hover_text("Execute ./start.sh in workspace root").clicked() {
+                if ui.small_button("🚀 start").on_hover_text("Execute ./start.sh in workspace root").clicked() {
                     self.run_start(tx, rt);
                 }
-                if ui.small_button("🧹 Clean").on_hover_text("Execute ./clean.sh or project cleanup").clicked() {
+                if ui.small_button("🧹 clean").on_hover_text("Execute ./clean.sh or project cleanup").clicked() {
                     self.run_clean(tx, rt);
                 }
-                if ui.small_button("🛠 Gen Scripts").on_hover_text("Generate turnkey setup.sh, verify.sh, start.sh, and clean.sh in workspace").clicked() {
+                if ui.small_button("🛠 Gen").on_hover_text("Generate turnkey setup.sh, verify.sh, start.sh, and clean.sh in workspace").clicked() {
                     let _ = self.generate_automation_scripts();
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Clear").clicked() {
+                        self.terminal_logs.clear();
+                    }
+                });
             });
 
-            ui.add_space(4.0);
+            ui.add_space(3.0);
             // Custom command input bar
             let mut execute_now = false;
             ui.horizontal(|ui| {
@@ -940,16 +1111,16 @@ impl EditorPanel {
                     egui::TextEdit::singleline(&mut self.terminal_input)
                         .hint_text("Enter terminal command... (e.g. cargo check, python3 main.py, sh setup.sh)")
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(ui.available_width() - 80.0),
+                        .desired_width(ui.available_width() - 75.0),
                 );
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     execute_now = true;
                 }
 
-                let btn_text = if self.terminal_is_running { "Running..." } else { "Run" };
+                let btn_text = if self.terminal_is_running { "..." } else { "Run ↵" };
                 let btn = ui.add_enabled(
                     !self.terminal_is_running && !self.terminal_input.trim().is_empty(),
-                    egui::Button::new(egui::RichText::new(btn_text).size(12.0).color(egui::Color32::WHITE))
+                    egui::Button::new(egui::RichText::new(btn_text).size(11.5).color(egui::Color32::WHITE))
                         .fill(egui::Color32::from_rgb(0x05, 0x96, 0x69))
                         .corner_radius(egui::CornerRadius::same(4)),
                 );
@@ -963,11 +1134,12 @@ impl EditorPanel {
                 self.run_terminal_command(&cmd, tx, rt);
             }
 
-            ui.add_space(4.0);
+            ui.add_space(3.0);
             // Log output viewport
+            let term_scroll_h = (ui.available_height() - 4.0).max(65.0);
             egui::ScrollArea::vertical()
                 .id_salt("terminal_log_scroll")
-                .max_height(140.0)
+                .max_height(term_scroll_h)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     if self.terminal_logs.is_empty() {
@@ -1057,6 +1229,9 @@ impl EditorPanel {
             .inner_margin(egui::Margin::same(10));
 
         frame.show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.set_min_height(ui.available_height());
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("🤖 AI Coder & Architect")
@@ -1107,6 +1282,9 @@ impl EditorPanel {
                 if ui.small_button("🛡 Audit").clicked() {
                     self.send_coder_message("Perform a rigorous cybersecurity and memory safety audit on this code. Highlight all vulnerabilities.", models, selected_model, system_prompt, api_client, tx, rt, num_threads);
                 }
+                if ui.small_button(egui::RichText::new("🐝 Swarm Assist").color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24))).on_hover_text("Trigger Swarm Security Auditor to inspect and patch active code").clicked() {
+                    let _ = tx.send(crate::ui::app::AppMessage::EditorAuditCode);
+                }
                 if ui.small_button("🏗 Scaffold App").clicked() {
                     self.show_scaffold_modal = true;
                 }
@@ -1120,12 +1298,16 @@ impl EditorPanel {
             let mut apply_code_req = None;
             let mut deploy_multi_req = None;
 
+            // Reserve room for bottom docked chatbox (field 2 rows ≈ 36px + actions ≈ 26px + spacing/separators ≈ 14px = ~76px)
+            let input_reserve = 88.0 * ui.ctx().zoom_factor();
+            let scroll_h = (ui.available_height() - input_reserve).max(60.0);
             egui::ScrollArea::vertical()
                 .id_salt("ide_coder_scroll_area")
-                .max_height(ui.available_height() - 130.0)
+                .max_height(scroll_h)
+                .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    if self.coder_messages.is_empty() {
+                    if self.coder_messages.is_empty() && !self.coder_is_streaming {
                         ui.vertical_centered(|ui| {
                             ui.add_space(20.0);
                             ui.label(
@@ -1148,23 +1330,44 @@ impl EditorPanel {
                             msg,
                             segs,
                             m_idx,
+                            false,
                             &mut apply_code_req,
                             &mut deploy_multi_req,
                             tx,
                         );
                     }
 
-                    if self.coder_is_streaming && !self.coder_stream_buf.is_empty() {
-                        ui.add_space(4.0);
-                        egui::Frame::NONE
-                            .fill(egui::Color32::from_rgb(0x16, 0x1e, 0x2e))
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("AI Coder (generating...)").size(11.0).strong().color(egui::Color32::from_rgb(0x4a, 0xde, 0x80)));
-                                ui.add_space(2.0);
-                                ui.label(egui::RichText::new(&self.coder_stream_buf).size(12.0).color(egui::Color32::WHITE));
+                    if self.coder_is_streaming {
+                        if !self.coder_stream_buf.is_empty() {
+                            let stream_content = format!("{}▍", self.coder_stream_buf);
+                            let stream_segs = crate::ui::chat::parse_segments(&stream_content);
+                            let tmp_msg = ChatMessage {
+                                role: "assistant".to_string(),
+                                content: stream_content,
+                                timestamp: chrono::Utc::now(),
+                            };
+                            Self::render_coder_message_with_deploy(
+                                ui,
+                                &tmp_msg,
+                                &stream_segs,
+                                self.coder_messages.len(),
+                                true,
+                                &mut apply_code_req,
+                                &mut deploy_multi_req,
+                                tx,
+                            );
+                        } else {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(4.0);
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new("Thinking & architecting...")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                );
                             });
+                        }
                     }
                 });
 
@@ -1176,32 +1379,37 @@ impl EditorPanel {
                 let _ = self.deploy_multi_file_from_text(&text);
             }
 
-            ui.add_space(4.0);
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
 
-            // Multiline Input Prompt
+            // Docked Chatbox Input Area: Aligned and placed right down to the border
             let input_resp = ui.add(
                 egui::TextEdit::multiline(&mut self.coder_input)
+                    .id_salt("ide_coder_input_box")
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Ask AI coder to write, scaffold full app, refactor, or fix... (Enter to send)")
+                    .hint_text("Ask AI Coder to write, scaffold, or refactor... (Enter to send, Shift+Enter for newline)")
                     .font(egui::TextStyle::Body),
             );
 
-            ui.add_space(4.0);
+            ui.add_space(3.0);
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.include_editor_context, "Include editor code in context");
+                ui.checkbox(&mut self.include_editor_context, "Include editor code");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_send = !self.coder_input.trim().is_empty() && !self.coder_is_streaming;
                     let send_btn = ui.add_enabled(
                         can_send,
                         egui::Button::new(
-                            egui::RichText::new(if self.coder_is_streaming { "Generating..." } else { "Send (Enter)" })
+                            egui::RichText::new(if self.coder_is_streaming { "Generating..." } else { "Send ↵" })
                                 .size(12.0)
                                 .color(egui::Color32::WHITE),
                         )
-                        .fill(egui::Color32::from_rgb(0x00, 0x66, 0xcc))
-                        .corner_radius(egui::CornerRadius::same(6)),
+                        .fill(if can_send { egui::Color32::from_rgb(0x00, 0x66, 0xcc) } else { egui::Color32::from_rgb(0x1a, 0x3a, 0x66) })
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0xbd, 0xf8)))
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .min_size(egui::vec2(85.0, 26.0)),
                     );
 
                     if send_btn.clicked() {
@@ -1214,7 +1422,7 @@ impl EditorPanel {
                         let stop_btn = ui.add(
                             egui::Button::new(egui::RichText::new("Stop").size(12.0).color(egui::Color32::WHITE))
                                 .fill(egui::Color32::from_rgb(0xaa, 0x33, 0x33))
-                                .corner_radius(egui::CornerRadius::same(6)),
+                                .corner_radius(egui::CornerRadius::same(5)),
                         );
                         if stop_btn.clicked() {
                             self.stop_coder_stream();
@@ -1238,7 +1446,8 @@ impl EditorPanel {
         ui: &mut egui::Ui,
         msg: &ChatMessage,
         segments: &[crate::ui::chat::MessageSegment],
-        _m_idx: usize,
+        msg_idx: usize,
+        is_streaming: bool,
         apply_req: &mut Option<String>,
         deploy_multi_req: &mut Option<String>,
         tx: &mpsc::Sender<crate::ui::app::AppMessage>,
@@ -1249,6 +1458,8 @@ impl EditorPanel {
             (egui::Color32::from_rgb(0x13, 0x2f, 0x4c), "You", egui::Color32::from_rgb(0x38, 0xbd, 0xf8))
         } else if is_sys {
             (egui::Color32::from_rgb(0x33, 0x22, 0x11), "System", egui::Color32::from_rgb(0xf5, 0x9e, 0x0b))
+        } else if is_streaming {
+            (egui::Color32::from_rgb(0x16, 0x1e, 0x2e), "AI Coder (generating...)", egui::Color32::from_rgb(0x4a, 0xde, 0x80))
         } else {
             (egui::Color32::from_rgb(0x16, 0x1e, 0x2e), "AI Coder", egui::Color32::from_rgb(0x4a, 0xde, 0x80))
         };
@@ -1259,6 +1470,7 @@ impl EditorPanel {
             .corner_radius(egui::CornerRadius::same(6))
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(who).size(11.0).strong().color(tag_color));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1279,23 +1491,76 @@ impl EditorPanel {
                     segments
                 };
 
-                for seg in actual_segs {
+                for (seg_idx, seg) in actual_segs.iter().enumerate() {
                     match seg {
                         crate::ui::chat::MessageSegment::Text(t) => {
                             if !t.is_empty() {
-                                ui.label(egui::RichText::new(t).size(12.0).color(egui::Color32::WHITE));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(t)
+                                            .size(12.0)
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .wrap(),
+                                );
                             }
                         }
                         crate::ui::chat::MessageSegment::Think(th) => {
-                            egui::CollapsingHeader::new(
-                                egui::RichText::new("💭 Thought Process")
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
-                            )
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(th).size(10.5).color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)).italics());
-                            });
+                            let word_count = th.split_whitespace().count();
+                            let is_active_stream_think = is_streaming && seg_idx == actual_segs.len() - 1;
+                            if is_active_stream_think {
+                                // Actively streaming thoughts in real-time
+                                egui::Frame::NONE
+                                    .fill(egui::Color32::from_rgb(0x0a, 0x10, 0x1f))
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x25, 0x63, 0xeb)))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label(
+                                                egui::RichText::new("💭 Reasoning Stream (Thinking...)")
+                                                    .size(11.0)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(0x38, 0xbd, 0xf8)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("({} words)", word_count))
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(0x64, 0x74, 0x8b)),
+                                            );
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(th)
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
+                                                    .italics(),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                            } else {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new(format!("💭 Thought Process ({} words)", word_count))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+                                )
+                                .id_salt(format!("coder_think_{}_{}", msg_idx, seg_idx))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(th)
+                                                .size(10.5)
+                                                .color(egui::Color32::from_rgb(0x94, 0xa3, 0xb8))
+                                                .italics(),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            }
                         }
                         crate::ui::chat::MessageSegment::Code { lang, code } => {
                             ui.add_space(3.0);
@@ -1330,7 +1595,7 @@ impl EditorPanel {
 
                                 ui.add_space(2.0);
                                 egui::ScrollArea::horizontal()
-                                    .id_salt(format!("code_blk_{}_{}", lang, code.len()))
+                                    .id_salt(format!("code_blk_{}_{}_{}", msg_idx, seg_idx, code.len()))
                                     .show(ui, |ui| {
                                         ui.label(
                                             egui::RichText::new(code)
@@ -1342,6 +1607,27 @@ impl EditorPanel {
                             });
                         }
                     }
+                }
+
+                if !is_streaming {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("📋 Copy").on_hover_text("Copy message text").clicked() {
+                            ui.ctx().copy_text(msg.content.clone());
+                        }
+                        let think_blocks: Vec<&str> = actual_segs
+                            .iter()
+                            .filter_map(|s| match s {
+                                crate::ui::chat::MessageSegment::Think(th) => Some(th.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !think_blocks.is_empty() {
+                            if ui.small_button("💭 Copy thoughts").on_hover_text("Copy reasoning trace").clicked() {
+                                ui.ctx().copy_text(think_blocks.join("\n\n"));
+                            }
+                        }
+                    });
                 }
 
                 // Check for multi-file application pattern
@@ -1796,7 +2082,7 @@ impl EditorPanel {
         }
     }
 
-    fn send_coder_message(
+    pub fn send_coder_message(
         &mut self,
         prompt: &str,
         _models: &[crate::ollama::api::Model],
@@ -2101,5 +2387,40 @@ mod tests {
         assert!(e.code.contains("SwarmAgent"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_editor_proportional_layout_and_dynamic_rows() {
+        // Test wide display layout allocation
+        let total_w = 1600.0_f32;
+        let spacing = 6.0_f32;
+        let ws_w = 240.0_f32.min(total_w * 0.25).max(180.0_f32);
+        let coder_w = 360.0_f32.min(total_w * 0.35).max(260.0_f32);
+        let center_w = (total_w - ws_w - coder_w - (2.0 * spacing)).max(320.0);
+
+        assert_eq!(ws_w, 240.0);
+        assert_eq!(coder_w, 360.0);
+        assert_eq!(center_w, 988.0);
+        assert!(center_w > ws_w * 4.0, "Center editor must command majority of width");
+
+        // Test narrow display minimum clamping
+        let narrow_w = 700.0_f32;
+        let ws_narrow = 240.0_f32.min(narrow_w * 0.25).max(180.0_f32);
+        let coder_narrow = 360.0_f32.min(narrow_w * 0.35).max(260.0_f32);
+        let center_narrow = (narrow_w - ws_narrow - coder_narrow - (2.0 * spacing)).max(320.0);
+
+        assert_eq!(ws_narrow, 180.0);
+        assert_eq!(coder_narrow, 260.0);
+        assert_eq!(center_narrow, 320.0);
+
+        // Test dynamic row calculation filling viewport
+        let avail_h = 900.0_f32;
+        let target_h_no_term = (avail_h - 10.0).max(250.0);
+        let rows_no_term = ((target_h_no_term / 17.5) as usize).max(12);
+        assert!(rows_no_term >= 50, "Without terminal, editor should fill 50+ rows on 900px height");
+
+        let target_h_with_term = (avail_h * 0.78).max(360.0);
+        let rows_with_term = ((target_h_with_term / 17.5) as usize).max(12);
+        assert!(rows_with_term >= 40, "With terminal lowered, editor should allocate 40+ rows");
     }
 }

@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 //! Files tab: browse, create, delete, rename, read, write and edit
 //! project files under the configured root. Everything mutating is
 //! audit-logged; deletes of whole directory trees need a confirm click.

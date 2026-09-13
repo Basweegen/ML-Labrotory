@@ -1,4 +1,5 @@
-//! Stack-chan style reactive face for the chat UI (pure egui, no assets).
+// Copyright 2026 Sean M. Stow. All rights reserved.
+//! Reactive companion avatar face for the chat UI (pure egui, no assets).
 //!
 //! Two call sites (the "two"):
 //!   1. big face above the focused-slot chat (reactive: thinking/talking/happy)

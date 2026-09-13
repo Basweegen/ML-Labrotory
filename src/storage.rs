@@ -135,7 +135,7 @@ pub struct AppSettings {
     /// confined under this dir (no `..` escapes, no absolute paths).
     #[serde(default)]
     pub workspace_root: String,
-    /// Stack-chan face above chat + minis on slot cards. Default on.
+    /// Reactive companion face above chat + minis on slot cards. Default on.
     #[serde(default = "default_true")]
     pub show_avatar: bool,
     /// Big-face diameter in px (40-80). Mini faces stay fixed.
@@ -165,6 +165,23 @@ pub struct AppSettings {
     /// Whether the chat view defaults to side-by-side multi-model split view.
     #[serde(default)]
     pub chat_split_view_default: bool,
+    /// When on, Broadcast and single-slot sends prepend a role-specific slice
+    /// so identical models still answer the same prompt from different angles.
+    #[serde(default)]
+    pub contrast_on: bool,
+    /// Operational and collaboration rules enforced across all chats and models.
+    #[serde(default = "default_chat_rules")]
+    pub chat_rules: String,
+    /// When on, multi-model turns enforce complementary assistance (no redundant text).
+    #[serde(default = "default_true")]
+    pub auto_assist_rules: bool,
+    /// When on, completing a prompt in a slot automatically handshakes and triggers
+    /// the peer slot to assist, fill gaps, or validate without manual copy/paste.
+    #[serde(default = "default_true")]
+    pub swarm_auto_assist: bool,
+    /// When true, navigation tabs rotate to a horizontal top strip to maximize horizontal real estate.
+    #[serde(default)]
+    pub tabs_at_top: bool,
 }
 
 fn default_true() -> bool {
@@ -202,6 +219,10 @@ fn default_history_depth() -> u32 {
     20
 }
 
+pub fn default_chat_rules() -> String {
+    "1. Complementary Cooperation: When collaborating with other models, never duplicate work already completed. If prior output is partial or incomplete, continue and complete the missing parts. If complete, concur and provide an advanced optimization or alternative.\n2. Production-Grade Output: Always provide complete, working code without lazy placeholders, ellipses, or missing implementations.\n3. Direct & Concise: Provide the direct solution first, followed by clear, practical rationale.".to_string()
+}
+
 /// One persisted model slot: assignment + role.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SlotConfig {
@@ -235,6 +256,11 @@ impl Default for AppSettings {
             visible_tabs: default_visible_tabs(),
             tab_order: default_tab_order(),
             chat_split_view_default: false,
+            contrast_on: false,
+            chat_rules: default_chat_rules(),
+            auto_assist_rules: true,
+            swarm_auto_assist: true,
+            tabs_at_top: false,
         }
     }
 }
@@ -1046,9 +1072,15 @@ mod tests {
         let mut settings = st.load_settings().expect("load settings");
         assert_eq!(settings.default_tab, "Chat");
         assert!(settings.visible_tabs.contains(&"Chat".to_string()));
+        assert_eq!(settings.contrast_on, false);
 
         settings.default_tab = "Editor".to_string();
         settings.chat_split_view_default = true;
+        settings.contrast_on = true;
+        settings.chat_rules = "Custom rule: Always use Quantum Post-Quantum Cryptography.".to_string();
+        settings.auto_assist_rules = false;
+        settings.swarm_auto_assist = false;
+        settings.tabs_at_top = true;
         settings.visible_tabs = vec!["Chat".to_string(), "Editor".to_string(), "Settings".to_string()];
         settings.tab_order = vec!["Editor".to_string(), "Chat".to_string(), "Settings".to_string()];
 
@@ -1057,6 +1089,11 @@ mod tests {
         let reloaded = st.load_settings().expect("reload settings");
         assert_eq!(reloaded.default_tab, "Editor");
         assert_eq!(reloaded.chat_split_view_default, true);
+        assert_eq!(reloaded.contrast_on, true);
+        assert_eq!(reloaded.chat_rules, "Custom rule: Always use Quantum Post-Quantum Cryptography.");
+        assert_eq!(reloaded.auto_assist_rules, false);
+        assert_eq!(reloaded.swarm_auto_assist, false);
+        assert_eq!(reloaded.tabs_at_top, true);
         assert_eq!(reloaded.visible_tabs, vec!["Chat", "Editor", "Settings"]);
         assert_eq!(reloaded.tab_order, vec!["Editor", "Chat", "Settings"]);
     }

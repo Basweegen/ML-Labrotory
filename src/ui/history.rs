@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 use eframe::egui;
 use crate::storage::{AuditEntry, ChatSession, Storage};
 use serde_json;

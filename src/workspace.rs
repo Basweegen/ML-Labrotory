@@ -1341,7 +1341,7 @@ mod tests {
         let too_long = "x".repeat(MAX_CMD_CHARS + 1);
         assert!(spawn_shell(&too_long, &root).is_err());
         // A real run: echo exits 0 with its line on stdout.
-        let mut child = spawn_shell("echo hi", &root).unwrap();
+        let child = spawn_shell("echo hi", &root).unwrap();
         let out = child.wait_with_output().await.unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");

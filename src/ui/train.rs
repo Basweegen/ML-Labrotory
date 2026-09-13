@@ -1,3 +1,4 @@
+// Copyright 2026 Sean M. Stow. All rights reserved.
 //! Train tab: the self-learning center. Past chats already feed the
 //! profiler network as experiences; here that learning is visible and
 //! controllable: dataset size, exploration/exploitation knobs, on-demand

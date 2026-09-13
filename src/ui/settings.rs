@@ -50,7 +50,7 @@ impl SettingsPanel {
         ui.horizontal(|ui| {
             ui.checkbox(&mut settings.show_avatar, "Show assistant face (reactive avatar)");
         });
-        ui.label(egui::RichText::new("Stack-chan style face above chat + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.label(egui::RichText::new("Reactive companion face atop navigation tabs + minis on slot cards.").size(11.0).color(egui::Color32::from_rgb(0x88, 0x88, 0x88)));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Face size:").size(13.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
@@ -286,6 +286,81 @@ impl SettingsPanel {
             );
             if resp.changed() {
                 settings.memory = mem;
+            }
+        }
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // Chat & Model Rules section: global operational rules and multi-model collaboration directives.
+        ui.label(egui::RichText::new("Chat & Model Rules").size(16.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Global operational guidelines and collaborative rules enforced across all models and chat sessions. Injected into every model's system prompt.")
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut settings.auto_assist_rules,
+                "Enable Intelligent Multi-Model Auto-Assist (Complementary Gap-Filling)",
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut settings.swarm_auto_assist,
+                "Enable Autonomous Swarm Handoff (Slot 1 completes -> Slot 2 automatically assists)",
+            );
+        });
+        ui.label(
+            egui::RichText::new("When enabled, models in multi-model chats inspect prior outputs, avoid duplicating identical code, and seamlessly hand off the task between slots.")
+                .size(11.0)
+                .color(egui::Color32::from_rgb(0x88, 0x88, 0x88)),
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Rule Presets:").size(12.0).color(egui::Color32::from_rgb(0xcc, 0xcc, 0xcc)));
+            ui.add_space(4.0);
+            if ui.small_button("🤝 Auto-Assist").on_hover_text("Add complementary collaboration rule").clicked() {
+                if !settings.chat_rules.contains("Complementary Cooperation") {
+                    if !settings.chat_rules.is_empty() && !settings.chat_rules.ends_with('\n') {
+                        settings.chat_rules.push('\n');
+                    }
+                    settings.chat_rules.push_str("• Complementary Cooperation: Never duplicate prior model output. Complete missing parts if partial; concur and provide enhancements if complete.\n");
+                }
+            }
+            if ui.small_button("⚡ No Placeholders").on_hover_text("Add production-grade code rule").clicked() {
+                if !settings.chat_rules.contains("Production-Grade") {
+                    if !settings.chat_rules.is_empty() && !settings.chat_rules.ends_with('\n') {
+                        settings.chat_rules.push('\n');
+                    }
+                    settings.chat_rules.push_str("• Production-Grade Code: Never output placeholders, ellipses (...), or 'rest of code here'. Output 100% complete, runnable code.\n");
+                }
+            }
+            if ui.small_button("🛡 Cyber Defense").on_hover_text("Add security-first rule").clicked() {
+                if !settings.chat_rules.contains("Security-First") {
+                    if !settings.chat_rules.is_empty() && !settings.chat_rules.ends_with('\n') {
+                        settings.chat_rules.push('\n');
+                    }
+                    settings.chat_rules.push_str("• Security-First Architecture: Prioritize input sanitization, memory safety, least privilege, and defensive validation.\n");
+                }
+            }
+            if ui.small_button("🔄 Reset Defaults").on_hover_text("Reset rules to turnkey default").clicked() {
+                settings.chat_rules = crate::storage::default_chat_rules();
+            }
+        });
+        ui.add_space(4.0);
+        {
+            let mut rules = settings.chat_rules.clone();
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut rules)
+                    .desired_rows(5)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Enter operational rules enforced on all chat models (e.g. 1. Never output placeholders. 2. Complement other models instead of repeating...)"),
+            );
+            if resp.changed() {
+                settings.chat_rules = rules;
             }
         }
         ui.add_space(12.0);

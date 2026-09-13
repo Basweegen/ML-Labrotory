@@ -10,6 +10,7 @@ pub mod commands;
 pub mod workspace;
 pub mod guardrails;
 pub mod tools;
+pub mod swarm;
 
 use eframe::egui;
 use ui::app::AiDashboardApp;
